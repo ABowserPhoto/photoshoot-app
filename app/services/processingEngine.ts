@@ -282,7 +282,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
   const supabase = createSupabase();
   const { taskRoot, localFolderName } = validateShootFolder(shootFolderPath);
   const selectsDir = path.join(taskRoot, "2_Selects");
-  const mergedDir = path.join(taskRoot, "3_Merged");
+  const mergedDir = path.join(taskRoot, "3. merge");
 
   const setStatus = async (status: string) => {
     if (!supabase) {
@@ -415,7 +415,6 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
       }
     }
 
-    await setStatus("Ready for Review");
     return { ok: true, mergedFiles: mergedOutputs.map((p) => path.basename(p)) };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Processing failed.";

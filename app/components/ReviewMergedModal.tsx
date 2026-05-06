@@ -14,7 +14,7 @@ type FileStatus = "idle" | "loading" | "ok" | "error";
 type FileAction = "sky" | "remove";
 
 function buildImageFilepath(localFolderName: string, filename: string): string {
-  return pathJoinWin(PHOTOS_ROOT, localFolderName, "3_Merged", filename);
+  return pathJoinWin(PHOTOS_ROOT, localFolderName, "3. merge", filename);
 }
 
 function pathJoinWin(...parts: string[]): string {
@@ -256,7 +256,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
         ) : loadError ? (
           <p className="text-sm text-red-600 dark:text-red-400">{loadError}</p>
         ) : files.length === 0 ? (
-          <p className="text-sm text-zinc-500">No images found in 3_Merged yet.</p>
+          <p className="text-sm text-zinc-500">No images found in 3. merge yet.</p>
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {files.map((filename) => {

@@ -48,7 +48,7 @@ function validateMergedFile(localFolderName: string, filename: string): string {
   if (safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder)) {
     throw new Error("Invalid local_folder_name.");
   }
-  const mergedPath = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFile);
+  const mergedPath = path.resolve(PHOTOS_ROOT, safeFolder, "3. merge", safeFile);
   const rootResolved = path.resolve(PHOTOS_ROOT);
   if (!mergedPath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
     throw new Error("Access denied.");

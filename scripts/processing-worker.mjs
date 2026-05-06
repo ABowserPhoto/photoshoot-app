@@ -35,11 +35,11 @@ const DEFAULT_PREVIEW_BRACKET_SIZE = 3;
 /**
  * Root for shoot folders.
  * We allow env configuration, but enforce that the effective root remains under D:\Photos_2026.
+ * COMFYUI_INPUT_DIR can live on another drive (e.g. F:) and must not affect shoot root resolution.
  */
 function getShootFoldersRoot() {
   const fromBaseDir = process.env.BASE_DIR?.trim();
-  const fromComfyInputDir = process.env.COMFYUI_INPUT_DIR?.trim();
-  const configuredRoot = fromBaseDir || fromComfyInputDir || DEFAULT_PHOTOS_ROOT;
+  const configuredRoot = fromBaseDir || DEFAULT_PHOTOS_ROOT;
 
   const defaultResolved = path.resolve(DEFAULT_PHOTOS_ROOT);
   const configuredResolved = path.resolve(configuredRoot);
@@ -48,7 +48,7 @@ function getShootFoldersRoot() {
 
   if (!isWithinDefaultRoot) {
     console.warn(
-      `[worker] Ignoring BASE_DIR/COMFYUI_INPUT_DIR="${configuredRoot}" because local task folders must stay under ${DEFAULT_PHOTOS_ROOT}.`
+      `[worker] Ignoring BASE_DIR="${configuredRoot}" because local task folders must stay under ${DEFAULT_PHOTOS_ROOT}.`
     );
     return DEFAULT_PHOTOS_ROOT;
   }
@@ -81,6 +81,7 @@ const PREVIEW_BRACKET_SIZE = readPositiveIntEnv("PREVIEW_BRACKET_SIZE", DEFAULT_
 const COVER_THUMB_WIDTH = readPositiveIntEnv("COVER_THUMB_WIDTH", 600);
 const WATERMARK_PATH = path.join(process.cwd(), "public", "watermark.png");
 const SUPABASE_PREVIEWS_BUCKET = process.env.SUPABASE_PREVIEWS_BUCKET?.trim() || "previews";
+const SUPABASE_FINALS_BUCKET = process.env.SUPABASE_FINALS_BUCKET?.trim() || "finals";
 
 const previewSyncTimers = new Map();
 let rawWatcherStarted = false;
@@ -667,6 +668,67 @@ async function finalizeTask(supabase, taskId, status) {
   }
 }
 
+async function uploadFileToBucket(supabase, bucket, storagePath, filePath) {
+  const buffer = await fs.promises.readFile(filePath);
+  const { error } = await supabase.storage.from(bucket).upload(storagePath, buffer, {
+    upsert: true,
+    contentType: "image/jpeg",
+    cacheControl: "3600",
+  });
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+async function waitForComfyOutputs(taskRoot, expectedSqiCount, timeoutMs = 12 * 60 * 1000) {
+  if (expectedSqiCount <= 0) {
+    return;
+  }
+  const finalDir = path.join(taskRoot, "4_Final");
+  fs.mkdirSync(finalDir, { recursive: true });
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const entries = await fs.promises.readdir(finalDir, { withFileTypes: true }).catch(() => []);
+    const aiFiles = entries
+      .filter((entry) => entry.isFile() && /\.(jpe?g|png|tiff?|webp|bmp|gif)$/i.test(entry.name))
+      .length;
+    if (aiFiles >= expectedSqiCount) {
+      return;
+    }
+    await sleep(1500);
+  }
+  throw new Error(`Timed out waiting for ${expectedSqiCount} ComfyUI output file(s) in 4_Final.`);
+}
+
+async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
+  const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
+  const mergedDir = path.join(taskRoot, "3. merge");
+  const finalDir = path.join(taskRoot, "4_Final");
+  const imageMatcher = /\.(jpe?g|png|tiff?|webp|bmp|gif)$/i;
+
+  const mergedFiles = readNaturallySortedImageFiles(mergedDir);
+  for (const fileName of mergedFiles) {
+    const localPath = path.join(mergedDir, fileName);
+    const storagePath = `${localFolderName}/3. merge/${fileName}`;
+    await withRetry(`upload merged ${storagePath}`, async () =>
+      uploadFileToBucket(supabase, SUPABASE_FINALS_BUCKET, storagePath, localPath)
+    );
+  }
+
+  const finalEntries = fs.existsSync(finalDir) ? await fs.promises.readdir(finalDir, { withFileTypes: true }) : [];
+  const finalFiles = finalEntries
+    .filter((entry) => entry.isFile() && imageMatcher.test(entry.name))
+    .map((entry) => entry.name)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  for (const fileName of finalFiles) {
+    const localPath = path.join(finalDir, fileName);
+    const storagePath = `${localFolderName}/4_Final/${fileName}`;
+    await withRetry(`upload final ${storagePath}`, async () =>
+      uploadFileToBucket(supabase, SUPABASE_FINALS_BUCKET, storagePath, localPath)
+    );
+  }
+}
+
 /**
  * Creates `1_Raw` … `4_Final` under D:\Photos_2026 (effective root), then sets status to Booking.
  */
@@ -696,7 +758,7 @@ async function processAwaitingFolderCreation(supabase) {
       const folderName = buildLocalFolderNameFromTask(row);
       const base = path.join(root, folderName);
 
-      for (const sub of ["1_Raw", "2_Selects", "3_Merged", "4_Final"]) {
+      for (const sub of ["1_Raw", "2_Selects", "3. merge", "4_Final"]) {
         fs.mkdirSync(path.join(base, sub), { recursive: true });
       }
 
@@ -754,6 +816,12 @@ async function processPendingProcessing(supabase) {
 
       console.info(`[worker] Processing task ${taskId}...`);
       await processTaskLocally({ id: taskId, local_folder_name: localFolderName });
+      const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
+      const mergedDir = path.join(taskRoot, "3. merge");
+      const mergedFiles = readNaturallySortedImageFiles(mergedDir);
+      const sqiMergedCount = mergedFiles.filter((name) => name.toLowerCase().includes("_sqi")).length;
+      await waitForComfyOutputs(taskRoot, sqiMergedCount);
+      await uploadMergedAndFinalsForReview(supabase, localFolderName);
       await finalizeTask(supabase, taskId, READY_FOR_REVIEW_STATUS);
       console.info(`[worker] Task ${taskId} marked as ${READY_FOR_REVIEW_STATUS}.`);
     } catch (err) {
