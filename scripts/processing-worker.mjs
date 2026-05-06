@@ -18,13 +18,30 @@ const ACTIVE_STATUS = "Processing";
 const DONE_STATUS = "Completed";
 const ERROR_STATUS = "Selection Available";
 
-/** Root for shoot folders; prefer COMFYUI_INPUT_DIR from local `.env.local`. */
+const DEFAULT_PHOTOS_ROOT = "D:\\Photos_2026";
+
+/**
+ * Root for shoot folders.
+ * We allow env configuration, but enforce that the effective root remains under D:\Photos_2026.
+ */
 function getShootFoldersRoot() {
-  const fromEnv = process.env.COMFYUI_INPUT_DIR?.trim();
-  if (fromEnv) {
-    return fromEnv;
+  const fromBaseDir = process.env.BASE_DIR?.trim();
+  const fromComfyInputDir = process.env.COMFYUI_INPUT_DIR?.trim();
+  const configuredRoot = fromBaseDir || fromComfyInputDir || DEFAULT_PHOTOS_ROOT;
+
+  const defaultResolved = path.resolve(DEFAULT_PHOTOS_ROOT);
+  const configuredResolved = path.resolve(configuredRoot);
+  const rel = path.relative(defaultResolved, configuredResolved);
+  const isWithinDefaultRoot = rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+
+  if (!isWithinDefaultRoot) {
+    console.warn(
+      `[worker] Ignoring BASE_DIR/COMFYUI_INPUT_DIR="${configuredRoot}" because local task folders must stay under ${DEFAULT_PHOTOS_ROOT}.`
+    );
+    return DEFAULT_PHOTOS_ROOT;
   }
-  return "D:\\Photos_2026";
+
+  return configuredResolved;
 }
 
 function requiredEnv(name) {
@@ -96,7 +113,7 @@ async function finalizeTask(supabase, taskId, status) {
 }
 
 /**
- * Creates `1_Raw` … `4_Final` under COMFYUI_INPUT_DIR (or fallback), then sets status to Booking.
+ * Creates `1_Raw` … `4_Final` under D:\Photos_2026 (effective root), then sets status to Booking.
  */
 async function processAwaitingFolderCreation(supabase) {
   const { data, error } = await supabase

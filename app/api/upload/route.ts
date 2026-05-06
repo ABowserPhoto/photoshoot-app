@@ -2,9 +2,9 @@ import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
+import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 export const runtime = "nodejs";
-const LOCAL_PHOTOS_ROOT = "D:\\Photos_2026";
 
 type UploadTaskData = {
   id?: string | number;
@@ -118,7 +118,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const localFinalDirectory = path.join(LOCAL_PHOTOS_ROOT, localFolderName, "4_Final");
+    const localFinalDirectory = path.join(PHOTOS_ROOT, localFolderName, "4_Final");
     fs.mkdirSync(localFinalDirectory, { recursive: true });
 
     for (const file of files) {
