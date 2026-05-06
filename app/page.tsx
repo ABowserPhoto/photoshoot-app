@@ -160,7 +160,6 @@ export default function Home() {
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [folderCreationNotice, setFolderCreationNotice] = useState<string | null>(null);
   const [clients, setClients] = useState<Client[]>([]);
   const [serviceCatalog, setServiceCatalog] = useState<CatalogItem[]>([]);
   const [productCatalog, setProductCatalog] = useState<CatalogItem[]>([]);
@@ -491,42 +490,6 @@ export default function Home() {
     setShowCatalogModal(false);
   };
 
-  const createFoldersForTask = async (params: {
-    taskId: string;
-    title: string;
-    address: string;
-    date: string;
-    clientName: string;
-  }) => {
-    try {
-      const folderResponse = await fetch("/api/create-folders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          task_id: params.taskId,
-          title: params.title,
-          address: params.address,
-          date: params.date,
-          client_name: params.clientName,
-        }),
-      });
-
-      if (!folderResponse.ok) {
-        const folderPayload = (await folderResponse.json().catch(() => null)) as { error?: string } | null;
-        const msg =
-          folderPayload?.error ??
-          `Local folders could not be created (HTTP ${folderResponse.status}). Your booking was saved.`;
-        console.error("[create-folders]", msg);
-        setFolderCreationNotice(msg);
-      }
-    } catch (err) {
-      console.error("[create-folders] Request failed:", err);
-      setFolderCreationNotice(
-        "Your booking was saved, but creating local folders failed (network error). Check the console or try again later."
-      );
-    }
-  };
-
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFormError(null);
@@ -569,6 +532,7 @@ export default function Home() {
           preservedTaskTitle.trim() ||
           `${photoshootType} - ${companyName.trim() || [contactFirstName, contactLastName].filter(Boolean).join(" ").trim() || "Client"}. - ${shootLocation}`,
         status: {
+          "awaiting-folders": "awaiting_folder_creation",
           booking: "Booking",
           "preview-sent": "Preview Sent",
           "selection-available": "Selection Available",
@@ -660,6 +624,7 @@ export default function Home() {
       due_date: dueDate || null,
       status: editingTaskId
         ? {
+            "awaiting-folders": "awaiting_folder_creation",
             booking: "Booking",
             "preview-sent": "Preview Sent",
             "selection-available": "Selection Available",
@@ -668,7 +633,7 @@ export default function Home() {
             "send-email": "Send Email",
             completed: "Completed",
           }[currentTaskStatus]
-        : "Booking",
+        : "awaiting_folder_creation",
       title: generatedTitle,
       client: displayClientLabel,
     };
@@ -682,26 +647,18 @@ export default function Home() {
         return;
       }
     } else {
-      const { data: inserted, error } = await supabase
-        .from("tasks")
-        .insert({ ...payload, bracket_size: 3 })
-        .select("id")
-        .single();
+      const createResponse = await fetch("/api/tasks/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ ...payload, bracket_size: 3 }),
+      });
       setIsSubmitting(false);
 
-      if (error) {
-        setFormError(error.message);
+      const createBody = (await createResponse.json().catch(() => null)) as { error?: string; id?: string } | null;
+      if (!createResponse.ok) {
+        setFormError(createBody?.error ?? `Could not create booking (HTTP ${createResponse.status}).`);
         return;
-      }
-
-      if (inserted?.id != null) {
-        await createFoldersForTask({
-          taskId: String(inserted.id),
-          title: generatedTitle,
-          address: shootLocation,
-          date: photoshootDate,
-          clientName: displayClientLabel,
-        });
       }
     }
 
@@ -813,25 +770,6 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-zinc-50 px-4 py-8 font-sans dark:bg-black sm:px-6 lg:px-8">
       <main className="mx-auto w-full max-w-[1800px]">
-        {folderCreationNotice ? (
-          <div
-            role="status"
-            className="mb-4 flex items-start justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100"
-          >
-            <p className="min-w-0 flex-1 leading-snug">
-              <span className="font-semibold">Folders not created. </span>
-              {folderCreationNotice}
-            </p>
-            <button
-              type="button"
-              onClick={() => setFolderCreationNotice(null)}
-              className="shrink-0 rounded px-2 py-0.5 text-amber-900 hover:bg-amber-100 dark:text-amber-50 dark:hover:bg-amber-900/50"
-              aria-label="Dismiss notice"
-            >
-              Dismiss
-            </button>
-          </div>
-        ) : null}
         <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-start gap-3">
             <Image

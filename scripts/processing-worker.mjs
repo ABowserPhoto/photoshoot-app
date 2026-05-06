@@ -1,14 +1,31 @@
+import fs from "node:fs";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 
+import { buildLocalFolderNameFromTask } from "./localFolderName.mjs";
+
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
 
-const POLL_INTERVAL_MS = 5 * 60 * 1000;
+const FOLDER_POLL_INTERVAL_MS = 15 * 1000;
+const PROCESSING_POLL_INTERVAL_MS = 5 * 60 * 1000;
+
+const AWAITING_FOLDER_STATUS = "awaiting_folder_creation";
+const BOOKING_STATUS = "Booking";
+
 const CLAIM_STATUS = "pending_processing";
 const ACTIVE_STATUS = "Processing";
 const DONE_STATUS = "Completed";
 const ERROR_STATUS = "Selection Available";
+
+/** Root for shoot folders; prefer COMFYUI_INPUT_DIR from local `.env.local`. */
+function getShootFoldersRoot() {
+  const fromEnv = process.env.COMFYUI_INPUT_DIR?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  return "D:\\Photos_2026";
+}
 
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
@@ -78,8 +95,58 @@ async function finalizeTask(supabase, taskId, status) {
   }
 }
 
-async function runOnce() {
-  const supabase = getSupabaseClient();
+/**
+ * Creates `1_Raw` … `4_Final` under COMFYUI_INPUT_DIR (or fallback), then sets status to Booking.
+ */
+async function processAwaitingFolderCreation(supabase) {
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("id, title, company_name, shoot_location, photoshoot_date")
+    .eq("status", AWAITING_FOLDER_STATUS)
+    .order("id", { ascending: true })
+    .limit(20);
+
+  if (error) {
+    throw new Error(`Folder queue poll failed: ${error.message}`);
+  }
+
+  const queue = data ?? [];
+  if (queue.length === 0) {
+    return;
+  }
+
+  console.info(`[worker] Found ${queue.length} task(s) awaiting local folder creation.`);
+  const root = getShootFoldersRoot();
+
+  for (const row of queue) {
+    const taskId = String(row.id);
+    try {
+      const folderName = buildLocalFolderNameFromTask(row);
+      const base = path.join(root, folderName);
+
+      for (const sub of ["1_Raw", "2_Selects", "3_Merged", "4_Final"]) {
+        fs.mkdirSync(path.join(base, sub), { recursive: true });
+      }
+
+      const { error: updateError } = await supabase
+        .from("tasks")
+        .update({ local_folder_name: folderName, status: BOOKING_STATUS })
+        .eq("id", taskId)
+        .eq("status", AWAITING_FOLDER_STATUS);
+
+      if (updateError) {
+        console.error(`[worker] Could not save folder name for task ${taskId}:`, updateError.message);
+        continue;
+      }
+
+      console.info(`[worker] Created shoot folders for task ${taskId} under ${base}`);
+    } catch (err) {
+      console.error(`[worker] Folder creation failed for task ${taskId}:`, err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+async function processPendingProcessing(supabase) {
   const { data, error } = await supabase
     .from("tasks")
     .select("id, local_folder_name, status")
@@ -133,15 +200,27 @@ async function runOnce() {
 
 async function main() {
   console.info("[worker] Starting processing worker...");
-  await runOnce().catch((err) => {
-    console.error("[worker] Initial run failed:", err instanceof Error ? err.message : err);
+  console.info(`[worker] Shoot folders root: ${getShootFoldersRoot()}`);
+
+  await processAwaitingFolderCreation(getSupabaseClient()).catch((err) => {
+    console.error("[worker] Initial folder run failed:", err instanceof Error ? err.message : err);
   });
 
   setInterval(() => {
-    void runOnce().catch((err) => {
-      console.error("[worker] Poll failed:", err instanceof Error ? err.message : err);
+    void processAwaitingFolderCreation(getSupabaseClient()).catch((err) => {
+      console.error("[worker] Folder poll failed:", err instanceof Error ? err.message : err);
     });
-  }, POLL_INTERVAL_MS);
+  }, FOLDER_POLL_INTERVAL_MS);
+
+  await processPendingProcessing(getSupabaseClient()).catch((err) => {
+    console.error("[worker] Initial processing run failed:", err instanceof Error ? err.message : err);
+  });
+
+  setInterval(() => {
+    void processPendingProcessing(getSupabaseClient()).catch((err) => {
+      console.error("[worker] Processing poll failed:", err instanceof Error ? err.message : err);
+    });
+  }, PROCESSING_POLL_INTERVAL_MS);
 }
 
 void main();

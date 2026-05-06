@@ -8,6 +8,7 @@ import MergePromptModal from "./MergePromptModal";
 import ReviewMergedModal from "./ReviewMergedModal";
 
 type ColumnKey =
+  | "awaiting-folders"
   | "booking"
   | "preview-sent"
   | "selection-available"
@@ -52,6 +53,7 @@ type BoardState = Record<ColumnKey, BoardTask[]>;
 type RawThumbnailMap = Record<string, string | null>;
 
 const COLUMN_CONFIG: { id: ColumnKey; title: string }[] = [
+  { id: "awaiting-folders", title: "Awaiting folders" },
   { id: "booking", title: "Booking" },
   { id: "preview-sent", title: "Preview Sent" },
   { id: "selection-available", title: "Selection Available" },
@@ -62,6 +64,7 @@ const COLUMN_CONFIG: { id: ColumnKey; title: string }[] = [
 ];
 
 const INITIAL_BOARD: BoardState = {
+  "awaiting-folders": [],
   booking: [],
   "preview-sent": [],
   "selection-available": [],
@@ -165,6 +168,7 @@ type DbTask = {
 };
 
 const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
+  "awaiting-folders": "awaiting_folder_creation",
   booking: "Booking",
   "preview-sent": "Preview Sent",
   "selection-available": "Selection Available",
@@ -176,6 +180,7 @@ const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
 
 function createEmptyBoard(): BoardState {
   return {
+    "awaiting-folders": [],
     booking: [],
     "preview-sent": [],
     "selection-available": [],
@@ -192,6 +197,9 @@ function normalizeStatus(value: string | null): ColumnKey {
   }
 
   const normalized = value.trim().toLowerCase().replace(/\s+/g, "-");
+  if (normalized === "awaiting-folder-creation" || normalized === "awaiting_folder_creation") {
+    return "awaiting-folders";
+  }
   if (normalized === "invoice" || normalized === "email-sent" || normalized === "send-email") {
     return "send-email";
   }
@@ -591,7 +599,7 @@ export default function KanbanBoard({
 
       if (!task.localFolderName.trim()) {
         throw new Error(
-          "No local photo folder is set for this task. Save the booking so folders can be created."
+          "No local photo folder is set for this task. Ensure the PC worker has created folders (task should leave “Awaiting folders”), or set local_folder_name."
         );
       }
 

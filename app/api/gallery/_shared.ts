@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
 
+import { buildLocalFolderNameFromTask } from "@/lib/localFolderName";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 export const DEFAULT_BRACKET_SIZE = 3;
@@ -68,41 +69,6 @@ export function chunkFiles(files: string[], bracketSize: number): string[][] {
     }
   }
   return chunks;
-}
-
-function sanitizeWindowsFolderName(name: string): string {
-  return name
-    .replace(/[<>:"/\\|?*]/g, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[.\s]+$/g, "");
-}
-
-function formatCalendarDateForFolder(isoDate: string | null): string {
-  if (!isoDate || !isoDate.trim()) return "";
-  const d = isoDate.trim().slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : sanitizeWindowsFolderName(isoDate.trim());
-}
-
-function buildLocalFolderNameFromTask(row: {
-  title: string | null;
-  company_name: string | null;
-  shoot_location: string | null;
-  photoshoot_date: string | null;
-}): string {
-  const titlePart = (row.title?.trim() || row.company_name?.trim() || "Photoshoot").trim();
-  const addressPart = row.shoot_location?.trim() || "";
-  const datePart = formatCalendarDateForFolder(row.photoshoot_date);
-
-  const raw = addressPart && datePart
-    ? `${titlePart} - ${addressPart} - ${datePart}`
-    : datePart
-      ? `${titlePart} - ${datePart}`
-      : addressPart
-        ? `${titlePart} - ${addressPart}`
-        : titlePart;
-
-  return sanitizeWindowsFolderName(raw);
 }
 
 export async function resolveLocalFolderName(params: {
