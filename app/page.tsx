@@ -160,6 +160,7 @@ export default function Home() {
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [formSuccess, setFormSuccess] = useState<string | null>(null);
   const [clients, setClients] = useState<Client[]>([]);
   const [serviceCatalog, setServiceCatalog] = useState<CatalogItem[]>([]);
   const [productCatalog, setProductCatalog] = useState<CatalogItem[]>([]);
@@ -493,6 +494,7 @@ export default function Home() {
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFormError(null);
+    setFormSuccess(null);
 
     if (authRoleLoading) {
       return;
@@ -677,6 +679,10 @@ export default function Home() {
       }
     }
 
+    if (!editingTaskId) {
+      setFormSuccess("Booking Created Successfully");
+    }
+
     closeModal();
     setRefreshSignal((prev) => prev + 1);
     await loadReferenceData();
@@ -803,6 +809,7 @@ export default function Home() {
                 onClick={() => {
                   setShowBookingModal(true);
                   setFormError(null);
+                  setFormSuccess(null);
                   void loadReferenceData();
                 }}
                 className="inline-flex h-11 items-center justify-center rounded-lg bg-zinc-900 px-5 text-sm font-semibold text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
@@ -812,6 +819,12 @@ export default function Home() {
             ) : null}
           </div>
         </div>
+
+        {formSuccess ? (
+          <p className="mb-4 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">
+            {formSuccess}
+          </p>
+        ) : null}
 
         <KanbanBoard
           refreshSignal={refreshSignal}
