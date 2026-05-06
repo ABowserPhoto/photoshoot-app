@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Force component-level dark styling regardless of OS theme preference */
+@layer utilities {
+  .bg-white {
+    background-color: #09090b !important;
+  }
+
+  .bg-zinc-50 {
+    background-color: #18181b !important;
+  }
+
+  .bg-zinc-100 {
+    background-color: #27272a !important;
+  }
+
+  .text-zinc-900 {
+    color: #f4f4f5 !important;
+  }
+
+  .text-zinc-800 {
+    color: #e4e4e7 !important;
+  }
+
+  .text-zinc-700 {
+    color: #d4d4d8 !important;
+  }
+
+  .text-zinc-600 {
+    color: #a1a1aa !important;
+  }
+
+  .text-zinc-500 {
+    color: #a1a1aa !important;
+  }
+
+  .border-zinc-300 {
+    border-color: #3f3f46 !important;
+  }
+
+  .border-zinc-200 {
+    border-color: #3f3f46 !important;
+  }
+
+  .hover\:bg-zinc-100:hover {
+    background-color: #27272a !important;
+  }
+}
