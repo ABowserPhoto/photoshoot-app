@@ -50,6 +50,34 @@ type CatalogOption = SelectOption & {
   lexoffice_id: string | null;
 };
 
+/** Fields sent to Supabase `tasks` insert/update (matches DB column names). */
+type TaskSupabasePayload = {
+  company_name: string;
+  contact_first_name: string;
+  contact_last_name: string;
+  street: string;
+  zip_code: string;
+  city: string;
+  lexoffice_contact_id: string | null;
+  country: string;
+  email: string;
+  phone: string;
+  services: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
+  products: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
+  services_lexoffice_id: string[];
+  products_lexoffice_id: string[];
+  tax_percentage: number;
+  amount_type: AmountType;
+  discount: number;
+  photoshoot_type: PhotoshootType;
+  shoot_location: string;
+  photoshoot_date: string;
+  due_date: string | null;
+  status: string;
+  title: string;
+  client: string;
+};
+
 const selectStyles = {
   control: (base: Record<string, unknown>, state: { isFocused: boolean }) => ({
     ...base,
@@ -209,8 +237,13 @@ export default function Home() {
   }));
   const initialClientsLoad = useRef<Promise<void> | null>(null);
 
+  const taskClientDisplayLabel = (task: BoardTask) =>
+    task.companyName.trim() ||
+    [task.contactFirstName, task.contactLastName].filter(Boolean).join(" ").trim() ||
+    "";
+
   const getTaskTitle = (task: BoardTask) =>
-    [task.photoshootType, task.companyName, task.shootLocation].filter(Boolean).join(" - ") || "Untitled";
+    [task.photoshootType, taskClientDisplayLabel(task), task.shootLocation].filter(Boolean).join(" - ") || "Untitled";
 
   const calculateTaskPrice = (task: BoardTask) => {
     const serviceTotal = task.services.reduce((sum, row) => sum + row.quantity * row.price, 0);
@@ -378,8 +411,6 @@ export default function Home() {
     setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
-  const contactName = [contactFirstName, contactLastName].filter(Boolean).join(" ").trim();
-
   const handleClientSelect = (clientId: string) => {
     setSelectedClientId(clientId);
     if (!clientId) {
@@ -521,8 +552,8 @@ export default function Home() {
       return;
     }
 
-    if (isAdmin && !companyName.trim()) {
-      setFormError("Company Name is required.");
+    if (isAdmin && (!contactFirstName.trim() || !contactLastName.trim())) {
+      setFormError("Contact first name and last name are required.");
       return;
     }
 
@@ -536,7 +567,7 @@ export default function Home() {
         due_date: dueDate || null,
         title:
           preservedTaskTitle.trim() ||
-          `${photoshootType} - ${companyName.trim() || "Client"}. - ${shootLocation}`,
+          `${photoshootType} - ${companyName.trim() || [contactFirstName, contactLastName].filter(Boolean).join(" ").trim() || "Client"}. - ${shootLocation}`,
         status: {
           booking: "Booking",
           "preview-sent": "Preview Sent",
@@ -583,11 +614,15 @@ export default function Home() {
       }));
     const servicesLexofficeIds = selectedServices.map((service) => service.lexoffice_id ?? "");
     const productsLexofficeIds = selectedProducts.map((product) => product.lexoffice_id ?? "");
-    const generatedTitle = `${photoshootType} - ${companyName}. - ${shootLocation}`;
+    const displayClientLabel =
+      companyName.trim() ||
+      [contactFirstName, contactLastName].filter(Boolean).join(" ").trim() ||
+      "Client";
+    const generatedTitle = `${photoshootType} - ${displayClientLabel}. - ${shootLocation}`;
 
     if (isAdmin && saveAsNewClient && !editingTaskId) {
       const { error: clientError } = await supabase.from("clients").insert({
-        company_name: companyName,
+        company_name: companyName.trim(),
         street,
         zip_code: zipCode,
         city,
@@ -601,10 +636,10 @@ export default function Home() {
       }
     }
 
-    const payload = {
-      company_name: companyName,
-      contact_first_name: contactFirstName,
-      contact_last_name: contactLastName,
+    const payload: TaskSupabasePayload = {
+      company_name: companyName.trim(),
+      contact_first_name: contactFirstName.trim(),
+      contact_last_name: contactLastName.trim(),
       street,
       zip_code: zipCode,
       city,
@@ -635,7 +670,7 @@ export default function Home() {
           }[currentTaskStatus]
         : "Booking",
       title: generatedTitle,
-      client: companyName,
+      client: displayClientLabel,
     };
 
     if (editingTaskId) {
@@ -665,14 +700,14 @@ export default function Home() {
           title: generatedTitle,
           address: shootLocation,
           date: photoshootDate,
-          clientName: companyName,
+          clientName: displayClientLabel,
         });
       }
     }
 
     if (isAdmin && editingTaskId && saveToClientAddressBook) {
       const { error: clientInsertError } = await supabase.from("clients").insert({
-        company_name: companyName,
+        company_name: companyName.trim(),
         street,
         zip_code: zipCode,
         city,
@@ -901,31 +936,28 @@ export default function Home() {
                     ) : null}
                     <div className="grid gap-4 sm:grid-cols-2">
                       <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Client Name
+                        Contact First Name
                         <input
                           required
-                          value={companyName}
-                          onChange={(event) => setCompanyName(event.target.value)}
+                          value={contactFirstName}
+                          onChange={(event) => setContactFirstName(event.target.value)}
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
                       <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Company Name
+                        Contact Last Name
                         <input
-                          value={companyName}
-                          onChange={(event) => setCompanyName(event.target.value)}
+                          required
+                          value={contactLastName}
+                          onChange={(event) => setContactLastName(event.target.value)}
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
                       <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Contact Name
+                        Company Name <span className="font-normal text-zinc-500">(optional)</span>
                         <input
-                          value={contactName}
-                          onChange={(event) => {
-                            const [first, ...rest] = event.target.value.trim().split(/\s+/);
-                            setContactFirstName(first ?? "");
-                            setContactLastName(rest.join(" "));
-                          }}
+                          value={companyName}
+                          onChange={(event) => setCompanyName(event.target.value)}
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
@@ -1013,6 +1045,14 @@ export default function Home() {
                         <input
                           value={city}
                           onChange={(event) => setCity(event.target.value)}
+                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        />
+                      </label>
+                      <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Lexoffice Contact ID
+                        <input
+                          value={lexofficeContactId}
+                          onChange={(event) => setLexofficeContactId(event.target.value)}
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
@@ -1249,14 +1289,6 @@ export default function Home() {
                         type="date"
                         value={dueDate}
                         onChange={(event) => setDueDate(event.target.value)}
-                        className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                      />
-                    </label>
-                    <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                      Lexoffice Contact ID
-                      <input
-                        value={lexofficeContactId}
-                        onChange={(event) => setLexofficeContactId(event.target.value)}
                         className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                       />
                     </label>
