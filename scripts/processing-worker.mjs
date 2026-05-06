@@ -1,24 +1,36 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
+import chokidar from "chokidar";
+import sharp from "sharp";
 
 import { buildLocalFolderNameFromTask } from "./localFolderName.mjs";
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
+const execFileAsync = promisify(execFile);
 
 const FOLDER_POLL_INTERVAL_MS = 15 * 1000;
 const PROCESSING_POLL_INTERVAL_MS = 5 * 60 * 1000;
 
 const AWAITING_FOLDER_STATUS = "awaiting_folder_creation";
 const BOOKING_STATUS = "Booking";
+const SELECTION_AVAILABLE_STATUS = "Selection Available";
+const SELECTION_SYNCING_STATUS = "syncing_selection";
 
 const CLAIM_STATUS = "pending_processing";
 const ACTIVE_STATUS = "Processing";
 const DONE_STATUS = "Completed";
 const ERROR_STATUS = "Selection Available";
+const PREVIEW_DEBOUNCE_MS = 1500;
+const PREVIEW_WIDTH = 1080;
+const PREVIEW_QUALITY = 45;
 
 const DEFAULT_PHOTOS_ROOT = "D:\\Photos_2026";
+const DEFAULT_PREVIEW_BRACKET_SIZE = 3;
 
 /**
  * Root for shoot folders.
@@ -52,6 +64,64 @@ function requiredEnv(name) {
   return value;
 }
 
+function readPositiveIntEnv(name, fallback) {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const RETRY_ATTEMPTS = readPositiveIntEnv("WORKER_RETRY_ATTEMPTS", 3);
+const RETRY_BASE_MS = readPositiveIntEnv("WORKER_RETRY_BASE_MS", 500);
+const PREVIEW_RETRY_ATTEMPTS = readPositiveIntEnv("PREVIEW_RETRY_ATTEMPTS", 3);
+const PREVIEW_RETRY_BASE_MS = readPositiveIntEnv("PREVIEW_RETRY_BASE_MS", 500);
+const PREVIEW_BRACKET_SIZE = readPositiveIntEnv("PREVIEW_BRACKET_SIZE", DEFAULT_PREVIEW_BRACKET_SIZE);
+const WATERMARK_PATH = path.join(process.cwd(), "public", "watermark.png");
+const SUPABASE_PREVIEWS_BUCKET = process.env.SUPABASE_PREVIEWS_BUCKET?.trim() || "previews";
+
+const previewSyncTimers = new Map();
+let rawWatcherStarted = false;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetry(label, fn, attempts = RETRY_ATTEMPTS) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        const waitMs = RETRY_BASE_MS * 2 ** (attempt - 1);
+        console.warn(`[worker] ${label} failed (attempt ${attempt}/${attempts}). Retrying in ${waitMs}ms.`);
+        await sleep(waitMs);
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`${label} failed after ${attempts} attempts.`);
+}
+
+async function withPreviewRetry(label, fn, attempts = PREVIEW_RETRY_ATTEMPTS) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        const waitMs = PREVIEW_RETRY_BASE_MS * 2 ** (attempt - 1);
+        console.warn(`[worker] ${label} failed (attempt ${attempt}/${attempts}). Retrying in ${waitMs}ms.`);
+        await sleep(waitMs);
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`${label} failed after ${attempts} attempts.`);
+}
+
 function getSupabaseClient() {
   const url = requiredEnv("NEXT_PUBLIC_SUPABASE_URL");
   const key =
@@ -66,18 +136,416 @@ function getSupabaseClient() {
 }
 
 async function claimTask(supabase, taskId) {
-  const { data, error } = await supabase
-    .from("tasks")
-    .update({ status: ACTIVE_STATUS })
-    .eq("id", taskId)
-    .eq("status", CLAIM_STATUS)
-    .select("id")
-    .limit(1);
+  return claimTaskForStatus(supabase, taskId, CLAIM_STATUS, ACTIVE_STATUS);
+}
+
+async function claimTaskForStatus(supabase, taskId, fromStatus, toStatus) {
+  const { data, error } = await withRetry(
+    `claim task ${taskId} (${fromStatus} -> ${toStatus})`,
+    async () =>
+      supabase
+        .from("tasks")
+        .update({ status: toStatus })
+        .eq("id", taskId)
+        .eq("status", fromStatus)
+        .select("id")
+        .limit(1)
+  );
 
   if (error) {
     throw new Error(`Failed to claim task ${taskId}: ${error.message}`);
   }
   return (data ?? []).length > 0;
+}
+
+function isImageFile(fileName) {
+  return [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp", ".gif", ".heic", ".heif", ".nef"].includes(
+    path.extname(fileName).toLowerCase()
+  );
+}
+
+function safePreviewStem(localFolderName, middleFilename, chunkIndex) {
+  const stem = `${localFolderName}_${chunkIndex}_${path.basename(middleFilename, path.extname(middleFilename))}`;
+  return stem.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function readNaturallySortedImageFiles(dir) {
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && isImageFile(entry.name))
+    .map((entry) => entry.name)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function chunkFiles(files, bracketSize) {
+  const chunks = [];
+  for (let i = 0; i < files.length; i += bracketSize) {
+    const chunk = files.slice(i, i + bracketSize);
+    if (chunk.length === bracketSize) {
+      chunks.push(chunk);
+    }
+  }
+  return chunks;
+}
+
+function parseSelectionPayload(raw) {
+  const payload = raw && typeof raw === "object" ? raw : {};
+  const selectedChunkIndices = Array.from(
+    new Set(
+      (Array.isArray(payload.selected_chunk_indices) ? payload.selected_chunk_indices : [])
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 0)
+    )
+  ).sort((a, b) => a - b);
+  const bracketSize = Number.isInteger(Number(payload.bracket_size))
+    ? Math.max(1, Math.min(15, Number(payload.bracket_size)))
+    : 3;
+  return { selectedChunkIndices, bracketSize };
+}
+
+function parsePreviewItems(raw) {
+  const items = Array.isArray(raw?.items) ? raw.items : [];
+  return items
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const chunkIndex = Number(item.chunkIndex);
+      const middleFilename = typeof item.middleFilename === "string" ? item.middleFilename : "";
+      const previewUrl = typeof item.previewUrl === "string" ? item.previewUrl : "";
+      const storagePath = typeof item.storagePath === "string" ? item.storagePath : "";
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !middleFilename || !previewUrl || !storagePath) {
+        return null;
+      }
+      return { chunkIndex, middleFilename, previewUrl, storagePath };
+    })
+    .filter(Boolean);
+}
+
+async function buildPreviewBuffer(sourcePath) {
+  if (!fs.existsSync(WATERMARK_PATH)) {
+    throw new Error(`Watermark file not found at "${WATERMARK_PATH}".`);
+  }
+
+  const resizedBuffer = await sharp(sourcePath)
+    .resize({ width: PREVIEW_WIDTH, fit: "inside", withoutEnlargement: true })
+    .toBuffer();
+  const metadata = await sharp(resizedBuffer).metadata();
+  if (!metadata.width || !metadata.height) {
+    throw new Error(`Could not read resized image dimensions for "${sourcePath}".`);
+  }
+
+  const watermarkBuffer = await sharp(WATERMARK_PATH, { failOn: "none" })
+    .resize({
+      width: metadata.width,
+      height: metadata.height,
+      fit: "fill",
+    })
+    .ensureAlpha(0.2)
+    .png()
+    .toBuffer();
+
+  const watermarked = await sharp(resizedBuffer)
+    .composite([{ input: watermarkBuffer, blend: "soft-light" }])
+    .jpeg({ quality: PREVIEW_QUALITY, mozjpeg: true, chromaSubsampling: "4:2:0" })
+    .toBuffer();
+
+  const tmpBase = path.join(os.tmpdir(), `preview-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const tempInput = `${tmpBase}-in.jpg`;
+  const tempOutput = `${tmpBase}-out.jpg`;
+  try {
+    await fs.promises.writeFile(tempInput, watermarked);
+    await execFileAsync(
+      "magick",
+      [
+        tempInput,
+        "-auto-level",
+        "-modulate",
+        "102,112,100",
+        "-contrast-stretch",
+        "0.3%x0.3%",
+        tempOutput,
+      ],
+      { windowsHide: true }
+    );
+    return await fs.promises.readFile(tempOutput);
+  } finally {
+    await fs.promises.unlink(tempInput).catch(() => {});
+    await fs.promises.unlink(tempOutput).catch(() => {});
+  }
+}
+
+async function uploadPreviewBuffer(supabase, params) {
+  const storagePath = `${params.localFolderName}/${safePreviewStem(
+    params.localFolderName,
+    params.middleFilename,
+    params.chunkIndex
+  )}.jpg`;
+  await withPreviewRetry(`upload preview ${storagePath}`, async () => {
+    const { error } = await supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).upload(storagePath, params.buffer, {
+      upsert: true,
+      contentType: "image/jpeg",
+      cacheControl: "3600",
+    });
+    if (error) {
+      throw new Error(error.message);
+    }
+  });
+  const { data } = supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).getPublicUrl(storagePath);
+  return { storagePath, previewUrl: data?.publicUrl ?? "" };
+}
+
+async function syncTaskPreviews(supabase, taskRow) {
+  const localFolderName = String(taskRow.local_folder_name ?? "").trim();
+  if (!localFolderName) {
+    return;
+  }
+
+  const base = path.join(getShootFoldersRoot(), localFolderName);
+  const rawDir = path.join(base, "1_Raw");
+  if (!fs.existsSync(rawDir)) {
+    return;
+  }
+
+  const bracketSizeFromSelection = Number(taskRow.gallery_selection?.bracket_size);
+  const bracketSize =
+    Number.isInteger(bracketSizeFromSelection) && bracketSizeFromSelection > 0
+      ? Math.min(15, bracketSizeFromSelection)
+      : PREVIEW_BRACKET_SIZE;
+  const sortedFiles = readNaturallySortedImageFiles(rawDir);
+  const chunks = chunkFiles(sortedFiles, bracketSize);
+  const existingItems = parsePreviewItems(taskRow.gallery_previews);
+  const existingByChunk = new Map(existingItems.map((item) => [item.chunkIndex, item]));
+  const nextItems = [];
+
+  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+    const chunk = chunks[chunkIndex];
+    const middleFilename = chunk[Math.floor(chunk.length / 2)];
+    const existing = existingByChunk.get(chunkIndex);
+    if (existing && existing.middleFilename === middleFilename && existing.previewUrl) {
+      nextItems.push(existing);
+      continue;
+    }
+
+    const sourcePath = path.join(rawDir, middleFilename);
+    const previewBuffer = await withPreviewRetry(`render preview ${localFolderName}/${middleFilename}`, async () =>
+      buildPreviewBuffer(sourcePath)
+    );
+    const uploaded = await uploadPreviewBuffer(supabase, {
+      localFolderName,
+      chunkIndex,
+      middleFilename,
+      buffer: previewBuffer,
+    });
+    nextItems.push({
+      chunkIndex,
+      middleFilename,
+      previewUrl: uploaded.previewUrl,
+      storagePath: uploaded.storagePath,
+    });
+  }
+
+  await withPreviewRetry(`persist gallery_previews for task ${taskRow.id}`, async () => {
+    const { error } = await supabase
+      .from("tasks")
+      .update({
+        gallery_previews: {
+          updated_at: new Date().toISOString(),
+          bracket_size: bracketSize,
+          items: nextItems,
+        },
+      })
+      .eq("id", taskRow.id);
+    if (error) {
+      throw new Error(error.message);
+    }
+  });
+}
+
+async function syncPreviewsForLocalFolder(localFolderName) {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("id, local_folder_name, gallery_selection, gallery_previews")
+    .eq("local_folder_name", localFolderName)
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    console.error(`[worker] Failed to find task for folder ${localFolderName}:`, error.message);
+    return;
+  }
+  if (!data) {
+    return;
+  }
+  await syncTaskPreviews(supabase, data);
+}
+
+async function processInitialPreviewSync(supabase) {
+  console.info("[worker] Starting initial full preview sync...");
+  let offset = 0;
+  const pageSize = 200;
+  let processed = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("tasks")
+      .select("id, local_folder_name, gallery_selection, gallery_previews")
+      .not("local_folder_name", "is", null)
+      .order("id", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) {
+      throw new Error(`Initial preview sync query failed: ${error.message}`);
+    }
+    const rows = data ?? [];
+    if (rows.length === 0) {
+      break;
+    }
+
+    for (const row of rows) {
+      const localFolderName = String(row.local_folder_name ?? "").trim();
+      if (!localFolderName) {
+        skipped += 1;
+        continue;
+      }
+      const rawDir = path.join(getShootFoldersRoot(), localFolderName, "1_Raw");
+      if (!fs.existsSync(rawDir)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        await syncTaskPreviews(supabase, row);
+        processed += 1;
+      } catch (error) {
+        failed += 1;
+        console.error(
+          `[worker] Initial preview sync failed for task ${row.id} (${localFolderName}):`,
+          error instanceof Error ? error.message : error
+        );
+      }
+    }
+
+    offset += rows.length;
+    if (rows.length < pageSize) {
+      break;
+    }
+  }
+
+  console.info(
+    `[worker] Initial full preview sync finished. processed=${processed}, skipped=${skipped}, failed=${failed}`
+  );
+}
+
+function localFolderNameFromRawPath(filePath) {
+  const root = getShootFoldersRoot();
+  const absolute = path.resolve(filePath);
+  const rawDir = path.dirname(absolute);
+  if (path.basename(rawDir) !== "1_Raw") {
+    return null;
+  }
+  const taskDir = path.dirname(rawDir);
+  const rel = path.relative(root, taskDir);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    return null;
+  }
+  return rel;
+}
+
+function schedulePreviewSync(localFolderName) {
+  const existing = previewSyncTimers.get(localFolderName);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  const timer = setTimeout(() => {
+    previewSyncTimers.delete(localFolderName);
+    void syncPreviewsForLocalFolder(localFolderName).catch((err) => {
+      console.error(
+        `[worker] Preview sync failed for ${localFolderName}:`,
+        err instanceof Error ? err.message : err
+      );
+    });
+  }, PREVIEW_DEBOUNCE_MS);
+  previewSyncTimers.set(localFolderName, timer);
+}
+
+function startRawFolderWatcher() {
+  if (rawWatcherStarted) {
+    return;
+  }
+  rawWatcherStarted = true;
+
+  const root = getShootFoldersRoot();
+  const watchPattern = path.join(root, "**", "1_Raw", "*");
+  const watcher = chokidar.watch(watchPattern, {
+    ignoreInitial: false,
+    awaitWriteFinish: {
+      stabilityThreshold: 1000,
+      pollInterval: 200,
+    },
+  });
+
+  watcher.on("all", (eventName, filePath) => {
+    if (!["add", "change", "unlink"].includes(eventName)) {
+      return;
+    }
+    const localFolderName = localFolderNameFromRawPath(filePath);
+    if (!localFolderName) {
+      return;
+    }
+    schedulePreviewSync(localFolderName);
+  });
+
+  watcher.on("error", (error) => {
+    console.error("[worker] chokidar watcher error:", error);
+  });
+
+  console.info(`[worker] Watching RAW folders: ${watchPattern}`);
+}
+
+function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) {
+  const { selectedChunkIndices, bracketSize } = parseSelectionPayload(gallerySelection);
+  if (selectedChunkIndices.length === 0) {
+    throw new Error("No selected_chunk_indices in gallery_selection.");
+  }
+
+  const base = path.join(getShootFoldersRoot(), localFolderName);
+  const rawDir = path.join(base, "1_Raw");
+  const selectsDir = path.join(base, "2_Selects");
+  fs.mkdirSync(selectsDir, { recursive: true });
+
+  const sortedFiles = readNaturallySortedImageFiles(rawDir);
+  const chunks = chunkFiles(sortedFiles, bracketSize);
+  const copiedFiles = [];
+
+  for (const chunkIndex of selectedChunkIndices) {
+    const chunk = chunks[chunkIndex];
+    if (!chunk) {
+      console.warn(`[worker] Selection chunk ${chunkIndex} not found for folder ${localFolderName}.`);
+      continue;
+    }
+    for (const fileName of chunk) {
+      const sourcePath = path.join(rawDir, fileName);
+      const targetPath = path.join(selectsDir, fileName);
+      if (!fs.existsSync(sourcePath)) {
+        console.warn(`[worker] Selected source file missing: ${sourcePath}`);
+        continue;
+      }
+      if (!fs.existsSync(targetPath)) {
+        fs.copyFileSync(sourcePath, targetPath);
+      }
+      copiedFiles.push(fileName);
+    }
+  }
+
+  if (copiedFiles.length === 0) {
+    throw new Error("No selected RAW files were copied to 2_Selects.");
+  }
+  return { copiedFiles, selectedChunkIndices, bracketSize };
 }
 
 async function processTaskLocally(task) {
@@ -215,9 +683,109 @@ async function processPendingProcessing(supabase) {
   }
 }
 
+async function processSelectionAvailable(supabase) {
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("id, local_folder_name, gallery_selection, status")
+    .eq("status", SELECTION_AVAILABLE_STATUS)
+    .order("id", { ascending: true })
+    .limit(20);
+
+  if (error) {
+    throw new Error(`Selection sync poll failed: ${error.message}`);
+  }
+
+  const queue = data ?? [];
+  if (queue.length === 0) {
+    console.info(`[worker] No ${SELECTION_AVAILABLE_STATUS} tasks found.`);
+    return;
+  }
+
+  console.info(`[worker] Found ${queue.length} task(s) waiting for selection sync.`);
+  for (const task of queue) {
+    const taskId = String(task.id);
+    const localFolderName = String(task.local_folder_name ?? "").trim();
+    if (!localFolderName) {
+      console.warn(`[worker] Skipping task ${taskId}: missing local_folder_name.`);
+      continue;
+    }
+
+    try {
+      const claimed = await claimTaskForStatus(
+        supabase,
+        taskId,
+        SELECTION_AVAILABLE_STATUS,
+        SELECTION_SYNCING_STATUS
+      );
+      if (!claimed) {
+        console.info(`[worker] Task ${taskId} selection sync already claimed by another worker.`);
+        continue;
+      }
+
+      const syncResult = syncSelectedRawFilesToSelects(localFolderName, task.gallery_selection);
+      await withRetry(`set pending_processing after selection sync for task ${taskId}`, async () => {
+        const { error: updateError } = await supabase
+          .from("tasks")
+          .update({
+            status: CLAIM_STATUS,
+            gallery_selection: {
+              ...(task.gallery_selection && typeof task.gallery_selection === "object"
+                ? task.gallery_selection
+                : {}),
+              synced_at: new Date().toISOString(),
+              synced_selected_files: syncResult.copiedFiles,
+            },
+          })
+          .eq("id", taskId);
+        if (updateError) {
+          throw new Error(updateError.message);
+        }
+      });
+
+      console.info(
+        `[worker] Synced ${syncResult.copiedFiles.length} selected RAW file(s) into 2_Selects for task ${taskId}.`
+      );
+    } catch (err) {
+      console.error(`[worker] Selection sync failed for task ${taskId}:`, err instanceof Error ? err.message : err);
+      try {
+        await withRetry(`restore Selection Available for task ${taskId}`, async () => {
+          const { error: rollbackError } = await supabase
+            .from("tasks")
+            .update({ status: SELECTION_AVAILABLE_STATUS })
+            .eq("id", taskId);
+          if (rollbackError) {
+            throw new Error(rollbackError.message);
+          }
+        });
+      } catch (rollbackErr) {
+        console.error(
+          `[worker] Could not restore ${SELECTION_AVAILABLE_STATUS} for ${taskId}:`,
+          rollbackErr instanceof Error ? rollbackErr.message : rollbackErr
+        );
+      }
+    }
+  }
+}
+
 async function main() {
   console.info("[worker] Starting processing worker...");
   console.info(`[worker] Shoot folders root: ${getShootFoldersRoot()}`);
+  console.info(
+    `[worker] Retry config: attempts=${RETRY_ATTEMPTS}, base_ms=${RETRY_BASE_MS}, processing_poll_ms=${PROCESSING_POLL_INTERVAL_MS}`
+  );
+  console.info(
+    `[worker] Retry env raw values: WORKER_RETRY_ATTEMPTS=${process.env.WORKER_RETRY_ATTEMPTS ?? "(unset)"}, WORKER_RETRY_BASE_MS=${process.env.WORKER_RETRY_BASE_MS ?? "(unset)"}`
+  );
+  console.info(
+    `[worker] Preview retry config: attempts=${PREVIEW_RETRY_ATTEMPTS}, base_ms=${PREVIEW_RETRY_BASE_MS}, bracket_size=${PREVIEW_BRACKET_SIZE}, bucket=${SUPABASE_PREVIEWS_BUCKET}`
+  );
+  console.info(
+    `[worker] Preview env raw values: PREVIEW_RETRY_ATTEMPTS=${process.env.PREVIEW_RETRY_ATTEMPTS ?? "(unset)"}, PREVIEW_RETRY_BASE_MS=${process.env.PREVIEW_RETRY_BASE_MS ?? "(unset)"}, PREVIEW_BRACKET_SIZE=${process.env.PREVIEW_BRACKET_SIZE ?? "(unset)"}, SUPABASE_PREVIEWS_BUCKET=${process.env.SUPABASE_PREVIEWS_BUCKET ?? "(unset)"}`
+  );
+  await processInitialPreviewSync(getSupabaseClient()).catch((err) => {
+    console.error("[worker] Initial full preview sync failed:", err instanceof Error ? err.message : err);
+  });
+  startRawFolderWatcher();
 
   await processAwaitingFolderCreation(getSupabaseClient()).catch((err) => {
     console.error("[worker] Initial folder run failed:", err instanceof Error ? err.message : err);
@@ -232,11 +800,16 @@ async function main() {
   await processPendingProcessing(getSupabaseClient()).catch((err) => {
     console.error("[worker] Initial processing run failed:", err instanceof Error ? err.message : err);
   });
+  await processSelectionAvailable(getSupabaseClient()).catch((err) => {
+    console.error("[worker] Initial selection sync run failed:", err instanceof Error ? err.message : err);
+  });
 
   setInterval(() => {
-    void processPendingProcessing(getSupabaseClient()).catch((err) => {
-      console.error("[worker] Processing poll failed:", err instanceof Error ? err.message : err);
-    });
+    void processSelectionAvailable(getSupabaseClient())
+      .then(() => processPendingProcessing(getSupabaseClient()))
+      .catch((err) => {
+        console.error("[worker] Processing poll failed:", err instanceof Error ? err.message : err);
+      });
   }, PROCESSING_POLL_INTERVAL_MS);
 }
 

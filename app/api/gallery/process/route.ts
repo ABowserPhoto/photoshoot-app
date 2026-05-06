@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
@@ -11,7 +9,6 @@ import {
   resolveLocalFolderName,
   resolveTaskDir,
 } from "@/app/api/gallery/_shared";
-import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,41 +44,10 @@ export async function POST(request: Request) {
     ).sort((a, b) => a - b);
 
     const rawDir = resolveTaskDir(localFolderName, "1_Raw");
-    const selectsDir = resolveTaskDir(localFolderName, "2_Selects");
-    fs.mkdirSync(selectsDir, { recursive: true });
-
     const sortedFiles = readNaturallySortedImageFiles(rawDir);
     const chunks = chunkFiles(sortedFiles, bracketSize);
-
-    const movedFiles: string[] = [];
-    const skippedIndices: number[] = [];
-    const moveErrors: Array<{ file: string; error: string }> = [];
-
-    for (const chunkIndex of selectedIndices) {
-      const chunk = chunks[chunkIndex];
-      if (!chunk) {
-        skippedIndices.push(chunkIndex);
-        continue;
-      }
-
-      for (const fileName of chunk) {
-        const fromPath = path.join(rawDir, fileName);
-        const toPath = path.join(selectsDir, fileName);
-
-        if (!fs.existsSync(fromPath)) {
-          moveErrors.push({ file: fileName, error: "Source file no longer exists." });
-          continue;
-        }
-
-        try {
-          fs.renameSync(fromPath, toPath);
-          movedFiles.push(fileName);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Move failed.";
-          moveErrors.push({ file: fileName, error: message });
-        }
-      }
-    }
+    const selectedFiles = selectedIndices.flatMap((chunkIndex) => chunks[chunkIndex] ?? []);
+    const skippedIndices = selectedIndices.filter((chunkIndex) => !chunks[chunkIndex]);
 
     const shootId = typeof body.shootId === "string" ? body.shootId.trim() : "";
     let taskStatusUpdated = false;
@@ -95,14 +61,15 @@ export async function POST(request: Request) {
         const supabase = createClient(supabaseUrl, supabaseAnonKey);
         const selectionPayload = {
           selected_chunk_indices: selectedIndices,
-          moved_files: movedFiles,
+          selected_files: selectedFiles,
           bracket_size: bracketSize,
+          local_folder_name: localFolderName,
           submitted_at: new Date().toISOString(),
         };
 
         const { error: statusError } = await supabase
           .from("tasks")
-          .update({ status: "pending_processing" })
+          .update({ status: "Selection Available" })
           .eq("id", shootId);
 
         if (statusError) {
@@ -133,17 +100,14 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
-      success: moveErrors.length === 0,
-      message:
-        moveErrors.length === 0
-          ? "Selected bracket groups moved from 1_Raw to 2_Selects."
-          : "Processing completed with some move errors.",
+      success: true,
+      message: "Selection saved. Local worker will sync selected RAW files into 2_Selects.",
       bracketSize,
       selectedChunkIndices: selectedIndices,
-      movedCount: movedFiles.length,
-      movedFiles,
+      selectedFilesCount: selectedFiles.length,
+      selectedFiles,
       skippedIndices,
-      errors: moveErrors,
+      errors: [],
       taskStatusUpdated,
       gallerySelectionSaved,
       dbWarning,
