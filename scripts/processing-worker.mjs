@@ -23,7 +23,7 @@ const SELECTION_SYNCING_STATUS = "syncing_selection";
 
 const CLAIM_STATUS = "pending_processing";
 const ACTIVE_STATUS = "Processing";
-const DONE_STATUS = "Completed";
+const READY_FOR_REVIEW_STATUS = "Ready for Review";
 const ERROR_STATUS = "Selection Available";
 const PREVIEW_DEBOUNCE_MS = 1500;
 const PREVIEW_WIDTH = 1080;
@@ -78,6 +78,7 @@ const RETRY_BASE_MS = readPositiveIntEnv("WORKER_RETRY_BASE_MS", 500);
 const PREVIEW_RETRY_ATTEMPTS = readPositiveIntEnv("PREVIEW_RETRY_ATTEMPTS", 3);
 const PREVIEW_RETRY_BASE_MS = readPositiveIntEnv("PREVIEW_RETRY_BASE_MS", 500);
 const PREVIEW_BRACKET_SIZE = readPositiveIntEnv("PREVIEW_BRACKET_SIZE", DEFAULT_PREVIEW_BRACKET_SIZE);
+const COVER_THUMB_WIDTH = readPositiveIntEnv("COVER_THUMB_WIDTH", 600);
 const WATERMARK_PATH = path.join(process.cwd(), "public", "watermark.png");
 const SUPABASE_PREVIEWS_BUCKET = process.env.SUPABASE_PREVIEWS_BUCKET?.trim() || "previews";
 
@@ -225,6 +226,40 @@ function parsePreviewItems(raw) {
     .filter(Boolean);
 }
 
+/**
+ * Clean Kanban cover: resize only, then same ImageMagick exposure pass as watermarked previews (no watermark).
+ */
+async function buildCoverThumbnailBuffer(sourcePath) {
+  const resizedBuffer = await sharp(sourcePath)
+    .resize({ width: COVER_THUMB_WIDTH, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 82, mozjpeg: true, chromaSubsampling: "4:2:0" })
+    .toBuffer();
+
+  const tmpBase = path.join(os.tmpdir(), `cover-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const tempInput = `${tmpBase}-in.jpg`;
+  const tempOutput = `${tmpBase}-out.jpg`;
+  try {
+    await fs.promises.writeFile(tempInput, resizedBuffer);
+    await execFileAsync(
+      "magick",
+      [
+        tempInput,
+        "-auto-level",
+        "-modulate",
+        "102,112,100",
+        "-contrast-stretch",
+        "0.3%x0.3%",
+        tempOutput,
+      ],
+      { windowsHide: true }
+    );
+    return await fs.promises.readFile(tempOutput);
+  } finally {
+    await fs.promises.unlink(tempInput).catch(() => {});
+    await fs.promises.unlink(tempOutput).catch(() => {});
+  }
+}
+
 async function buildPreviewBuffer(sourcePath) {
   if (!fs.existsSync(WATERMARK_PATH)) {
     throw new Error(`Watermark file not found at "${WATERMARK_PATH}".`);
@@ -298,6 +333,51 @@ async function uploadPreviewBuffer(supabase, params) {
   return { storagePath, previewUrl: data?.publicUrl ?? "" };
 }
 
+async function ensureCoverImageOnce(supabase, taskRow, rawDir, chunks) {
+  const existing = taskRow.cover_image_url;
+  if (existing != null && String(existing).trim()) {
+    return;
+  }
+  if (!chunks.length) {
+    return;
+  }
+  const firstChunk = chunks[0];
+  const middleFilename = firstChunk[Math.floor(firstChunk.length / 2)];
+  const sourcePath = path.join(rawDir, middleFilename);
+  if (!fs.existsSync(sourcePath)) {
+    return;
+  }
+
+  const taskId = String(taskRow.id);
+  const buffer = await withPreviewRetry(`cover thumbnail ${taskId}`, async () =>
+    buildCoverThumbnailBuffer(sourcePath)
+  );
+  const storagePath = `cover_${taskId}.jpg`;
+  await withPreviewRetry(`upload cover ${storagePath}`, async () => {
+    const { error } = await supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).upload(storagePath, buffer, {
+      upsert: true,
+      contentType: "image/jpeg",
+      cacheControl: "3600",
+    });
+    if (error) {
+      throw new Error(error.message);
+    }
+  });
+  const { data } = supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).getPublicUrl(storagePath);
+  const publicUrl = data?.publicUrl ?? "";
+  if (!publicUrl) {
+    return;
+  }
+
+  await withPreviewRetry(`set cover_image_url for task ${taskId}`, async () => {
+    const { error } = await supabase.from("tasks").update({ cover_image_url: publicUrl }).eq("id", taskId);
+    if (error) {
+      throw new Error(error.message);
+    }
+  });
+  console.info(`[worker] Cover image set for task ${taskId}`);
+}
+
 async function syncTaskPreviews(supabase, taskRow) {
   const localFolderName = String(taskRow.local_folder_name ?? "").trim();
   if (!localFolderName) {
@@ -320,6 +400,13 @@ async function syncTaskPreviews(supabase, taskRow) {
   const existingItems = parsePreviewItems(taskRow.gallery_previews);
   const existingByChunk = new Map(existingItems.map((item) => [item.chunkIndex, item]));
   const nextItems = [];
+
+  await ensureCoverImageOnce(supabase, taskRow, rawDir, chunks).catch((err) => {
+    console.warn(
+      `[worker] Cover image skipped for task ${taskRow.id}:`,
+      err instanceof Error ? err.message : err
+    );
+  });
 
   for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
     const chunk = chunks[chunkIndex];
@@ -369,7 +456,7 @@ async function syncPreviewsForLocalFolder(localFolderName) {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("tasks")
-    .select("id, local_folder_name, gallery_selection, gallery_previews")
+    .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url")
     .eq("local_folder_name", localFolderName)
     .order("id", { ascending: false })
     .limit(1)
@@ -395,7 +482,7 @@ async function processInitialPreviewSync(supabase) {
   while (true) {
     const { data, error } = await supabase
       .from("tasks")
-      .select("id, local_folder_name, gallery_selection, gallery_previews")
+      .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url")
       .not("local_folder_name", "is", null)
       .order("id", { ascending: true })
       .range(offset, offset + pageSize - 1);
@@ -667,8 +754,8 @@ async function processPendingProcessing(supabase) {
 
       console.info(`[worker] Processing task ${taskId}...`);
       await processTaskLocally({ id: taskId, local_folder_name: localFolderName });
-      await finalizeTask(supabase, taskId, DONE_STATUS);
-      console.info(`[worker] Task ${taskId} completed.`);
+      await finalizeTask(supabase, taskId, READY_FOR_REVIEW_STATUS);
+      console.info(`[worker] Task ${taskId} marked as ${READY_FOR_REVIEW_STATUS}.`);
     } catch (err) {
       console.error(`[worker] Task ${taskId} failed:`, err instanceof Error ? err.message : err);
       try {

@@ -13,6 +13,7 @@ type ColumnKey =
   | "preview-sent"
   | "selection-available"
   | "editing"
+  | "ready-for-review"
   | "edited"
   | "send-email"
   | "completed";
@@ -45,18 +46,19 @@ export type BoardTask = {
   formattedPhotoshootDate: string;
   editingStartedAt: string | null;
   totalEditingSeconds: number;
+  /** Public Supabase Storage URL for Kanban card cover (set by local worker). */
+  coverImageUrl: string | null;
   status: ColumnKey;
   isArchived: boolean;
 };
 
 type BoardState = Record<ColumnKey, BoardTask[]>;
-type RawThumbnailMap = Record<string, string | null>;
-
 const COLUMN_CONFIG: { id: ColumnKey; title: string }[] = [
   { id: "awaiting-folders", title: "Awaiting folders" },
   { id: "booking", title: "Booking" },
   { id: "preview-sent", title: "Preview Sent" },
   { id: "selection-available", title: "Selection Available" },
+  { id: "ready-for-review", title: "Ready for Review" },
   { id: "editing", title: "Editing" },
   { id: "edited", title: "Edited" },
   { id: "send-email", title: "Send Email" },
@@ -68,6 +70,7 @@ const INITIAL_BOARD: BoardState = {
   booking: [],
   "preview-sent": [],
   "selection-available": [],
+  "ready-for-review": [],
   editing: [],
   edited: [],
   "send-email": [],
@@ -102,6 +105,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     formattedPhotoshootDate: "Oct 25, 2026",
     editingStartedAt: null,
     totalEditingSeconds: 0,
+    coverImageUrl: null,
     status: "booking",
     isArchived: false,
   },
@@ -132,6 +136,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     formattedPhotoshootDate: "Oct 27, 2026",
     editingStartedAt: null,
     totalEditingSeconds: 0,
+    coverImageUrl: null,
     status: "preview-sent",
     isArchived: false,
   },
@@ -165,6 +170,7 @@ type DbTask = {
   is_archived: boolean | null;
   local_folder_name: string | null;
   bracket_size: number | null;
+  cover_image_url: string | null;
 };
 
 const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
@@ -173,6 +179,7 @@ const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
   "preview-sent": "Preview Sent",
   "selection-available": "Selection Available",
   editing: "Editing",
+  "ready-for-review": "Ready for Review",
   edited: "Edited",
   "send-email": "Send Email",
   completed: "Completed",
@@ -184,6 +191,7 @@ function createEmptyBoard(): BoardState {
     booking: [],
     "preview-sent": [],
     "selection-available": [],
+    "ready-for-review": [],
     editing: [],
     edited: [],
     "send-email": [],
@@ -298,6 +306,51 @@ function TaskCategoryFallbackIcon({
   return <Camera className={iconClass} strokeWidth={1.5} aria-hidden />;
 }
 
+function KanbanTaskCover({
+  task,
+  onReviewClick,
+}: {
+  task: BoardTask;
+  onReviewClick?: () => void;
+}) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const rawUrl = task.coverImageUrl?.trim();
+  const showImg = Boolean(rawUrl && !imgFailed);
+
+  return (
+    <div
+      className={`relative h-[5.5rem] w-20 shrink-0 overflow-hidden rounded-md border border-zinc-300 bg-zinc-200 dark:border-zinc-600 dark:bg-zinc-800 ${
+        onReviewClick ? "cursor-pointer" : ""
+      }`}
+    >
+      {showImg ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={rawUrl}
+          alt=""
+          className="pointer-events-none h-full w-full object-cover"
+          onError={() => setImgFailed(true)}
+        />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center bg-zinc-100 dark:bg-zinc-950">
+          <TaskCategoryFallbackIcon task={task} className="h-9 w-9 text-zinc-500 dark:text-zinc-400" />
+        </div>
+      )}
+      {onReviewClick ? (
+        <button
+          type="button"
+          className="absolute inset-0 z-10 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400"
+          onClick={(event) => {
+            event.stopPropagation();
+            onReviewClick();
+          }}
+          aria-label="Review merged photos"
+        />
+      ) : null}
+    </div>
+  );
+}
+
 type KanbanBoardProps = {
   refreshSignal?: number;
   onTaskClick?: (task: BoardTask) => void;
@@ -342,8 +395,6 @@ export default function KanbanBoard({
   const [mergePromptProcessing, setMergePromptProcessing] = useState(false);
   const [mergePromptError, setMergePromptError] = useState<string | null>(null);
   const [reviewMergedTask, setReviewMergedTask] = useState<BoardTask | null>(null);
-  const [rawThumbnailByTask, setRawThumbnailByTask] = useState<RawThumbnailMap>({});
-
   useEffect(() => {
     let isMounted = true;
 
@@ -418,6 +469,10 @@ export default function KanbanBoard({
             formattedPhotoshootDate: formatLongDate(row.photoshoot_date),
             editingStartedAt: row.editing_started_at ?? null,
             totalEditingSeconds: Number(row.total_editing_seconds ?? 0),
+            coverImageUrl:
+              typeof row.cover_image_url === "string" && row.cover_image_url.trim()
+                ? row.cover_image_url.trim()
+                : null,
             status: normalizedStatus,
             isArchived: Boolean(row.is_archived),
           };
@@ -454,43 +509,6 @@ export default function KanbanBoard({
       isMounted = false;
     };
   }, [refreshSignal]);
-
-  useEffect(() => {
-    const tasksWithFolders = COLUMN_CONFIG.flatMap((column) => board[column.id]).filter((t) =>
-      Boolean(t.localFolderName?.trim())
-    );
-    if (tasksWithFolders.length === 0) {
-      setRawThumbnailByTask({});
-      return;
-    }
-
-    let active = true;
-    const loadThumbnails = async () => {
-      const entries = await Promise.all(
-        tasksWithFolders.map(async (task) => {
-          try {
-            const res = await fetch(
-              `/api/list-raw-first?local_folder_name=${encodeURIComponent(task.localFolderName.trim())}`,
-              { cache: "no-store" }
-            );
-            const data = (await res.json().catch(() => null)) as { thumbnailUrl?: string | null } | null;
-            return [task.id, res.ok ? (data?.thumbnailUrl ?? null) : null] as const;
-          } catch {
-            return [task.id, null] as const;
-          }
-        })
-      );
-      if (!active) {
-        return;
-      }
-      setRawThumbnailByTask(Object.fromEntries(entries));
-    };
-
-    void loadThumbnails();
-    return () => {
-      active = false;
-    };
-  }, [board]);
 
   const taskLookup = useMemo(() => {
     const map = new Map<string, { task: BoardTask; columnId: ColumnKey }>();
@@ -955,33 +973,14 @@ export default function KanbanBoard({
                             </button>
                           ) : null}
                         </div>
-                        {task.localFolderName ? (
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setReviewMergedTask(task);
-                            }}
-                            className="relative h-[5.5rem] w-20 shrink-0 overflow-hidden rounded-md border border-zinc-300 bg-zinc-200 dark:border-zinc-600 dark:bg-zinc-800"
-                            aria-label="Review merged photos"
-                          >
-                            {rawThumbnailByTask[task.id] ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
-                                src={rawThumbnailByTask[task.id]!}
-                                alt=""
-                                className="h-full w-full object-cover"
-                              />
-                            ) : (
-                              <div className="flex h-full w-full items-center justify-center bg-zinc-100 dark:bg-zinc-950">
-                                <TaskCategoryFallbackIcon
-                                  task={task}
-                                  className="h-9 w-9 text-zinc-500 dark:text-zinc-400"
-                                />
-                              </div>
-                            )}
-                          </button>
-                        ) : null}
+                        <KanbanTaskCover
+                          task={task}
+                          onReviewClick={
+                            task.localFolderName?.trim()
+                              ? () => setReviewMergedTask(task)
+                              : undefined
+                          }
+                        />
                       </div>
                     </article>
                   ))}

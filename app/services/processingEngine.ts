@@ -12,7 +12,11 @@ const execAsync = promisify(exec);
 /** Seconds between bracket groups (tripod rule): gap ≥ this starts a new bracket. */
 const BRACKET_GAP_THRESHOLD_SEC = 4;
 
-const SNS_HDR_PATH = '"C:\\Program Files\\SNS-HDR Pro\\SNS-HDR.exe"';
+const SNS_HDR_PATH = '"C:\\Program Files\\SNS-HDR Pro 2\\SNS-HDR.exe"';
+const COMFY_TRIGGER_TOKENS = (process.env.COMFYUI_TRIGGER_TOKENS ?? "_sqi")
+  .split(",")
+  .map((token) => token.trim().toLowerCase())
+  .filter(Boolean);
 
 const IMAGE_EXT = new Set([
   ".jpg",
@@ -269,6 +273,11 @@ function extractRemovalTargetFromFilename(filename: string): string | null {
   return match[1].trim() || null;
 }
 
+function shouldRunComfyForFilename(fileName: string): boolean {
+  const lower = fileName.toLowerCase();
+  return COMFY_TRIGGER_TOKENS.some((token) => lower.includes(token));
+}
+
 export async function startProcessing(taskId: string, shootFolderPath: string): Promise<ProcessingSummary> {
   const supabase = createSupabase();
   const { taskRoot, localFolderName } = validateShootFolder(shootFolderPath);
@@ -314,6 +323,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
 
     const brackets = buildBracketsByTripodRule(metaList);
     const mergedOutputs: string[] = [];
+    const mergedMeta: Array<{ outBaseName: string; firstName: string; bracketIndex: number }> = [];
     let bracketIndex = 1;
     const origin = resolveInternalAppOrigin();
 
@@ -328,6 +338,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
       const cmd = parts.join(" ");
       await execAsync(cmd, { windowsHide: true });
       mergedOutputs.push(outFile);
+      mergedMeta.push({ outBaseName, firstName, bracketIndex });
       try {
         const normalizeCmd = `magick ${quoteArg(outFile)} -normalize ${quoteArg(outFile)}`;
         await execAsync(normalizeCmd, { windowsHide: true });
@@ -363,14 +374,18 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
         }
       }
 
-      const runSqi = outBaseName.toLowerCase().includes("_sqi");
-      if (runSqi) {
+      bracketIndex += 1;
+    }
+
+    for (const merged of mergedMeta) {
+      const runComfy = shouldRunComfyForFilename(merged.outBaseName);
+      if (runComfy) {
         const res = await fetch(`${origin}/api/ai-edit`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             local_folder_name: localFolderName,
-            filename: outBaseName,
+            filename: merged.outBaseName,
           }),
         });
         const payload = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -381,27 +396,26 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
             payload?.error ?? payload
           );
         } else {
-          const baseName = baseNameForCleanup(firstName);
+          const baseName = baseNameForCleanup(merged.firstName);
           try {
             await cleanupComfyFinalFilename({
               localFolderName,
-              mergedFilename: outBaseName,
+              mergedFilename: merged.outBaseName,
               baseName,
-              bracketIndex,
+              bracketIndex: merged.bracketIndex,
             });
           } catch (renameErr) {
             console.error("[processingEngine] Comfy output rename skipped:", renameErr);
           }
         }
       } else {
-        // Non–SQI merged file: SNS-HDR result is the delivered edit for this bracket (no ComfyUI).
-        console.info(`[processingEngine] Skipped ComfyUI for ${outBaseName} (no _sqi); merged HDR marked complete.`);
+        console.info(
+          `[processingEngine] Skipped ComfyUI for ${merged.outBaseName} (no trigger token in ${COMFY_TRIGGER_TOKENS.join(", ")}).`
+        );
       }
-
-      bracketIndex += 1;
     }
 
-    await setStatus("Edited");
+    await setStatus("Ready for Review");
     return { ok: true, mergedFiles: mergedOutputs.map((p) => path.basename(p)) };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Processing failed.";
