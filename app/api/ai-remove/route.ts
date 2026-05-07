@@ -36,12 +36,44 @@ function normalizeErrorMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
-function resolveAndValidateImagePath(imagePath: string): string {
-  const trimmed = imagePath.trim();
-  if (!trimmed) {
-    throw new Error("imagePath is required.");
+function normalizeFilenameInput(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    const decodedPath = decodeURIComponent(parsed.pathname);
+    const parts = decodedPath.split("/").filter(Boolean);
+    return (parts.at(-1) ?? "").trim();
+  } catch {
+    const normalized = trimmed.replace(/\\/g, "/");
+    const parts = normalized.split("/").filter(Boolean);
+    const last = parts.at(-1) ?? trimmed;
+    const [withoutQuery] = last.split("?");
+    const [withoutHash] = withoutQuery.split("#");
+    return decodeURIComponent(withoutHash).trim();
   }
-  const resolved = path.resolve(trimmed);
+}
+
+function resolveAndValidateImagePath(imagePathOrFilename: string, localFolderName?: string): string {
+  const trimmed = imagePathOrFilename.trim();
+  if (!trimmed) {
+    throw new Error("imagePath or filename is required.");
+  }
+  const hasFolder = typeof localFolderName === "string" && localFolderName.trim().length > 0;
+  let resolved: string;
+  if (hasFolder) {
+    const safeFolder = localFolderName!.trim();
+    if (safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder)) {
+      throw new Error("Invalid local_folder_name.");
+    }
+    const safeFile = path.basename(normalizeFilenameInput(trimmed));
+    if (!safeFile) {
+      throw new Error("Invalid filename.");
+    }
+    resolved = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFile);
+  } else {
+    resolved = path.resolve(trimmed);
+  }
   const rootResolved = path.resolve(PHOTOS_ROOT);
   if (!resolved.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
     throw new Error("Access denied.");
@@ -403,20 +435,32 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json()) as {
       imagePath?: string;
+      local_folder_name?: string;
+      filename?: string;
       removalTarget?: string;
     };
 
     const imagePath = typeof body.imagePath === "string" ? body.imagePath.trim() : "";
+    const localFolderName =
+      typeof body.local_folder_name === "string" ? body.local_folder_name.trim() : "";
+    const filename = typeof body.filename === "string" ? body.filename.trim() : "";
     const removalTarget = typeof body.removalTarget === "string" ? body.removalTarget.trim() : "";
 
-    if (!imagePath || !removalTarget) {
+    if ((!imagePath && !filename) || !removalTarget) {
       return NextResponse.json(
-        { error: "imagePath and removalTarget are required." },
+        { error: "Provide imagePath or (local_folder_name + filename), plus removalTarget." },
         { status: 400 }
       );
     }
 
-    const sourcePath = resolveAndValidateImagePath(imagePath);
+    if (filename && !localFolderName) {
+      return NextResponse.json(
+        { error: "local_folder_name is required when filename is provided." },
+        { status: 400 }
+      );
+    }
+
+    const sourcePath = resolveAndValidateImagePath(filename || imagePath, localFolderName || undefined);
     const comfyInputDir = process.env.COMFYUI_INPUT_DIR?.trim();
     const comfyBase = process.env.COMFYUI_BASE_URL?.trim() || "http://127.0.0.1:8188";
 

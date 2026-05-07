@@ -430,6 +430,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
           }
         } catch (err) {
           comfyFailedCount += 1;
+          console.error("RAW COMFY ERROR:", err);
           const errorText =
             err instanceof Error ? `${err.message}${err.stack ? `\n${err.stack}` : ""}` : String(err);
           const detail = `[processingEngine] ComfyUI API failed/not running for ${merged.outBaseName}: ${errorText}`;

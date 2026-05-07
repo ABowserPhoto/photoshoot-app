@@ -39,6 +39,24 @@ function loadWorkflowTemplate(): Record<string, WorkflowNode> {
   return JSON.parse(raw) as Record<string, WorkflowNode>;
 }
 
+function normalizeFilenameInput(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    const decodedPath = decodeURIComponent(parsed.pathname);
+    const parts = decodedPath.split("/").filter(Boolean);
+    return (parts.at(-1) ?? "").trim();
+  } catch {
+    const normalized = trimmed.replace(/\\/g, "/");
+    const parts = normalized.split("/").filter(Boolean);
+    const last = parts.at(-1) ?? trimmed;
+    const [withoutQuery] = last.split("?");
+    const [withoutHash] = withoutQuery.split("#");
+    return decodeURIComponent(withoutHash).trim();
+  }
+}
+
 function validateMergedFile(localFolderName: string, filename: string): string {
   const safeFolder = localFolderName.trim();
   const safeFile = path.basename(filename.trim());
@@ -68,7 +86,8 @@ export async function POST(request: Request) {
 
     const localFolderName =
       typeof body.local_folder_name === "string" ? body.local_folder_name.trim() : "";
-    const filename = typeof body.filename === "string" ? body.filename.trim() : "";
+    const filenameRaw = typeof body.filename === "string" ? body.filename.trim() : "";
+    const filename = normalizeFilenameInput(filenameRaw);
 
     if (!localFolderName || !filename) {
       return NextResponse.json(

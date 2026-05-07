@@ -28,6 +28,24 @@ function toErrorString(value: unknown, fallback: string): string {
   return fallback;
 }
 
+function toSafeFilename(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    const url = new URL(trimmed);
+    const decodedPath = decodeURIComponent(url.pathname);
+    const parts = decodedPath.split("/").filter(Boolean);
+    return (parts.at(-1) ?? "").trim();
+  } catch {
+    const normalized = trimmed.replace(/\\/g, "/");
+    const parts = normalized.split("/").filter(Boolean);
+    const last = parts.at(-1) ?? trimmed;
+    const [withoutQuery] = last.split("?");
+    const [withoutHash] = withoutQuery.split("#");
+    return decodeURIComponent(withoutHash).trim();
+  }
+}
+
 export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMergedModalProps) {
   const [files, setFiles] = useState<string[]>([]);
   const [fileUrlByName, setFileUrlByName] = useState<Record<string, string>>({});
@@ -97,6 +115,15 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     [task.photoshootType, task.companyName, task.shootLocation].filter(Boolean).join(" - ") || "Task";
 
   const handleReplaceSky = async (filename: string) => {
+    const safeFilename = toSafeFilename(filename);
+    if (!safeFilename) {
+      setActionByFile((prev) => ({ ...prev, [filename]: "error" }));
+      setMessageByFile((prev) => ({
+        ...prev,
+        [filename]: "Invalid filename.",
+      }));
+      return;
+    }
     setActionByFile((prev) => ({ ...prev, [filename]: "loading" }));
     setActiveActionByFile((prev) => ({ ...prev, [filename]: "sky" }));
     setMessageByFile((prev) => {
@@ -110,7 +137,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           local_folder_name: localFolderName,
-          filename,
+          filename: safeFilename,
         }),
       });
       const data = (await res.json().catch(() => null)) as {
@@ -144,6 +171,15 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
   };
 
   const submitRemoveObject = async (filename: string, removalTarget: string) => {
+    const safeFilename = toSafeFilename(filename);
+    if (!safeFilename) {
+      setActionByFile((prev) => ({ ...prev, [filename]: "error" }));
+      setMessageByFile((prev) => ({
+        ...prev,
+        [filename]: "Invalid filename.",
+      }));
+      return;
+    }
     setActionByFile((prev) => ({ ...prev, [filename]: "loading" }));
     setActiveActionByFile((prev) => ({ ...prev, [filename]: "remove" }));
     setMessageByFile((prev) => {
@@ -153,12 +189,12 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     });
 
     try {
-      const imagePath = `${localFolderName}\\3_Merged\\${filename}`;
       const res = await fetch("/api/ai-remove", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          imagePath,
+          local_folder_name: localFolderName,
+          filename: safeFilename,
           removalTarget,
         }),
       });
