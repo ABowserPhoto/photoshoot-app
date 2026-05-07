@@ -957,9 +957,11 @@ export default function KanbanBoard({
                           <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                             {task.formattedPhotoshootDate || "No date"}
                           </p>
-                          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
-                            Total Edit Time: {formatDuration(task.totalEditingSeconds)}
-                          </p>
+                          {task.totalEditingSeconds > 0 ? (
+                            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
+                              Total Edit Time: {formatDuration(task.totalEditingSeconds)}
+                            </p>
+                          ) : null}
                           {column.id === "completed" ? (
                             <button
                               type="button"
