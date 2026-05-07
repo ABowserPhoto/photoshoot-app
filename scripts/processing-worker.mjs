@@ -666,6 +666,7 @@ async function processTaskLocally(task) {
   return {
     comfyQueuedCount: Number(payload?.comfyQueuedCount) || 0,
     comfyFailedCount: Number(payload?.comfyFailedCount) || 0,
+    comfyErrors: Array.isArray(payload?.comfyErrors) ? payload.comfyErrors.map((v) => String(v)) : [],
   };
 }
 
@@ -753,13 +754,16 @@ async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
   const finalDir = path.join(taskRoot, "4_Final");
   const imageMatcher = /\.(jpe?g|png|tiff?|webp|bmp|gif)$/i;
 
+  console.info(`[worker] Finals upload scan: mergedDir=${mergedDir}, finalDir=${finalDir}`);
   const mergedFiles = readNaturallySortedImageFiles(mergedDir);
+  let mergedUploaded = 0;
   for (const fileName of mergedFiles) {
     const localPath = path.join(mergedDir, fileName);
     const storagePath = `${localFolderName}/3_Merged/${fileName}`;
     await withRetry(`upload merged ${storagePath}`, async () =>
       uploadFileToBucket(supabase, SUPABASE_FINALS_BUCKET, storagePath, localPath)
     );
+    mergedUploaded += 1;
   }
 
   const finalEntries = fs.existsSync(finalDir) ? await fs.promises.readdir(finalDir, { withFileTypes: true }) : [];
@@ -767,13 +771,18 @@ async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
     .filter((entry) => entry.isFile() && imageMatcher.test(entry.name))
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  let finalUploaded = 0;
   for (const fileName of finalFiles) {
     const localPath = path.join(finalDir, fileName);
     const storagePath = `${localFolderName}/4_Final/${fileName}`;
     await withRetry(`upload final ${storagePath}`, async () =>
       uploadFileToBucket(supabase, SUPABASE_FINALS_BUCKET, storagePath, localPath)
     );
+    finalUploaded += 1;
   }
+  console.info(
+    `[worker] Finals upload complete for ${localFolderName}: merged_uploaded=${mergedUploaded}/${mergedFiles.length}, final_uploaded=${finalUploaded}/${finalFiles.length}, bucket=${SUPABASE_FINALS_BUCKET}`
+  );
 }
 
 /**
@@ -867,6 +876,11 @@ async function processPendingProcessing(supabase) {
       console.info(
         `[worker] Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}`
       );
+      if (processingResult.comfyErrors.length > 0) {
+        for (const errorLine of processingResult.comfyErrors) {
+          console.error(`[worker] ${errorLine}`);
+        }
+      }
       const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
       const mergedDir = path.join(taskRoot, "3_Merged");
       const mergedFiles = readNaturallySortedImageFiles(mergedDir);

@@ -37,6 +37,7 @@ export type ProcessingSummary = {
   mergedFiles?: string[];
   comfyQueuedCount?: number;
   comfyFailedCount?: number;
+  comfyErrors?: string[];
   error?: string;
 };
 
@@ -329,6 +330,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
     let comfyQueuedCount = 0;
     let comfyFailedCount = 0;
     let bracketIndex = 1;
+    const comfyErrors: string[] = [];
     const origin = resolveInternalAppOrigin();
 
     const totalBrackets = brackets.length;
@@ -385,24 +387,29 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
       const runComfy = shouldRunComfyForFilename(merged.outBaseName);
       if (runComfy) {
         try {
+          const comfyRequestPayload = {
+            local_folder_name: localFolderName,
+            filename: merged.outBaseName,
+          };
           console.info(`[processingEngine] Triggering ComfyUI for ${merged.outBaseName}...`);
+          console.info(`[processingEngine] Comfy trigger payload: ${JSON.stringify(comfyRequestPayload)}`);
           const res = await fetch(`${origin}/api/ai-edit`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              local_folder_name: localFolderName,
-              filename: merged.outBaseName,
-            }),
+            body: JSON.stringify(comfyRequestPayload),
           });
           const payload = (await res.json().catch(() => null)) as
             | { error?: string; promptId?: string; comfyQueued?: boolean }
             | null;
           if (!res.ok || !payload?.comfyQueued) {
             comfyFailedCount += 1;
-            console.warn(
-              "[processingEngine] ComfyUI API failed/not running:",
-              res.status,
-              payload?.error ?? payload
+            const detail = `[processingEngine] ComfyUI API failed/not running: status=${res.status} file=${merged.outBaseName} response=${JSON.stringify(
+              payload ?? null
+            )}`;
+            comfyErrors.push(detail);
+            console.error(detail);
+            console.error(
+              `[processingEngine] Comfy request payload for ${merged.outBaseName}: ${JSON.stringify(comfyRequestPayload)}`
             );
             continue;
           }
@@ -423,9 +430,16 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
           }
         } catch (err) {
           comfyFailedCount += 1;
-          console.warn(
-            "[processingEngine] ComfyUI API failed/not running:",
-            err instanceof Error ? err.message : err
+          const errorText =
+            err instanceof Error ? `${err.message}${err.stack ? `\n${err.stack}` : ""}` : String(err);
+          const detail = `[processingEngine] ComfyUI API failed/not running for ${merged.outBaseName}: ${errorText}`;
+          comfyErrors.push(detail);
+          console.error(detail);
+          console.error(
+            `[processingEngine] Comfy request payload for ${merged.outBaseName}: ${JSON.stringify({
+              local_folder_name: localFolderName,
+              filename: merged.outBaseName,
+            })}`
           );
         }
       } else {
@@ -440,6 +454,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
       mergedFiles: mergedOutputs.map((p) => path.basename(p)),
       comfyQueuedCount,
       comfyFailedCount,
+      comfyErrors,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Processing failed.";

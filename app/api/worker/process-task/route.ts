@@ -48,6 +48,7 @@ export async function POST(request: Request) {
     mergedFiles: summary.mergedFiles ?? [],
     comfyQueuedCount: summary.comfyQueuedCount ?? 0,
     comfyFailedCount: summary.comfyFailedCount ?? 0,
+    comfyErrors: summary.comfyErrors ?? [],
     error: summary.error,
   });
 }
