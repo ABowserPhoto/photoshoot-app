@@ -749,14 +749,14 @@ async function waitForComfyOutputs(taskRoot, expectedSqiCount, startedAtMs, time
 
 async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
   const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
-  const mergedDir = path.join(taskRoot, "3_merge");
+  const mergedDir = path.join(taskRoot, "3_Merged");
   const finalDir = path.join(taskRoot, "4_Final");
   const imageMatcher = /\.(jpe?g|png|tiff?|webp|bmp|gif)$/i;
 
   const mergedFiles = readNaturallySortedImageFiles(mergedDir);
   for (const fileName of mergedFiles) {
     const localPath = path.join(mergedDir, fileName);
-    const storagePath = `${localFolderName}/3_merge/${fileName}`;
+    const storagePath = `${localFolderName}/3_Merged/${fileName}`;
     await withRetry(`upload merged ${storagePath}`, async () =>
       uploadFileToBucket(supabase, SUPABASE_FINALS_BUCKET, storagePath, localPath)
     );
@@ -805,7 +805,7 @@ async function processAwaitingFolderCreation(supabase) {
       const folderName = buildLocalFolderNameFromTask(row);
       const base = path.join(root, folderName);
 
-      for (const sub of ["1_Raw", "2_Selects", "3_merge", "4_Final"]) {
+      for (const sub of ["1_Raw", "2_Selects", "3_Merged", "4_Final"]) {
         fs.mkdirSync(path.join(base, sub), { recursive: true });
       }
 
@@ -868,7 +868,7 @@ async function processPendingProcessing(supabase) {
         `[worker] Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}`
       );
       const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
-      const mergedDir = path.join(taskRoot, "3_merge");
+      const mergedDir = path.join(taskRoot, "3_Merged");
       const mergedFiles = readNaturallySortedImageFiles(mergedDir);
       const sqiMergedCount = mergedFiles.filter((name) => name.toLowerCase().includes("_sqi")).length;
       if (processingResult.comfyQueuedCount > 0 && sqiMergedCount > 0) {

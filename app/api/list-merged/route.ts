@@ -1,26 +1,11 @@
-import fs from "node:fs";
-import path from "node:path";
 import { NextResponse } from "next/server";
-
-import { PHOTOS_ROOT } from "@/lib/photosPaths";
+import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const IMAGE_EXT = new Set([
-  ".jpg",
-  ".jpeg",
-  ".png",
-  ".tif",
-  ".tiff",
-  ".webp",
-  ".bmp",
-  ".gif",
-]);
-
-function isImageFile(name: string): boolean {
-  return IMAGE_EXT.has(path.extname(name).toLowerCase());
-}
+const SUPABASE_FINALS_BUCKET = process.env.SUPABASE_FINALS_BUCKET?.trim() || "finals";
+const IMAGE_EXT = /\.(jpe?g|png|tiff?|webp|bmp|gif)$/i;
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -33,22 +18,36 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Invalid local_folder_name." }, { status: 400 });
   }
 
-  const mergedDir = path.join(PHOTOS_ROOT, localFolderName, "3_merge");
-  const resolvedMerged = path.resolve(mergedDir);
-  const allowedRoot = path.resolve(PHOTOS_ROOT);
-  if (!resolvedMerged.toLowerCase().startsWith(allowedRoot.toLowerCase() + path.sep)) {
-    return NextResponse.json({ error: "Invalid path." }, { status: 403 });
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+  if (!supabaseUrl || !supabaseKey) {
+    return NextResponse.json({ error: "Supabase Storage is not configured." }, { status: 503 });
   }
 
-  if (!fs.existsSync(resolvedMerged)) {
-    return NextResponse.json({ files: [] as string[], mergedDir: resolvedMerged });
+  const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
+  const folderPrefix = `${localFolderName}/3_Merged`;
+  const { data: entries, error } = await supabase.storage.from(SUPABASE_FINALS_BUCKET).list(folderPrefix, {
+    limit: 1000,
+    sortBy: { column: "name", order: "asc" },
+  });
+  if (error) {
+    return NextResponse.json({ error: `Failed to list storage files: ${error.message}` }, { status: 502 });
   }
 
-  const entries = fs.readdirSync(resolvedMerged, { withFileTypes: true });
-  const files = entries
-    .filter((e) => e.isFile() && isImageFile(e.name))
-    .map((e) => e.name)
+  const files = (entries ?? [])
+    .filter((entry) => entry.name && IMAGE_EXT.test(entry.name))
+    .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  const items = files.map((name) => {
+    const storagePath = `${folderPrefix}/${name}`;
+    const { data } = supabase.storage.from(SUPABASE_FINALS_BUCKET).getPublicUrl(storagePath);
+    return {
+      name,
+      storagePath,
+      url: data?.publicUrl ?? "",
+    };
+  });
 
-  return NextResponse.json({ files, mergedDir: resolvedMerged });
+  return NextResponse.json({ files, items });
 }

@@ -118,7 +118,7 @@ export async function POST(request: Request) {
     }
 
     const selectsDir = path.join(PHOTOS_ROOT, localFolderName, "2_Selects");
-    const mergedDir = path.join(PHOTOS_ROOT, localFolderName, "3_merge");
+    const mergedDir = path.join(PHOTOS_ROOT, localFolderName, "3_Merged");
 
     if (!fs.existsSync(selectsDir)) {
       return NextResponse.json(

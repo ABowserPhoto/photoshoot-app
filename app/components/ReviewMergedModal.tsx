@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import type { BoardTask } from "./KanbanBoard";
 
 type ReviewMergedModalProps = {
@@ -13,13 +12,7 @@ type ReviewMergedModalProps = {
 type FileStatus = "idle" | "loading" | "ok" | "error";
 type FileAction = "sky" | "remove";
 
-function buildImageFilepath(localFolderName: string, filename: string): string {
-  return pathJoinWin(PHOTOS_ROOT, localFolderName, "3_merge", filename);
-}
-
-function pathJoinWin(...parts: string[]): string {
-  return parts.join("\\");
-}
+type MergedItem = { name: string; storagePath: string; url: string };
 
 function toErrorString(value: unknown, fallback: string): string {
   if (typeof value === "string" && value.trim()) return value;
@@ -37,6 +30,7 @@ function toErrorString(value: unknown, fallback: string): string {
 
 export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMergedModalProps) {
   const [files, setFiles] = useState<string[]>([]);
+  const [fileUrlByName, setFileUrlByName] = useState<Record<string, string>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoadingList, setIsLoadingList] = useState(false);
   const [actionByFile, setActionByFile] = useState<Record<string, FileStatus>>({});
@@ -60,13 +54,20 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
         `/api/list-merged?local_folder_name=${encodeURIComponent(localFolderName)}`,
         { cache: "no-store" }
       );
-      const data = (await res.json().catch(() => null)) as { files?: string[]; error?: string } | null;
+      const data = (await res.json().catch(() => null)) as
+        | { files?: string[]; items?: MergedItem[]; error?: string }
+        | null;
       if (!res.ok) {
         setLoadError(data?.error ?? `Failed to list files (${res.status})`);
         setFiles([]);
         return;
       }
       setFiles(data?.files ?? []);
+      setFileUrlByName(
+        Object.fromEntries(
+          (data?.items ?? []).map((item) => [item.name, typeof item.url === "string" ? item.url : ""])
+        )
+      );
       setActionByFile({});
       setActiveActionByFile({});
       setMessageByFile({});
@@ -76,6 +77,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     } catch {
       setLoadError("Network error while loading merged files.");
       setFiles([]);
+      setFileUrlByName({});
     } finally {
       setIsLoadingList(false);
     }
@@ -151,7 +153,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     });
 
     try {
-      const imagePath = buildImageFilepath(localFolderName, filename);
+      const imagePath = `${localFolderName}\\3_Merged\\${filename}`;
       const res = await fetch("/api/ai-remove", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -256,13 +258,13 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
         ) : loadError ? (
           <p className="text-sm text-red-600 dark:text-red-400">{loadError}</p>
         ) : files.length === 0 ? (
-          <p className="text-sm text-zinc-500">No images found in 3_merge yet.</p>
+          <p className="text-sm text-zinc-500">No images found in 3_Merged yet.</p>
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {files.map((filename) => {
-              const filepath = buildImageFilepath(localFolderName, filename);
               const cacheBuster = cacheBusterByFile[filename] ?? 0;
-              const src = `/api/local-image?filepath=${encodeURIComponent(filepath)}&v=${cacheBuster}`;
+              const baseUrl = fileUrlByName[filename] ?? "";
+              const src = baseUrl ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}v=${cacheBuster}` : "";
               const status = actionByFile[filename] ?? "idle";
               const activeAction = activeActionByFile[filename] ?? null;
               return (
@@ -306,12 +308,18 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
                       )}
                     </button>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={src}
-                      alt={filename}
-                      className="h-full w-full object-contain"
-                      loading="lazy"
-                    />
+                    {src ? (
+                      <img
+                        src={src}
+                        alt={filename}
+                        className="h-full w-full object-contain"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-xs text-zinc-500">
+                        Image URL unavailable
+                      </div>
+                    )}
                   </div>
                   <p className="mt-2 truncate text-xs text-zinc-600 dark:text-zinc-400" title={filename}>
                     {filename}

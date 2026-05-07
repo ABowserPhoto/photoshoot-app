@@ -48,7 +48,7 @@ function validateMergedFile(localFolderName: string, filename: string): string {
   if (safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder)) {
     throw new Error("Invalid local_folder_name.");
   }
-  const mergedPath = path.resolve(PHOTOS_ROOT, safeFolder, "3_merge", safeFile);
+  const mergedPath = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFile);
   const rootResolved = path.resolve(PHOTOS_ROOT);
   if (!mergedPath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
     throw new Error("Access denied.");
@@ -80,7 +80,6 @@ export async function POST(request: Request) {
     const sourcePath = validateMergedFile(localFolderName, filename);
 
     const comfyInputDir = process.env.COMFYUI_INPUT_DIR?.trim();
-    const comfyBase = process.env.COMFYUI_BASE_URL?.trim() || "http://127.0.0.1:8188";
 
     if (!comfyInputDir) {
       return NextResponse.json(
@@ -120,7 +119,7 @@ export async function POST(request: Request) {
     workflow["11"].inputs.filename_prefix = outputPrefix;
 
     const clientId = randomUUID();
-    const promptUrl = `${comfyBase.replace(/\/$/, "")}/prompt`;
+    const promptUrl = "http://127.0.0.1:8188/prompt";
 
     let comfyQueued = false;
     let promptId: string | undefined;
@@ -165,10 +164,8 @@ export async function POST(request: Request) {
         `[ai-edit] ComfyUI prompt accepted for ${localFolderName}/${filename}${promptId ? ` (prompt ${promptId})` : ""}.`
       );
     } catch (err) {
-      console.warn(
-        "[ai-edit] ComfyUI API failed/not running:",
-        err instanceof Error ? err.message : err
-      );
+      console.error("ComfyUI fetch error:", err);
+      console.warn("[ai-edit] ComfyUI API failed/not running");
       return NextResponse.json(
         {
           error:
