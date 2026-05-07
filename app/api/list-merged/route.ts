@@ -33,7 +33,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Invalid local_folder_name." }, { status: 400 });
   }
 
-  const mergedDir = path.join(PHOTOS_ROOT, localFolderName, "3. merge");
+  const mergedDir = path.join(PHOTOS_ROOT, localFolderName, "3_merge");
   const resolvedMerged = path.resolve(mergedDir);
   const allowedRoot = path.resolve(PHOTOS_ROOT);
   if (!resolvedMerged.toLowerCase().startsWith(allowedRoot.toLowerCase() + path.sep)) {

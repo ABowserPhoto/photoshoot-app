@@ -24,7 +24,7 @@ const SELECTION_SYNCING_STATUS = "syncing_selection";
 const CLAIM_STATUS = "pending_processing";
 const ACTIVE_STATUS = "Processing";
 const READY_FOR_REVIEW_STATUS = "Ready for Review";
-const ERROR_STATUS = "Selection Available";
+const FAILED_STATUS = "Failed";
 const PREVIEW_DEBOUNCE_MS = 1500;
 const PREVIEW_WIDTH = 1080;
 const PREVIEW_QUALITY = 45;
@@ -82,6 +82,10 @@ const COVER_THUMB_WIDTH = readPositiveIntEnv("COVER_THUMB_WIDTH", 600);
 const WATERMARK_PATH = path.join(process.cwd(), "public", "watermark.png");
 const SUPABASE_PREVIEWS_BUCKET = process.env.SUPABASE_PREVIEWS_BUCKET?.trim() || "previews";
 const SUPABASE_FINALS_BUCKET = process.env.SUPABASE_FINALS_BUCKET?.trim() || "finals";
+const COMFY_OUTPUT_DIR =
+  process.env.COMFYUI_OUTPUT_DIR?.trim() ||
+  "F:\\ComfyUI_windows_portable_nvidia\\ComfyUI_windows_portable\\ComfyUI\\output";
+const COMFY_WAIT_TIMEOUT_MS = readPositiveIntEnv("COMFY_WAIT_TIMEOUT_MS", 12 * 60 * 1000);
 
 const previewSyncTimers = new Map();
 let rawWatcherStarted = false;
@@ -659,6 +663,10 @@ async function processTaskLocally(task) {
       payload?.error || `Local processing failed for task ${task.id} (HTTP ${response.status}).`;
     throw new Error(message);
   }
+  return {
+    comfyQueuedCount: Number(payload?.comfyQueuedCount) || 0,
+    comfyFailedCount: Number(payload?.comfyFailedCount) || 0,
+  };
 }
 
 async function finalizeTask(supabase, taskId, status) {
@@ -680,36 +688,75 @@ async function uploadFileToBucket(supabase, bucket, storagePath, filePath) {
   }
 }
 
-async function waitForComfyOutputs(taskRoot, expectedSqiCount, timeoutMs = 12 * 60 * 1000) {
+async function waitForComfyOutputs(taskRoot, expectedSqiCount, startedAtMs, timeoutMs = COMFY_WAIT_TIMEOUT_MS) {
   if (expectedSqiCount <= 0) {
-    return;
+    return { copied: 0, timedOut: false };
   }
   const finalDir = path.join(taskRoot, "4_Final");
   fs.mkdirSync(finalDir, { recursive: true });
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const entries = await fs.promises.readdir(finalDir, { withFileTypes: true }).catch(() => []);
-    const aiFiles = entries
-      .filter((entry) => entry.isFile() && /\.(jpe?g|png|tiff?|webp|bmp|gif)$/i.test(entry.name))
-      .length;
-    if (aiFiles >= expectedSqiCount) {
-      return;
+  const comfyOutputDir = path.resolve(COMFY_OUTPUT_DIR);
+  if (!fs.existsSync(comfyOutputDir)) {
+    console.warn(`[worker] ComfyUI output dir not found: ${comfyOutputDir}. Skipping wait.`);
+    return { copied: 0, timedOut: true };
+  }
+
+  const copiedSourcePaths = new Set();
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const entries = await fs.promises.readdir(comfyOutputDir, { withFileTypes: true }).catch(() => []);
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !isImageFile(entry.name)) {
+        continue;
+      }
+      const sourcePath = path.join(comfyOutputDir, entry.name);
+      const stat = await fs.promises.stat(sourcePath).catch(() => null);
+      if (!stat || stat.mtimeMs + 1000 < startedAtMs) {
+        continue;
+      }
+      candidates.push({ sourcePath, name: entry.name, mtimeMs: stat.mtimeMs });
+    }
+    candidates.sort((a, b) => a.mtimeMs - b.mtimeMs);
+
+    for (const candidate of candidates) {
+      if (copiedSourcePaths.has(candidate.sourcePath)) {
+        continue;
+      }
+      const parsed = path.parse(candidate.name);
+      const targetName = `AI_${parsed.name}${parsed.ext || ".jpg"}`;
+      let targetPath = path.join(finalDir, targetName);
+      let suffix = 1;
+      while (fs.existsSync(targetPath)) {
+        targetPath = path.join(finalDir, `${path.parse(targetName).name}_${suffix}${path.extname(targetName)}`);
+        suffix += 1;
+      }
+      await fs.promises.copyFile(candidate.sourcePath, targetPath);
+      copiedSourcePaths.add(candidate.sourcePath);
+      console.info(`[worker] Copied Comfy output: ${candidate.sourcePath} -> ${targetPath}`);
+    }
+
+    if (copiedSourcePaths.size >= expectedSqiCount) {
+      return { copied: copiedSourcePaths.size, timedOut: false };
     }
     await sleep(1500);
   }
-  throw new Error(`Timed out waiting for ${expectedSqiCount} ComfyUI output file(s) in 4_Final.`);
+
+  console.warn(
+    `[worker] ComfyUI wait timed out. expected=${expectedSqiCount}, copied=${copiedSourcePaths.size}, output_dir=${comfyOutputDir}`
+  );
+  return { copied: copiedSourcePaths.size, timedOut: true };
 }
 
 async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
   const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
-  const mergedDir = path.join(taskRoot, "3. merge");
+  const mergedDir = path.join(taskRoot, "3_merge");
   const finalDir = path.join(taskRoot, "4_Final");
   const imageMatcher = /\.(jpe?g|png|tiff?|webp|bmp|gif)$/i;
 
   const mergedFiles = readNaturallySortedImageFiles(mergedDir);
   for (const fileName of mergedFiles) {
     const localPath = path.join(mergedDir, fileName);
-    const storagePath = `${localFolderName}/3. merge/${fileName}`;
+    const storagePath = `${localFolderName}/3_merge/${fileName}`;
     await withRetry(`upload merged ${storagePath}`, async () =>
       uploadFileToBucket(supabase, SUPABASE_FINALS_BUCKET, storagePath, localPath)
     );
@@ -758,7 +805,7 @@ async function processAwaitingFolderCreation(supabase) {
       const folderName = buildLocalFolderNameFromTask(row);
       const base = path.join(root, folderName);
 
-      for (const sub of ["1_Raw", "2_Selects", "3. merge", "4_Final"]) {
+      for (const sub of ["1_Raw", "2_Selects", "3_merge", "4_Final"]) {
         fs.mkdirSync(path.join(base, sub), { recursive: true });
       }
 
@@ -815,19 +862,32 @@ async function processPendingProcessing(supabase) {
       }
 
       console.info(`[worker] Processing task ${taskId}...`);
-      await processTaskLocally({ id: taskId, local_folder_name: localFolderName });
+      const processingStartedAtMs = Date.now();
+      const processingResult = await processTaskLocally({ id: taskId, local_folder_name: localFolderName });
+      console.info(
+        `[worker] Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}`
+      );
       const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
-      const mergedDir = path.join(taskRoot, "3. merge");
+      const mergedDir = path.join(taskRoot, "3_merge");
       const mergedFiles = readNaturallySortedImageFiles(mergedDir);
       const sqiMergedCount = mergedFiles.filter((name) => name.toLowerCase().includes("_sqi")).length;
-      await waitForComfyOutputs(taskRoot, sqiMergedCount);
+      if (processingResult.comfyQueuedCount > 0 && sqiMergedCount > 0) {
+        const comfyResult = await waitForComfyOutputs(taskRoot, sqiMergedCount, processingStartedAtMs);
+        if (comfyResult.timedOut) {
+          console.warn(`[worker] Continuing task ${taskId} after Comfy timeout.`);
+        }
+      } else {
+        console.warn(
+          `[worker] Skipping Comfy wait for task ${taskId} (queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}, sqi=${sqiMergedCount}).`
+        );
+      }
       await uploadMergedAndFinalsForReview(supabase, localFolderName);
       await finalizeTask(supabase, taskId, READY_FOR_REVIEW_STATUS);
       console.info(`[worker] Task ${taskId} marked as ${READY_FOR_REVIEW_STATUS}.`);
     } catch (err) {
       console.error(`[worker] Task ${taskId} failed:`, err instanceof Error ? err.message : err);
       try {
-        await finalizeTask(supabase, taskId, ERROR_STATUS);
+        await finalizeTask(supabase, taskId, FAILED_STATUS);
       } catch (statusErr) {
         console.error(
           `[worker] Could not set fallback status for ${taskId}:`,
@@ -936,6 +996,9 @@ async function main() {
   );
   console.info(
     `[worker] Preview env raw values: PREVIEW_RETRY_ATTEMPTS=${process.env.PREVIEW_RETRY_ATTEMPTS ?? "(unset)"}, PREVIEW_RETRY_BASE_MS=${process.env.PREVIEW_RETRY_BASE_MS ?? "(unset)"}, PREVIEW_BRACKET_SIZE=${process.env.PREVIEW_BRACKET_SIZE ?? "(unset)"}, SUPABASE_PREVIEWS_BUCKET=${process.env.SUPABASE_PREVIEWS_BUCKET ?? "(unset)"}`
+  );
+  console.info(
+    `[worker] Comfy output dir: ${COMFY_OUTPUT_DIR}; wait_timeout_ms=${COMFY_WAIT_TIMEOUT_MS}; SUPABASE_FINALS_BUCKET=${SUPABASE_FINALS_BUCKET}`
   );
   await processInitialPreviewSync(getSupabaseClient()).catch((err) => {
     console.error("[worker] Initial full preview sync failed:", err instanceof Error ? err.message : err);

@@ -35,6 +35,8 @@ const IMAGE_EXT = new Set([
 export type ProcessingSummary = {
   ok: boolean;
   mergedFiles?: string[];
+  comfyQueuedCount?: number;
+  comfyFailedCount?: number;
   error?: string;
 };
 
@@ -282,7 +284,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
   const supabase = createSupabase();
   const { taskRoot, localFolderName } = validateShootFolder(shootFolderPath);
   const selectsDir = path.join(taskRoot, "2_Selects");
-  const mergedDir = path.join(taskRoot, "3. merge");
+  const mergedDir = path.join(taskRoot, "3_merge");
 
   const setStatus = async (status: string) => {
     if (!supabase) {
@@ -324,6 +326,8 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
     const brackets = buildBracketsByTripodRule(metaList);
     const mergedOutputs: string[] = [];
     const mergedMeta: Array<{ outBaseName: string; firstName: string; bracketIndex: number }> = [];
+    let comfyQueuedCount = 0;
+    let comfyFailedCount = 0;
     let bracketIndex = 1;
     const origin = resolveInternalAppOrigin();
 
@@ -380,22 +384,32 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
     for (const merged of mergedMeta) {
       const runComfy = shouldRunComfyForFilename(merged.outBaseName);
       if (runComfy) {
-        const res = await fetch(`${origin}/api/ai-edit`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            local_folder_name: localFolderName,
-            filename: merged.outBaseName,
-          }),
-        });
-        const payload = (await res.json().catch(() => null)) as { error?: string } | null;
-        if (!res.ok) {
-          console.error(
-            "[processingEngine] /api/ai-edit failed:",
-            res.status,
-            payload?.error ?? payload
+        try {
+          console.info(`[processingEngine] Triggering ComfyUI for ${merged.outBaseName}...`);
+          const res = await fetch(`${origin}/api/ai-edit`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              local_folder_name: localFolderName,
+              filename: merged.outBaseName,
+            }),
+          });
+          const payload = (await res.json().catch(() => null)) as
+            | { error?: string; promptId?: string; comfyQueued?: boolean }
+            | null;
+          if (!res.ok || !payload?.comfyQueued) {
+            comfyFailedCount += 1;
+            console.warn(
+              "[processingEngine] ComfyUI API failed/not running:",
+              res.status,
+              payload?.error ?? payload
+            );
+            continue;
+          }
+          comfyQueuedCount += 1;
+          console.info(
+            `[processingEngine] ComfyUI queued for ${merged.outBaseName}${payload.promptId ? ` (prompt ${payload.promptId})` : ""}.`
           );
-        } else {
           const baseName = baseNameForCleanup(merged.firstName);
           try {
             await cleanupComfyFinalFilename({
@@ -407,6 +421,12 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
           } catch (renameErr) {
             console.error("[processingEngine] Comfy output rename skipped:", renameErr);
           }
+        } catch (err) {
+          comfyFailedCount += 1;
+          console.warn(
+            "[processingEngine] ComfyUI API failed/not running:",
+            err instanceof Error ? err.message : err
+          );
         }
       } else {
         console.info(
@@ -415,7 +435,12 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
       }
     }
 
-    return { ok: true, mergedFiles: mergedOutputs.map((p) => path.basename(p)) };
+    return {
+      ok: true,
+      mergedFiles: mergedOutputs.map((p) => path.basename(p)),
+      comfyQueuedCount,
+      comfyFailedCount,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Processing failed.";
     console.error("[processingEngine]", message);

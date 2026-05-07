@@ -48,7 +48,7 @@ function validateMergedFile(localFolderName: string, filename: string): string {
   if (safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder)) {
     throw new Error("Invalid local_folder_name.");
   }
-  const mergedPath = path.resolve(PHOTOS_ROOT, safeFolder, "3. merge", safeFile);
+  const mergedPath = path.resolve(PHOTOS_ROOT, safeFolder, "3_merge", safeFile);
   const rootResolved = path.resolve(PHOTOS_ROOT);
   if (!mergedPath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
     throw new Error("Access denied.");
@@ -126,6 +126,7 @@ export async function POST(request: Request) {
     let promptId: string | undefined;
 
     try {
+      console.info(`[ai-edit] Triggering ComfyUI prompt for ${localFolderName}/${filename} at ${promptUrl}`);
       const comfyResponse = await fetch(promptUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -160,7 +161,14 @@ export async function POST(request: Request) {
 
       comfyQueued = true;
       promptId = comfyPayload?.prompt_id;
+      console.info(
+        `[ai-edit] ComfyUI prompt accepted for ${localFolderName}/${filename}${promptId ? ` (prompt ${promptId})` : ""}.`
+      );
     } catch (err) {
+      console.warn(
+        "[ai-edit] ComfyUI API failed/not running:",
+        err instanceof Error ? err.message : err
+      );
       return NextResponse.json(
         {
           error:

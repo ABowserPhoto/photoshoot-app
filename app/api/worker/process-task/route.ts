@@ -46,6 +46,8 @@ export async function POST(request: Request) {
     taskId,
     local_folder_name: localFolderName,
     mergedFiles: summary.mergedFiles ?? [],
+    comfyQueuedCount: summary.comfyQueuedCount ?? 0,
+    comfyFailedCount: summary.comfyFailedCount ?? 0,
     error: summary.error,
   });
 }
