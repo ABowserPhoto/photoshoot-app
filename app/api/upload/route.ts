@@ -11,6 +11,10 @@ type UploadTaskData = {
   title?: string;
   photoshoot_type?: string;
   local_folder_name?: string;
+  email?: string;
+  contact_first_name?: string;
+  contact_last_name?: string;
+  company_name?: string;
   street?: string;
   zip_code?: string;
   city?: string;
@@ -54,6 +58,11 @@ export async function POST(request: Request) {
     let dbStreet = "";
     let dbZipCode = "";
     let dbCity = "";
+    let dbTitle = "";
+    let dbEmail = "";
+    let dbContactFirstName = "";
+    let dbContactLastName = "";
+    let dbCompanyName = "";
     let dbLexofficeContactId = "";
     let dbLocalFolderName = "";
 
@@ -66,7 +75,9 @@ export async function POST(request: Request) {
       const supabase = createClient(supabaseUrl, supabaseAnonKey);
       const { data: taskRow, error: taskLookupError } = await supabase
         .from("tasks")
-        .select("street, zip_code, city, lexoffice_contact_id, services, products, local_folder_name")
+        .select(
+          "title, email, contact_first_name, contact_last_name, company_name, street, zip_code, city, lexoffice_contact_id, services, products, local_folder_name"
+        )
         .eq("id", taskId)
         .single();
 
@@ -76,6 +87,11 @@ export async function POST(request: Request) {
           error: taskLookupError?.message ?? "Task not found",
         });
       } else {
+        dbTitle = taskRow.title ?? "";
+        dbEmail = taskRow.email ?? "";
+        dbContactFirstName = taskRow.contact_first_name ?? "";
+        dbContactLastName = taskRow.contact_last_name ?? "";
+        dbCompanyName = taskRow.company_name ?? "";
         dbStreet = taskRow.street ?? "";
         dbZipCode = taskRow.zip_code ?? "";
         dbCity = taskRow.city ?? "";
@@ -133,10 +149,32 @@ export async function POST(request: Request) {
 
     const services_lexoffice_id = mapLexofficeIdsFromLineItems(servicesSource);
     const products_lexoffice_id = mapLexofficeIdsFromLineItems(productsSource);
+    const shootName = dbTitle || title || localFolderName;
+    const clientEmail =
+      dbEmail ||
+      (typeof taskData.email === "string" ? taskData.email.trim() : "") ||
+      "";
+    const clientNameFromContact = [dbContactFirstName, dbContactLastName]
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    const clientName =
+      clientNameFromContact ||
+      dbCompanyName.trim() ||
+      [taskData.contact_first_name, taskData.contact_last_name]
+        .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+        .join(" ")
+        .trim() ||
+      (typeof taskData.company_name === "string" ? taskData.company_name.trim() : "") ||
+      "Client";
 
     const zapierPayload = {
       ...taskData,
       id: taskId || taskData.id,
+      client_email: clientEmail,
+      shoot_name: shootName,
+      client_name: clientName,
       street: dbStreet || taskData.street || "",
       zip_code: dbZipCode || taskData.zip_code || "",
       city: dbCity || taskData.city || "",
