@@ -731,9 +731,17 @@ async function waitForComfyOutputs(taskRoot, expectedSqiCount, startedAtMs, time
         targetPath = path.join(finalDir, `${path.parse(targetName).name}_${suffix}${path.extname(targetName)}`);
         suffix += 1;
       }
-      await fs.promises.copyFile(candidate.sourcePath, targetPath);
-      copiedSourcePaths.add(candidate.sourcePath);
-      console.info(`[worker] Copied Comfy output: ${candidate.sourcePath} -> ${targetPath}`);
+      try {
+        await fs.promises.copyFile(candidate.sourcePath, targetPath);
+        copiedSourcePaths.add(candidate.sourcePath);
+        console.info(`[worker] Copied Comfy output: ${candidate.sourcePath} -> ${targetPath}`);
+      } catch (err) {
+        console.error("RAW COMFY ERROR:", err);
+        console.error(
+          `[worker] Failed to copy Comfy output: ${candidate.sourcePath} -> ${targetPath}`,
+          err instanceof Error ? err.message : err
+        );
+      }
     }
 
     if (copiedSourcePaths.size >= expectedSqiCount) {
@@ -899,6 +907,7 @@ async function processPendingProcessing(supabase) {
       await finalizeTask(supabase, taskId, READY_FOR_REVIEW_STATUS);
       console.info(`[worker] Task ${taskId} marked as ${READY_FOR_REVIEW_STATUS}.`);
     } catch (err) {
+      console.error("RAW COMFY ERROR:", err);
       console.error(`[worker] Task ${taskId} failed:`, err instanceof Error ? err.message : err);
       try {
         await finalizeTask(supabase, taskId, FAILED_STATUS);
