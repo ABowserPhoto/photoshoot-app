@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import ExifReader from "exifreader";
+import sharp from "sharp";
 
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
@@ -17,6 +19,7 @@ const COMFY_TRIGGER_TOKENS = (process.env.COMFYUI_TRIGGER_TOKENS ?? "_sqi")
   .split(",")
   .map((token) => token.trim().toLowerCase())
   .filter(Boolean);
+const COMFY_PROMPT_URL = "http://127.0.0.1:8188/prompt";
 
 const IMAGE_EXT = new Set([
   ".jpg",
@@ -44,6 +47,11 @@ export type ProcessingSummary = {
 type RationalLike = {
   value: [number, number];
   computed?: number | null;
+};
+
+type WorkflowNode = {
+  inputs?: Record<string, unknown>;
+  class_type?: string;
 };
 
 type PhotoMeta = {
@@ -74,6 +82,105 @@ function createSupabase(): SupabaseClient | null {
 
 function resolveInternalAppOrigin(): string {
   return process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ?? "http://127.0.0.1:3000";
+}
+
+function normalizeErrorMessage(value: unknown, fallback: string): string {
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const msg = record.message;
+    if (typeof msg === "string" && msg.trim()) {
+      return msg;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function loadWorkflowTemplate(): Record<string, WorkflowNode> {
+  const workflowPath = path.join(process.cwd(), "lib", "comfy", "workflow_api.json");
+  const raw = fs.readFileSync(workflowPath, "utf8");
+  return JSON.parse(raw) as Record<string, WorkflowNode>;
+}
+
+function validateMergedFilename(filename: string): string {
+  const safe = path.basename(filename.trim());
+  if (!safe || safe !== filename.trim() || !isImageFile(safe)) {
+    throw new Error(`Invalid merged filename: ${filename}`);
+  }
+  return safe;
+}
+
+async function triggerComfyLocally(localFolderName: string, mergedFilename: string): Promise<{ promptId?: string }> {
+  const safeFolder = localFolderName.trim();
+  if (!safeFolder || safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder)) {
+    throw new Error("Invalid local_folder_name.");
+  }
+  const safeFilename = validateMergedFilename(mergedFilename);
+  const imagePath = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFilename);
+  const rootResolved = path.resolve(PHOTOS_ROOT);
+  if (!imagePath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
+    throw new Error("Access denied.");
+  }
+  console.info(`[processingEngine] Local Comfy source image: ${imagePath}`);
+  if (!fs.existsSync(imagePath) || !fs.statSync(imagePath).isFile()) {
+    throw new Error(`Merged image not found at local path: ${imagePath}`);
+  }
+
+  const comfyInputDir = process.env.COMFYUI_INPUT_DIR?.trim();
+  if (!comfyInputDir) {
+    throw new Error("COMFYUI_INPUT_DIR is not configured.");
+  }
+  const inputRoot = path.resolve(comfyInputDir);
+  fs.mkdirSync(inputRoot, { recursive: true });
+  const resizedFilename = `resized_${Date.now()}_${safeFilename}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const resizedPath = path.join(inputRoot, resizedFilename);
+  await sharp(imagePath)
+    .resize({ width: 2048, height: 2048, fit: "inside" })
+    .toFile(resizedPath);
+
+  const outputBaseName = path.basename(safeFilename, path.extname(safeFilename));
+  const outputPrefix = path.join(PHOTOS_ROOT, safeFolder, "4_Final", `AI_${outputBaseName}`);
+  const workflow = loadWorkflowTemplate();
+  if (!workflow["1"]?.inputs || !workflow["9"]?.inputs || !workflow["11"]?.inputs) {
+    throw new Error("Workflow template is missing required nodes.");
+  }
+  workflow["9"].inputs.seed = Math.floor(Math.random() * 1000000000000000);
+  workflow["1"].inputs.image = resizedFilename;
+  workflow["11"].inputs.filename_prefix = outputPrefix;
+
+  const comfyRequestPayload = {
+    prompt: workflow,
+    client_id: randomUUID(),
+  };
+  const comfyResponse = await fetch(COMFY_PROMPT_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(comfyRequestPayload),
+  });
+  const comfyPayload = (await comfyResponse.json().catch(() => null)) as
+    | {
+        prompt_id?: string;
+        error?: unknown;
+        detail?: unknown;
+        message?: unknown;
+      }
+    | null;
+  if (!comfyResponse.ok) {
+    throw new Error(
+      normalizeErrorMessage(
+        comfyPayload?.message ?? comfyPayload?.detail ?? comfyPayload?.error ?? comfyPayload,
+        `ComfyUI error (${comfyResponse.status}).`
+      )
+    );
+  }
+  return { promptId: comfyPayload?.prompt_id };
 }
 
 function validateShootFolder(shootFolderPath: string): { taskRoot: string; localFolderName: string } {
@@ -387,32 +494,8 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
       const runComfy = shouldRunComfyForFilename(merged.outBaseName);
       if (runComfy) {
         try {
-          const comfyRequestPayload = {
-            local_folder_name: localFolderName,
-            filename: merged.outBaseName,
-          };
-          console.info(`[processingEngine] Triggering ComfyUI for ${merged.outBaseName}...`);
-          console.info(`[processingEngine] Comfy trigger payload: ${JSON.stringify(comfyRequestPayload)}`);
-          const res = await fetch(`${origin}/api/ai-edit`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(comfyRequestPayload),
-          });
-          const payload = (await res.json().catch(() => null)) as
-            | { error?: string; promptId?: string; comfyQueued?: boolean }
-            | null;
-          if (!res.ok || !payload?.comfyQueued) {
-            comfyFailedCount += 1;
-            const detail = `[processingEngine] ComfyUI API failed/not running: status=${res.status} file=${merged.outBaseName} response=${JSON.stringify(
-              payload ?? null
-            )}`;
-            comfyErrors.push(detail);
-            console.error(detail);
-            console.error(
-              `[processingEngine] Comfy request payload for ${merged.outBaseName}: ${JSON.stringify(comfyRequestPayload)}`
-            );
-            continue;
-          }
+          console.info(`[processingEngine] Triggering ComfyUI locally for ${merged.outBaseName}...`);
+          const payload = await triggerComfyLocally(localFolderName, merged.outBaseName);
           comfyQueuedCount += 1;
           console.info(
             `[processingEngine] ComfyUI queued for ${merged.outBaseName}${payload.promptId ? ` (prompt ${payload.promptId})` : ""}.`
@@ -437,7 +520,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
           comfyErrors.push(detail);
           console.error(detail);
           console.error(
-            `[processingEngine] Comfy request payload for ${merged.outBaseName}: ${JSON.stringify({
+            `[processingEngine] Local Comfy trigger context for ${merged.outBaseName}: ${JSON.stringify({
               local_folder_name: localFolderName,
               filename: merged.outBaseName,
             })}`

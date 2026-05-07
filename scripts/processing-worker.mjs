@@ -644,6 +644,7 @@ async function processTaskLocally(task) {
   const localOrigin = process.env.LOCAL_APP_ORIGIN?.trim() || "http://127.0.0.1:3000";
   const workerSecret = requiredEnv("LOCAL_WORKER_SECRET");
   const url = `${localOrigin.replace(/\/$/, "")}/api/worker/process-task`;
+  console.info(`[worker] Calling local process-task endpoint: ${url}`);
 
   const response = await fetch(url, {
     method: "POST",
@@ -882,7 +883,7 @@ async function processPendingProcessing(supabase) {
       const processingStartedAtMs = Date.now();
       const processingResult = await processTaskLocally({ id: taskId, local_folder_name: localFolderName });
       console.info(
-        `[worker] Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}`
+        `[worker] Local Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}`
       );
       if (processingResult.comfyErrors.length > 0) {
         for (const errorLine of processingResult.comfyErrors) {
