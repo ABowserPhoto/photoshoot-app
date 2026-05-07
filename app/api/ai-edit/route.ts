@@ -63,18 +63,23 @@ function validateMergedFile(localFolderName: string, filename: string): string {
   if (!safeFolder || !safeFile || safeFile !== filename.trim()) {
     throw new Error("Invalid local_folder_name or filename.");
   }
+  const ext = path.extname(safeFile).toLowerCase();
+  if (!ext || ![".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp", ".gif"].includes(ext)) {
+    throw new Error("Invalid filename extension for merged image.");
+  }
   if (safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder)) {
     throw new Error("Invalid local_folder_name.");
   }
-  const mergedPath = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFile);
+  const imagePath = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFile);
   const rootResolved = path.resolve(PHOTOS_ROOT);
-  if (!mergedPath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
+  if (!imagePath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
     throw new Error("Access denied.");
   }
-  if (!fs.existsSync(mergedPath) || !fs.statSync(mergedPath).isFile()) {
+  console.log("ComfyUI trying to find merged image at:", imagePath);
+  if (!fs.existsSync(imagePath) || !fs.statSync(imagePath).isFile()) {
     throw new Error("Merged image not found.");
   }
-  return mergedPath;
+  return imagePath;
 }
 
 export async function POST(request: Request) {
