@@ -126,13 +126,20 @@ export async function POST(request: Request) {
 
     try {
       console.info(`[ai-edit] Triggering ComfyUI prompt for ${localFolderName}/${filename} at ${promptUrl}`);
+      const promptPayload = {
+        prompt: workflow,
+        client_id: clientId,
+      };
+      console.info(
+        `[ai-edit] ComfyUI payload debug: url=${promptUrl}, nodes=${Object.keys(workflow).length}, bytes=${Buffer.byteLength(
+          JSON.stringify(promptPayload),
+          "utf8"
+        )}`
+      );
       const comfyResponse = await fetch(promptUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: workflow,
-          client_id: clientId,
-        }),
+        body: JSON.stringify(promptPayload),
       });
 
       const comfyPayload = (await comfyResponse.json().catch(() => null)) as
