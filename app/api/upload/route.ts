@@ -9,17 +9,69 @@ export const runtime = "nodejs";
 type UploadTaskData = {
   id?: string | number;
   title?: string;
+  client?: string;
+  price?: number;
   photoshoot_type?: string;
+  shoot_location?: string;
+  photoshoot_date?: string;
+  due_date?: string;
+  tax_percentage?: number;
+  amount_type?: string;
+  discount?: number;
+  bracket_size?: number;
   local_folder_name?: string;
   email?: string;
+  phone?: string;
   contact_first_name?: string;
   contact_last_name?: string;
   company_name?: string;
+  country?: string;
+  services?: unknown;
+  products?: unknown;
+  services_lexoffice_id?: string[];
+  products_lexoffice_id?: string[];
   street?: string;
   zip_code?: string;
   city?: string;
   lexoffice_contact_id?: string;
   [key: string]: unknown;
+};
+
+type DbTaskRow = {
+  id?: string | number;
+  title?: string | null;
+  client?: string | null;
+  company_name?: string | null;
+  contact_first_name?: string | null;
+  contact_last_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  street?: string | null;
+  zip_code?: string | null;
+  city?: string | null;
+  country?: string | null;
+  lexoffice_contact_id?: string | null;
+  services?: unknown;
+  products?: unknown;
+  services_lexoffice_id?: unknown;
+  products_lexoffice_id?: unknown;
+  tax_percentage?: number | null;
+  amount_type?: string | null;
+  discount?: number | null;
+  photoshoot_type?: string | null;
+  shoot_location?: string | null;
+  photoshoot_date?: string | null;
+  due_date?: string | null;
+  local_folder_name?: string | null;
+  bracket_size?: number | null;
+};
+
+type DbClientRow = {
+  company_name?: string | null;
+  street?: string | null;
+  zip_code?: string | null;
+  city?: string | null;
+  country?: string | null;
 };
 
 function getBaseDirectory(photoshootType: string) {
@@ -41,6 +93,31 @@ function mapLexofficeIdsFromLineItems(items: unknown): string[] {
   });
 }
 
+function normalizeLineItems(items: unknown): Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }> {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const row = item as Record<string, unknown>;
+      const name = typeof row.name === "string" ? row.name.trim() : "";
+      if (!name) return null;
+      return {
+        name,
+        quantity: Number(row.quantity) || 1,
+        price: Number(row.price) || 0,
+        lexoffice_id: typeof row.lexoffice_id === "string" ? row.lexoffice_id : null,
+      };
+    })
+    .filter(
+      (item): item is { name: string; quantity: number; price: number; lexoffice_id: string | null } =>
+        Boolean(item)
+    );
+}
+
+function sumLineItems(items: Array<{ quantity: number; price: number }>): number {
+  return items.reduce((sum, item) => sum + item.quantity * item.price, 0);
+}
+
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
@@ -58,28 +135,42 @@ export async function POST(request: Request) {
     let dbStreet = "";
     let dbZipCode = "";
     let dbCity = "";
+    let dbCountry = "";
     let dbTitle = "";
+    let dbClient = "";
     let dbEmail = "";
+    let dbPhone = "";
     let dbContactFirstName = "";
     let dbContactLastName = "";
     let dbCompanyName = "";
+    let dbShootLocation = "";
+    let dbPhotoshootDate = "";
+    let dbDueDate = "";
+    let dbPhotoshootType = "";
+    let dbTaxPercentage = 19;
+    let dbAmountType = "Net";
+    let dbDiscount = 0;
+    let dbBracketSize = 3;
     let dbLexofficeContactId = "";
     let dbLocalFolderName = "";
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    const supabaseKey =
+      process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
     let dbServices: unknown = undefined;
     let dbProducts: unknown = undefined;
+    let dbServicesLexofficeIds: string[] = [];
+    let dbProductsLexofficeIds: string[] = [];
 
-    if (taskId && supabaseUrl && supabaseAnonKey) {
-      const supabase = createClient(supabaseUrl, supabaseAnonKey);
+    if (taskId && supabaseUrl && supabaseKey) {
+      const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
       const { data: taskRow, error: taskLookupError } = await supabase
         .from("tasks")
         .select(
-          "title, email, contact_first_name, contact_last_name, company_name, street, zip_code, city, lexoffice_contact_id, services, products, local_folder_name"
+          "id, title, client, company_name, contact_first_name, contact_last_name, email, phone, street, zip_code, city, country, lexoffice_contact_id, services, products, services_lexoffice_id, products_lexoffice_id, tax_percentage, amount_type, discount, photoshoot_type, shoot_location, photoshoot_date, due_date, local_folder_name, bracket_size"
         )
         .eq("id", taskId)
-        .single();
+        .maybeSingle();
 
       if (taskLookupError || !taskRow) {
         console.error("Task lookup failed; proceeding with frontend payload only.", {
@@ -87,24 +178,60 @@ export async function POST(request: Request) {
           error: taskLookupError?.message ?? "Task not found",
         });
       } else {
-        dbTitle = taskRow.title ?? "";
-        dbEmail = taskRow.email ?? "";
-        dbContactFirstName = taskRow.contact_first_name ?? "";
-        dbContactLastName = taskRow.contact_last_name ?? "";
-        dbCompanyName = taskRow.company_name ?? "";
-        dbStreet = taskRow.street ?? "";
-        dbZipCode = taskRow.zip_code ?? "";
-        dbCity = taskRow.city ?? "";
-        dbLexofficeContactId = taskRow.lexoffice_contact_id ?? "";
-        dbServices = taskRow.services;
-        dbProducts = taskRow.products;
-        dbLocalFolderName = taskRow.local_folder_name ?? "";
+        const row = taskRow as DbTaskRow;
+        dbTitle = row.title ?? "";
+        dbClient = row.client ?? "";
+        dbEmail = row.email ?? "";
+        dbPhone = row.phone ?? "";
+        dbContactFirstName = row.contact_first_name ?? "";
+        dbContactLastName = row.contact_last_name ?? "";
+        dbCompanyName = row.company_name ?? "";
+        dbStreet = row.street ?? "";
+        dbZipCode = row.zip_code ?? "";
+        dbCity = row.city ?? "";
+        dbCountry = row.country ?? "";
+        dbLexofficeContactId = row.lexoffice_contact_id ?? "";
+        dbServices = row.services;
+        dbProducts = row.products;
+        dbServicesLexofficeIds = Array.isArray(row.services_lexoffice_id)
+          ? row.services_lexoffice_id.map((value) => String(value ?? ""))
+          : [];
+        dbProductsLexofficeIds = Array.isArray(row.products_lexoffice_id)
+          ? row.products_lexoffice_id.map((value) => String(value ?? ""))
+          : [];
+        dbTaxPercentage = Number(row.tax_percentage ?? 19);
+        dbAmountType = row.amount_type === "Gross" ? "Gross" : "Net";
+        dbDiscount = Number(row.discount ?? 0);
+        dbPhotoshootType = row.photoshoot_type ?? "";
+        dbShootLocation = row.shoot_location ?? "";
+        dbPhotoshootDate = row.photoshoot_date ?? "";
+        dbDueDate = row.due_date ?? "";
+        dbLocalFolderName = row.local_folder_name ?? "";
+        dbBracketSize = Number(row.bracket_size ?? 3) === 5 ? 5 : 3;
+
+        if (dbLexofficeContactId) {
+          const { data: clientRow } = await supabase
+            .from("clients")
+            .select("company_name, street, zip_code, city, country")
+            .eq("lexoffice_contact_id", dbLexofficeContactId)
+            .order("id", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (clientRow) {
+            const client = clientRow as DbClientRow;
+            dbCompanyName = dbCompanyName || client.company_name || "";
+            dbStreet = dbStreet || client.street || "";
+            dbZipCode = dbZipCode || client.zip_code || "";
+            dbCity = dbCity || client.city || "";
+            dbCountry = dbCountry || client.country || "";
+          }
+        }
       }
     } else {
       console.error("Task lookup skipped; missing task ID or Supabase config.", {
         hasTaskId: Boolean(taskId),
         hasSupabaseUrl: Boolean(supabaseUrl),
-        hasSupabaseAnonKey: Boolean(supabaseAnonKey),
+        hasSupabaseKey: Boolean(supabaseKey),
       });
     }
 
@@ -146,9 +273,20 @@ export async function POST(request: Request) {
 
     const servicesSource = dbServices !== undefined ? dbServices : taskData.services;
     const productsSource = dbProducts !== undefined ? dbProducts : taskData.products;
-
-    const services_lexoffice_id = mapLexofficeIdsFromLineItems(servicesSource);
-    const products_lexoffice_id = mapLexofficeIdsFromLineItems(productsSource);
+    const services = normalizeLineItems(servicesSource);
+    const products = normalizeLineItems(productsSource);
+    const servicePrices = services.map((item) => Number(item.price) || 0);
+    const productPrices = products.map((item) => Number(item.price) || 0);
+    const services_lexoffice_id =
+      dbServicesLexofficeIds.length > 0 ? dbServicesLexofficeIds : mapLexofficeIdsFromLineItems(services);
+    const products_lexoffice_id =
+      dbProductsLexofficeIds.length > 0 ? dbProductsLexofficeIds : mapLexofficeIdsFromLineItems(products);
+    const servicesSubtotal = sumLineItems(services);
+    const productsSubtotal = sumLineItems(products);
+    const subtotal = servicesSubtotal + productsSubtotal;
+    const discountValue = Number(dbDiscount || taskData.discount || 0);
+    const taxableTotal = Math.max(0, subtotal - discountValue);
+    const taxPercentage = Number(dbTaxPercentage || taskData.tax_percentage || 19);
     const shootName = dbTitle || title || localFolderName;
     const clientEmail =
       dbEmail ||
@@ -168,19 +306,69 @@ export async function POST(request: Request) {
         .trim() ||
       (typeof taskData.company_name === "string" ? taskData.company_name.trim() : "") ||
       "Client";
+    const amountType =
+      dbAmountType || (typeof taskData.amount_type === "string" ? taskData.amount_type : "Net");
+    const invoiceTotal =
+      amountType === "Gross"
+        ? taxableTotal
+        : taxableTotal + taxableTotal * (Number.isFinite(taxPercentage) ? taxPercentage / 100 : 0);
+    const shootDate = dbPhotoshootDate || (typeof taskData.photoshoot_date === "string" ? taskData.photoshoot_date : "");
+    const dueDate = dbDueDate || (typeof taskData.due_date === "string" ? taskData.due_date : "");
+    const shootLocation =
+      dbShootLocation || (typeof taskData.shoot_location === "string" ? taskData.shoot_location : "");
+    const resolvedPhotoshootType =
+      dbPhotoshootType || (typeof taskData.photoshoot_type === "string" ? taskData.photoshoot_type : "");
 
     const zapierPayload = {
       ...taskData,
       id: taskId || taskData.id,
-      client_email: clientEmail,
+      task_id: taskId || taskData.id || "",
       shoot_name: shootName,
+      shoot_title: shootName,
+      shoot_date: shootDate,
+      shoot_location: shootLocation,
+      photoshoot_type: resolvedPhotoshootType,
+      due_date: dueDate || "",
+      local_folder_name: localFolderName,
+      bracket_size: dbBracketSize || Number(taskData.bracket_size ?? 3) || 3,
+      client_email: clientEmail,
       client_name: clientName,
+      client: dbClient || clientName,
+      company_name:
+        dbCompanyName || (typeof taskData.company_name === "string" ? taskData.company_name : "") || "",
+      contact_first_name:
+        dbContactFirstName || (typeof taskData.contact_first_name === "string" ? taskData.contact_first_name : "") || "",
+      contact_last_name:
+        dbContactLastName || (typeof taskData.contact_last_name === "string" ? taskData.contact_last_name : "") || "",
+      email: clientEmail,
+      phone: dbPhone || (typeof taskData.phone === "string" ? taskData.phone : "") || "",
       street: dbStreet || taskData.street || "",
       zip_code: dbZipCode || taskData.zip_code || "",
       city: dbCity || taskData.city || "",
+      country: dbCountry || (typeof taskData.country === "string" ? taskData.country : "") || "",
       lexoffice_contact_id: dbLexofficeContactId || taskData.lexoffice_contact_id || "",
+      services,
+      products,
+      service_prices: servicePrices,
+      product_prices: productPrices,
       services_lexoffice_id,
       products_lexoffice_id,
+      services_count: services.length,
+      products_count: products.length,
+      invoice: {
+        subtotal_services: servicesSubtotal,
+        subtotal_products: productsSubtotal,
+        subtotal,
+        discount: discountValue,
+        taxable_total: taxableTotal,
+        tax_percentage: taxPercentage,
+        amount_type: amountType,
+        total: invoiceTotal,
+      },
+      tax_percentage: taxPercentage,
+      amount_type: amountType,
+      discount: discountValue,
+      total_price: invoiceTotal,
     };
 
     console.log("ZAPIER PAYLOAD:", zapierPayload);
