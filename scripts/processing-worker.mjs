@@ -9,6 +9,8 @@ import chokidar from "chokidar";
 import sharp from "sharp";
 
 import { buildLocalFolderNameFromTask } from "./localFolderName.mjs";
+import { buildTimestampBracketsFromDir } from "../lib/bracketGrouping.mjs";
+import { sanitizeStoragePath } from "../lib/sanitizeStoragePath.mjs";
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
 const execFileAsync = promisify(execFile);
@@ -30,7 +32,6 @@ const PREVIEW_WIDTH = 1080;
 const PREVIEW_QUALITY = 45;
 
 const DEFAULT_PHOTOS_ROOT = "D:\\Photos_2026";
-const DEFAULT_PREVIEW_BRACKET_SIZE = 3;
 
 /**
  * Root for shoot folders.
@@ -77,7 +78,6 @@ const RETRY_ATTEMPTS = readPositiveIntEnv("WORKER_RETRY_ATTEMPTS", 3);
 const RETRY_BASE_MS = readPositiveIntEnv("WORKER_RETRY_BASE_MS", 500);
 const PREVIEW_RETRY_ATTEMPTS = readPositiveIntEnv("PREVIEW_RETRY_ATTEMPTS", 3);
 const PREVIEW_RETRY_BASE_MS = readPositiveIntEnv("PREVIEW_RETRY_BASE_MS", 500);
-const PREVIEW_BRACKET_SIZE = readPositiveIntEnv("PREVIEW_BRACKET_SIZE", DEFAULT_PREVIEW_BRACKET_SIZE);
 const COVER_THUMB_WIDTH = readPositiveIntEnv("COVER_THUMB_WIDTH", 600);
 const WATERMARK_PATH = path.join(process.cwd(), "public", "watermark.png");
 const SUPABASE_PREVIEWS_BUCKET = process.env.SUPABASE_PREVIEWS_BUCKET?.trim() || "previews";
@@ -186,17 +186,6 @@ function readNaturallySortedImageFiles(dir) {
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
 }
 
-function chunkFiles(files, bracketSize) {
-  const chunks = [];
-  for (let i = 0; i < files.length; i += bracketSize) {
-    const chunk = files.slice(i, i + bracketSize);
-    if (chunk.length === bracketSize) {
-      chunks.push(chunk);
-    }
-  }
-  return chunks;
-}
-
 function parseSelectionPayload(raw) {
   const payload = raw && typeof raw === "object" ? raw : {};
   const selectedChunkIndices = Array.from(
@@ -206,10 +195,7 @@ function parseSelectionPayload(raw) {
         .filter((value) => Number.isInteger(value) && value >= 0)
     )
   ).sort((a, b) => a - b);
-  const bracketSize = Number.isInteger(Number(payload.bracket_size))
-    ? Math.max(1, Math.min(15, Number(payload.bracket_size)))
-    : 3;
-  return { selectedChunkIndices, bracketSize };
+  return { selectedChunkIndices };
 }
 
 function parsePreviewItems(raw) {
@@ -319,11 +305,13 @@ async function buildPreviewBuffer(sourcePath) {
 }
 
 async function uploadPreviewBuffer(supabase, params) {
-  const storagePath = `${params.localFolderName}/${safePreviewStem(
-    params.localFolderName,
-    params.middleFilename,
-    params.chunkIndex
-  )}.jpg`;
+  const storagePath = sanitizeStoragePath(
+    `${params.localFolderName}/${safePreviewStem(
+      params.localFolderName,
+      params.middleFilename,
+      params.chunkIndex
+    )}.jpg`
+  );
   await withPreviewRetry(`upload preview ${storagePath}`, async () => {
     const { error } = await supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).upload(storagePath, params.buffer, {
       upsert: true,
@@ -357,7 +345,7 @@ async function ensureCoverImageOnce(supabase, taskRow, rawDir, chunks) {
   const buffer = await withPreviewRetry(`cover thumbnail ${taskId}`, async () =>
     buildCoverThumbnailBuffer(sourcePath)
   );
-  const storagePath = `cover_${taskId}.jpg`;
+  const storagePath = sanitizeStoragePath(`cover_${taskId}.jpg`);
   await withPreviewRetry(`upload cover ${storagePath}`, async () => {
     const { error } = await supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).upload(storagePath, buffer, {
       upsert: true,
@@ -395,13 +383,7 @@ async function syncTaskPreviews(supabase, taskRow) {
     return;
   }
 
-  const bracketSizeFromSelection = Number(taskRow.gallery_selection?.bracket_size);
-  const bracketSize =
-    Number.isInteger(bracketSizeFromSelection) && bracketSizeFromSelection > 0
-      ? Math.min(15, bracketSizeFromSelection)
-      : PREVIEW_BRACKET_SIZE;
-  const sortedFiles = readNaturallySortedImageFiles(rawDir);
-  const chunks = chunkFiles(sortedFiles, bracketSize);
+  const chunks = await buildTimestampBracketsFromDir(rawDir);
   const existingItems = parsePreviewItems(taskRow.gallery_previews);
   const existingByChunk = new Map(existingItems.map((item) => [item.chunkIndex, item]));
   const nextItems = [];
@@ -446,7 +428,7 @@ async function syncTaskPreviews(supabase, taskRow) {
       .update({
         gallery_previews: {
           updated_at: new Date().toISOString(),
-          bracket_size: bracketSize,
+          bracket_size: chunks[0]?.length ?? null,
           items: nextItems,
         },
       })
@@ -599,8 +581,8 @@ function startRawFolderWatcher() {
   console.info(`[worker] Watching RAW folders: ${watchPattern}`);
 }
 
-function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) {
-  const { selectedChunkIndices, bracketSize } = parseSelectionPayload(gallerySelection);
+async function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) {
+  const { selectedChunkIndices } = parseSelectionPayload(gallerySelection);
   if (selectedChunkIndices.length === 0) {
     throw new Error("No selected_chunk_indices in gallery_selection.");
   }
@@ -610,8 +592,7 @@ function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) {
   const selectsDir = path.join(base, "2_Selects");
   fs.mkdirSync(selectsDir, { recursive: true });
 
-  const sortedFiles = readNaturallySortedImageFiles(rawDir);
-  const chunks = chunkFiles(sortedFiles, bracketSize);
+  const chunks = await buildTimestampBracketsFromDir(rawDir);
   const copiedFiles = [];
 
   for (const chunkIndex of selectedChunkIndices) {
@@ -637,7 +618,7 @@ function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) {
   if (copiedFiles.length === 0) {
     throw new Error("No selected RAW files were copied to 2_Selects.");
   }
-  return { copiedFiles, selectedChunkIndices, bracketSize };
+  return { copiedFiles, selectedChunkIndices };
 }
 
 async function processTaskLocally(task) {
@@ -768,7 +749,7 @@ async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
   let mergedUploaded = 0;
   for (const fileName of mergedFiles) {
     const localPath = path.join(mergedDir, fileName);
-    const storagePath = `${localFolderName}/3_Merged/${fileName}`;
+    const storagePath = sanitizeStoragePath(`${localFolderName}/3_Merged/${fileName}`);
     await withRetry(`upload merged ${storagePath}`, async () =>
       uploadFileToBucket(supabase, SUPABASE_FINALS_BUCKET, storagePath, localPath)
     );
@@ -783,7 +764,7 @@ async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
   let finalUploaded = 0;
   for (const fileName of finalFiles) {
     const localPath = path.join(finalDir, fileName);
-    const storagePath = `${localFolderName}/4_Final/${fileName}`;
+    const storagePath = sanitizeStoragePath(`${localFolderName}/4_Final/${fileName}`);
     await withRetry(`upload final ${storagePath}`, async () =>
       uploadFileToBucket(supabase, SUPABASE_FINALS_BUCKET, storagePath, localPath)
     );
@@ -961,7 +942,7 @@ async function processSelectionAvailable(supabase) {
         continue;
       }
 
-      const syncResult = syncSelectedRawFilesToSelects(localFolderName, task.gallery_selection);
+      const syncResult = await syncSelectedRawFilesToSelects(localFolderName, task.gallery_selection);
       await withRetry(`set pending_processing after selection sync for task ${taskId}`, async () => {
         const { error: updateError } = await supabase
           .from("tasks")
@@ -1016,10 +997,10 @@ async function main() {
     `[worker] Retry env raw values: WORKER_RETRY_ATTEMPTS=${process.env.WORKER_RETRY_ATTEMPTS ?? "(unset)"}, WORKER_RETRY_BASE_MS=${process.env.WORKER_RETRY_BASE_MS ?? "(unset)"}`
   );
   console.info(
-    `[worker] Preview retry config: attempts=${PREVIEW_RETRY_ATTEMPTS}, base_ms=${PREVIEW_RETRY_BASE_MS}, bracket_size=${PREVIEW_BRACKET_SIZE}, bucket=${SUPABASE_PREVIEWS_BUCKET}`
+    `[worker] Preview retry config: attempts=${PREVIEW_RETRY_ATTEMPTS}, base_ms=${PREVIEW_RETRY_BASE_MS}, grouping=timestamp-dynamic, bucket=${SUPABASE_PREVIEWS_BUCKET}`
   );
   console.info(
-    `[worker] Preview env raw values: PREVIEW_RETRY_ATTEMPTS=${process.env.PREVIEW_RETRY_ATTEMPTS ?? "(unset)"}, PREVIEW_RETRY_BASE_MS=${process.env.PREVIEW_RETRY_BASE_MS ?? "(unset)"}, PREVIEW_BRACKET_SIZE=${process.env.PREVIEW_BRACKET_SIZE ?? "(unset)"}, SUPABASE_PREVIEWS_BUCKET=${process.env.SUPABASE_PREVIEWS_BUCKET ?? "(unset)"}`
+    `[worker] Preview env raw values: PREVIEW_RETRY_ATTEMPTS=${process.env.PREVIEW_RETRY_ATTEMPTS ?? "(unset)"}, PREVIEW_RETRY_BASE_MS=${process.env.PREVIEW_RETRY_BASE_MS ?? "(unset)"}, SUPABASE_PREVIEWS_BUCKET=${process.env.SUPABASE_PREVIEWS_BUCKET ?? "(unset)"}`
   );
   console.info(
     `[worker] Comfy output dir: ${COMFY_OUTPUT_DIR}; wait_timeout_ms=${COMFY_WAIT_TIMEOUT_MS}; SUPABASE_FINALS_BUCKET=${SUPABASE_FINALS_BUCKET}`

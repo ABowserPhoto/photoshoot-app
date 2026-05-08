@@ -4,15 +4,12 @@ import { randomUUID } from "node:crypto";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import ExifReader from "exifreader";
 import sharp from "sharp";
 
+import { buildTimestampBracketsFromDir } from "@/lib/bracketGrouping.mjs";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 const execAsync = promisify(exec);
-
-/** Seconds between bracket groups (tripod rule): gap ≥ this starts a new bracket. */
-const BRACKET_GAP_THRESHOLD_SEC = 4;
 
 const SNS_HDR_PATH = '"C:\\Program Files\\SNS-HDR Pro 2\\SNS-HDR.exe"';
 const COMFY_TRIGGER_TOKENS = (process.env.COMFYUI_TRIGGER_TOKENS ?? "_sqi")
@@ -44,23 +41,9 @@ export type ProcessingSummary = {
   error?: string;
 };
 
-type RationalLike = {
-  value: [number, number];
-  computed?: number | null;
-};
-
 type WorkflowNode = {
   inputs?: Record<string, unknown>;
   class_type?: string;
-};
-
-type PhotoMeta = {
-  fileName: string;
-  fullPath: string;
-  /** Epoch ms for shutter open (best effort). */
-  startMs: number;
-  /** Duration of current exposure in seconds. */
-  exposureSec: number;
 };
 
 function isImageFile(fileName: string): boolean {
@@ -193,54 +176,6 @@ function validateShootFolder(shootFolderPath: string): { taskRoot: string; local
   return { taskRoot, localFolderName: rel };
 }
 
-function readStringTagDescription(
-  value: { description: string | string[] } | undefined
-): string | null {
-  if (!value) {
-    return null;
-  }
-  const d = value.description;
-  if (Array.isArray(d)) {
-    return d[0] ?? null;
-  }
-  return typeof d === "string" && d.trim() ? d : null;
-}
-
-function parseExifDateTimeToMs(dateTime: string | null): number | null {
-  if (!dateTime) {
-    return null;
-  }
-  const s = dateTime.trim();
-  const m = s.match(/^(\d{4}):(\d{2}):(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
-  if (!m) {
-    return null;
-  }
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
-  const d = Number(m[3]);
-  const h = Number(m[4]);
-  const mi = Number(m[5]);
-  const sec = Number(m[6]);
-  if (![y, mo, d, h, mi, sec].every((n) => Number.isFinite(n))) {
-    return null;
-  }
-  return new Date(y, mo - 1, d, h, mi, sec).getTime();
-}
-
-function parseExposureSeconds(tag: RationalLike | undefined): number {
-  if (!tag) {
-    return 0;
-  }
-  if (typeof tag.computed === "number" && Number.isFinite(tag.computed)) {
-    return Math.max(0, tag.computed);
-  }
-  const [num, denom] = tag.value;
-  if (!denom || !Number.isFinite(num) || !Number.isFinite(denom)) {
-    return 0;
-  }
-  return Math.max(0, num / denom);
-}
-
 function mergedOutputFileName(
   firstFileInGroup: string,
   bracketIndex: number,
@@ -252,67 +187,6 @@ function mergedOutputFileName(
     return `${withoutFrameIndex}-merged.jpg`;
   }
   return `${withoutFrameIndex}-merged-${bracketIndex}.jpg`;
-}
-
-/**
- * True gap to next frame: (next start) - (current start + current exposure).
- * Same bracket if gap < 4s.
- */
-function buildBracketsByTripodRule(sorted: PhotoMeta[]): PhotoMeta[][] {
-  if (sorted.length === 0) {
-    return [];
-  }
-  const brackets: PhotoMeta[][] = [];
-  let current: PhotoMeta[] = [sorted[0]!];
-
-  for (let i = 0; i < sorted.length - 1; i += 1) {
-    const a = sorted[i]!;
-    const b = sorted[i + 1]!;
-    const gapSec = (b.startMs - a.startMs) / 1000 - a.exposureSec;
-    if (gapSec < BRACKET_GAP_THRESHOLD_SEC) {
-      current.push(b);
-    } else {
-      brackets.push(current);
-      current = [b];
-    }
-  }
-  brackets.push(current);
-  return brackets;
-}
-
-async function loadPhotoMeta(fullPath: string, fileName: string): Promise<PhotoMeta> {
-  let exposureSec = 0;
-  let startMs: number | null = null;
-
-  try {
-    const buffer = await fs.promises.readFile(fullPath);
-    const tags = ExifReader.load(buffer);
-
-    const dtRaw =
-      readStringTagDescription(tags["DateTimeOriginal"] as { description: string | string[] }) ??
-      readStringTagDescription(tags["DateTime"] as { description: string | string[] });
-
-    startMs = parseExifDateTimeToMs(dtRaw);
-
-    exposureSec = parseExposureSeconds(tags["ExposureTime"] as RationalLike | undefined);
-  } catch {
-    // Fall through to mtime fallback below.
-  }
-
-  const stat = await fs.promises.stat(fullPath);
-  if (startMs === null) {
-    console.warn(
-      `[processingEngine] Missing DateTimeOriginal for ${fileName}; using file mtime for ordering.`
-    );
-    startMs = stat.mtimeMs;
-  }
-
-  return {
-    fileName,
-    fullPath,
-    startMs,
-    exposureSec,
-  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -414,24 +288,10 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
 
     fs.mkdirSync(mergedDir, { recursive: true });
 
-    const names = fs
-      .readdirSync(selectsDir, { withFileTypes: true })
-      .filter((e) => e.isFile() && isImageFile(e.name))
-      .map((e) => e.name)
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
-
-    if (names.length === 0) {
+    const brackets = await buildTimestampBracketsFromDir(selectsDir);
+    if (brackets.length === 0) {
       throw new Error("No images found in 2_Selects.");
     }
-
-    const metaList: PhotoMeta[] = [];
-    for (const name of names) {
-      metaList.push(await loadPhotoMeta(path.join(selectsDir, name), name));
-    }
-
-    metaList.sort((a, b) => a.startMs - b.startMs);
-
-    const brackets = buildBracketsByTripodRule(metaList);
     const mergedOutputs: string[] = [];
     const mergedMeta: Array<{ outBaseName: string; firstName: string; bracketIndex: number }> = [];
     let comfyQueuedCount = 0;
@@ -442,8 +302,8 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
 
     const totalBrackets = brackets.length;
     for (const group of brackets) {
-      const inputs = group.map((p) => p.fullPath);
-      const firstName = group[0]!.fileName;
+      const inputs = group.map((name) => path.join(selectsDir, name));
+      const firstName = group[0]!;
       const outBaseName = mergedOutputFileName(firstName, bracketIndex, totalBrackets);
       const outFile = path.join(mergedDir, outBaseName);
 

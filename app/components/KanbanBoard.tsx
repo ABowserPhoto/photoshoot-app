@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Gem, Home, User } from "lucide-react";
 import { triggerPreviewEmail } from "@/app/actions/zapierActions";
 import { supabase } from "@/lib/supabaseClient";
@@ -377,6 +377,66 @@ function safeLineItems(value: unknown): Array<{ name: string; quantity: number; 
     );
 }
 
+function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): BoardTask {
+  const bracketRaw = Number(row.bracket_size ?? existing?.bracketSize ?? 3);
+  const bracketSize: 3 | 5 = bracketRaw === 5 ? 5 : 3;
+  const photoshootDate = typeof row.photoshoot_date === "string" ? row.photoshoot_date : (existing?.photoshootDate ?? "");
+  const dueDate = typeof row.due_date === "string" ? row.due_date : (existing?.dueDate ?? "");
+  const statusValue = typeof row.status === "string" ? row.status : (existing?.status ?? "booking");
+  const hasCoverImageValue = Object.prototype.hasOwnProperty.call(row, "cover_image_url");
+  const coverImageUrl = hasCoverImageValue
+    ? (typeof row.cover_image_url === "string" && row.cover_image_url.trim() ? row.cover_image_url.trim() : null)
+    : (existing?.coverImageUrl ?? null);
+  return {
+    id: row.id != null ? String(row.id) : (existing?.id ?? ""),
+    taskTitle: typeof row.title === "string" ? row.title : (existing?.taskTitle ?? ""),
+    localFolderName:
+      typeof row.local_folder_name === "string" ? row.local_folder_name : (existing?.localFolderName ?? ""),
+    bracketSize,
+    companyName: typeof row.company_name === "string" ? row.company_name : (existing?.companyName ?? ""),
+    lexofficeContactId:
+      typeof row.lexoffice_contact_id === "string"
+        ? row.lexoffice_contact_id
+        : (existing?.lexofficeContactId ?? ""),
+    contactFirstName:
+      typeof row.contact_first_name === "string" ? row.contact_first_name : (existing?.contactFirstName ?? ""),
+    contactLastName:
+      typeof row.contact_last_name === "string" ? row.contact_last_name : (existing?.contactLastName ?? ""),
+    email: typeof row.email === "string" ? row.email : (existing?.email ?? ""),
+    phone: typeof row.phone === "string" ? row.phone : (existing?.phone ?? ""),
+    street: typeof row.street === "string" ? row.street : (existing?.street ?? ""),
+    zipCode: typeof row.zip_code === "string" ? row.zip_code : (existing?.zipCode ?? ""),
+    city: typeof row.city === "string" ? row.city : (existing?.city ?? ""),
+    country: typeof row.country === "string" ? row.country : (existing?.country ?? ""),
+    services: safeLineItems(row.services ?? existing?.services),
+    products: safeLineItems(row.products ?? existing?.products),
+    taxPercentage: Number(row.tax_percentage ?? existing?.taxPercentage ?? 19),
+    amountType:
+      row.amount_type === "Gross" ? "Gross" : row.amount_type === "Net" ? "Net" : (existing?.amountType ?? "Net"),
+    discount: Number(row.discount ?? existing?.discount ?? 0),
+    photoshootType:
+      row.photoshoot_type === "Business Portraits"
+        ? "Business Portraits"
+        : row.photoshoot_type === "Real Estate"
+          ? "Real Estate"
+          : (existing?.photoshootType ?? "Real Estate"),
+    shootLocation: typeof row.shoot_location === "string" ? row.shoot_location : (existing?.shootLocation ?? ""),
+    photoshootDate,
+    dueDate,
+    formattedPhotoshootDate: formatLongDate(photoshootDate),
+    editingStartedAt:
+      typeof row.editing_started_at === "string"
+        ? row.editing_started_at
+        : row.editing_started_at === null
+          ? null
+          : (existing?.editingStartedAt ?? null),
+    totalEditingSeconds: Number(row.total_editing_seconds ?? existing?.totalEditingSeconds ?? 0),
+    coverImageUrl,
+    status: normalizeStatus(statusValue),
+    isArchived: typeof row.is_archived === "boolean" ? row.is_archived : (existing?.isArchived ?? false),
+  };
+}
+
 export default function KanbanBoard({
   refreshSignal = 0,
   onTaskClick,
@@ -395,6 +455,14 @@ export default function KanbanBoard({
   const [mergePromptProcessing, setMergePromptProcessing] = useState(false);
   const [mergePromptError, setMergePromptError] = useState<string | null>(null);
   const [reviewMergedTask, setReviewMergedTask] = useState<BoardTask | null>(null);
+  const boardRef = useRef(board);
+  const archivedTasksRef = useRef(archivedTasks);
+  useEffect(() => {
+    boardRef.current = board;
+  }, [board]);
+  useEffect(() => {
+    archivedTasksRef.current = archivedTasks;
+  }, [archivedTasks]);
   useEffect(() => {
     let isMounted = true;
 
@@ -440,42 +508,7 @@ export default function KanbanBoard({
         const archived: BoardTask[] = [];
         for (const row of data as DbTask[]) {
           const normalizedStatus = normalizeStatus(row.status);
-          const bracketRaw = Number(row.bracket_size ?? 3);
-          const bracketSize: 3 | 5 = bracketRaw === 5 ? 5 : 3;
-          const mappedTask: BoardTask = {
-            id: String(row.id),
-            taskTitle: row.title ?? "",
-            localFolderName: row.local_folder_name ?? "",
-            bracketSize,
-            companyName: row.company_name ?? "",
-            lexofficeContactId: row.lexoffice_contact_id ?? "",
-            contactFirstName: row.contact_first_name ?? "",
-            contactLastName: row.contact_last_name ?? "",
-            email: row.email ?? "",
-            phone: row.phone ?? "",
-            street: row.street ?? "",
-            zipCode: row.zip_code ?? "",
-            city: row.city ?? "",
-            country: row.country ?? "",
-            services: safeLineItems(row.services),
-            products: safeLineItems(row.products),
-            taxPercentage: Number(row.tax_percentage ?? 19),
-            amountType: row.amount_type === "Gross" ? "Gross" : "Net",
-            discount: Number(row.discount ?? 0),
-            photoshootType: row.photoshoot_type === "Business Portraits" ? "Business Portraits" : "Real Estate",
-            shootLocation: row.shoot_location ?? "",
-            photoshootDate: row.photoshoot_date ?? "",
-            dueDate: row.due_date ?? "",
-            formattedPhotoshootDate: formatLongDate(row.photoshoot_date),
-            editingStartedAt: row.editing_started_at ?? null,
-            totalEditingSeconds: Number(row.total_editing_seconds ?? 0),
-            coverImageUrl:
-              typeof row.cover_image_url === "string" && row.cover_image_url.trim()
-                ? row.cover_image_url.trim()
-                : null,
-            status: normalizedStatus,
-            isArchived: Boolean(row.is_archived),
-          };
+          const mappedTask = mapDbTaskToBoardTask(row);
 
           if (mappedTask.isArchived) {
             archived.push(mappedTask);
@@ -509,6 +542,75 @@ export default function KanbanBoard({
       isMounted = false;
     };
   }, [refreshSignal]);
+
+  useEffect(() => {
+    if (!supabase) {
+      return;
+    }
+
+    const applyRealtimeTask = (row: Partial<DbTask>) => {
+      const taskId = row.id != null ? String(row.id) : "";
+      if (!taskId) {
+        return;
+      }
+
+      const currentBoard = boardRef.current;
+      const currentArchived = archivedTasksRef.current;
+      let existingTask: BoardTask | undefined;
+
+      for (const column of COLUMN_CONFIG) {
+        const found = currentBoard[column.id].find((task) => task.id === taskId);
+        if (found) {
+          existingTask = found;
+          break;
+        }
+      }
+      if (!existingTask) {
+        existingTask = currentArchived.find((task) => task.id === taskId);
+      }
+
+      const mappedTask = mapDbTaskToBoardTask(row, existingTask);
+
+      const nextBoard = createEmptyBoard();
+      for (const column of COLUMN_CONFIG) {
+        nextBoard[column.id] = currentBoard[column.id].filter((task) => task.id !== taskId);
+      }
+      let nextArchived = currentArchived.filter((task) => task.id !== taskId);
+
+      if (mappedTask.isArchived) {
+        nextArchived = [mappedTask, ...nextArchived];
+      } else {
+        nextBoard[mappedTask.status] = sortTasksByShootDateAsc([...nextBoard[mappedTask.status], mappedTask]);
+      }
+
+      boardRef.current = nextBoard;
+      archivedTasksRef.current = nextArchived;
+      setBoard(nextBoard);
+      setArchivedTasks(nextArchived);
+    };
+
+    const channel = supabase
+      .channel("kanban-tasks-realtime")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "tasks" },
+        (payload) => {
+          applyRealtimeTask(payload.new as Partial<DbTask>);
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "tasks" },
+        (payload) => {
+          applyRealtimeTask(payload.new as Partial<DbTask>);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, []);
 
   const taskLookup = useMemo(() => {
     const map = new Map<string, { task: BoardTask; columnId: ColumnKey }>();

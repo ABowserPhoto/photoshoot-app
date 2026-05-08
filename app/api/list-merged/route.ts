@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { sanitizeStoragePath } from "@/lib/sanitizeStoragePath.mjs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,7 +27,7 @@ export async function GET(request: Request) {
   }
 
   const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
-  const folderPrefix = `${localFolderName}/3_Merged`;
+  const folderPrefix = sanitizeStoragePath(`${localFolderName}/3_Merged`);
   const { data: entries, error } = await supabase.storage.from(SUPABASE_FINALS_BUCKET).list(folderPrefix, {
     limit: 1000,
     sortBy: { column: "name", order: "asc" },
@@ -40,7 +41,7 @@ export async function GET(request: Request) {
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
   const items = files.map((name) => {
-    const storagePath = `${folderPrefix}/${name}`;
+    const storagePath = sanitizeStoragePath(`${folderPrefix}/${name}`);
     const { data } = supabase.storage.from(SUPABASE_FINALS_BUCKET).getPublicUrl(storagePath);
     return {
       name,
