@@ -59,9 +59,10 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
   const [removeDialogPrompt, setRemoveDialogPrompt] = useState("");
 
   const localFolderName = task?.localFolderName?.trim() ?? "";
+  const taskId = task?.id?.trim() ?? "";
 
   const loadList = useCallback(async () => {
-    if (!localFolderName) {
+    if (!localFolderName && !taskId) {
       setFiles([]);
       return;
     }
@@ -69,7 +70,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     setLoadError(null);
     try {
       const res = await fetch(
-        `/api/list-merged?local_folder_name=${encodeURIComponent(localFolderName)}`,
+        `/api/list-merged?local_folder_name=${encodeURIComponent(localFolderName)}&task_id=${encodeURIComponent(taskId)}`,
         { cache: "no-store" }
       );
       const data = (await res.json().catch(() => null)) as
@@ -83,7 +84,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
       setFiles(data?.files ?? []);
       setFileUrlByName(
         Object.fromEntries(
-          (data?.items ?? []).map((item) => [item.name, typeof item.url === "string" ? item.url : ""])
+          ((data?.items ?? []) || []).map((item) => [item.name, typeof item.url === "string" ? item.url : ""])
         )
       );
       setActionByFile({});
@@ -99,13 +100,13 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     } finally {
       setIsLoadingList(false);
     }
-  }, [localFolderName]);
+  }, [localFolderName, taskId]);
 
   useEffect(() => {
-    if (isOpen && localFolderName) {
+    if (isOpen && (localFolderName || taskId)) {
       void loadList();
     }
-  }, [isOpen, localFolderName, loadList]);
+  }, [isOpen, localFolderName, taskId, loadList]);
 
   if (!isOpen || !task) {
     return null;
@@ -297,7 +298,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
           <p className="text-sm text-zinc-500">No images found in 3_Merged yet.</p>
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {files.map((filename) => {
+            {(files ?? []).map((filename) => {
               const cacheBuster = cacheBusterByFile[filename] ?? 0;
               const baseUrl = fileUrlByName[filename] ?? "";
               const src = baseUrl ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}v=${cacheBuster}` : "";

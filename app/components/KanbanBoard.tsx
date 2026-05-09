@@ -918,7 +918,21 @@ export default function KanbanBoard({
       setArchivedTasks(previousArchived);
       return;
     }
-    setStatusMessage(null);
+    try {
+      const cleanupRes = await fetch("/api/tasks/purge-storage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId: String(task.id) }),
+      });
+      if (cleanupRes.ok) {
+        setStatusMessage("Task archived. Cloud-Speicher für dieses Projekt wurde bereinigt.");
+      } else {
+        setStatusMessage("Task archived. Cloud storage cleanup could not be confirmed.");
+      }
+    } catch {
+      // Silent failure by design: archive must still succeed if storage is already empty/unreachable.
+      setStatusMessage("Task archived. Cloud storage cleanup skipped.");
+    }
   };
 
   const handleRestoreTask = async (task: BoardTask) => {

@@ -12,6 +12,7 @@ type GalleryItem = {
 type GalleryResponse = {
   success?: boolean;
   localFolderName?: string;
+  status?: string;
   bracketSize?: number;
   totalChunks?: number;
   gallery?: GalleryItem[];
@@ -38,6 +39,7 @@ export default function GalleryPage() {
   );
 
   const [localFolderName, setLocalFolderName] = useState("");
+  const [taskStatus, setTaskStatus] = useState<string | null>(null);
   const [gallery, setGallery] = useState<GalleryItem[]>([]);
   const [selectedChunks, setSelectedChunks] = useState<Set<number>>(new Set());
   const [ratingsByChunk, setRatingsByChunk] = useState<Record<number, number>>({});
@@ -78,6 +80,16 @@ export default function GalleryPage() {
     }
     return gridItems.findIndex((item) => item.chunkIndex === activeChunkIndex);
   }, [activeChunkIndex, gridItems]);
+  const isSelectionAvailable = useMemo(() => {
+    const normalized = (taskStatus ?? "").trim().toLowerCase().replace(/\s+/g, "-");
+    return normalized === "selection-available";
+  }, [taskStatus]);
+  const isExpired = useMemo(() => {
+    if (taskStatus == null) {
+      return false;
+    }
+    return !isSelectionAvailable;
+  }, [isSelectionAvailable, taskStatus]);
 
   useEffect(() => {
     if (!shootId.trim()) {
@@ -132,13 +144,16 @@ export default function GalleryPage() {
       });
       const payload = (await response.json().catch(() => null)) as GalleryResponse | null;
       if (!response.ok) {
+        setTaskStatus(null);
         setGallery([]);
         setErrorMessage(payload?.error ?? `Galerie konnte nicht geladen werden (${response.status}).`);
         return;
       }
       setLocalFolderName(payload?.localFolderName ?? "");
+      setTaskStatus(typeof payload?.status === "string" ? payload.status : "");
       setGallery(payload?.gallery ?? []);
     } catch {
+      setTaskStatus(null);
       setGallery([]);
       setErrorMessage("Netzwerkfehler beim Laden der Galerie.");
     } finally {
@@ -286,6 +301,21 @@ export default function GalleryPage() {
         </div>
       </header>
 
+      {isExpired ? (
+        <section className="flex min-h-[calc(100vh-8rem)] items-center justify-center px-6">
+          <div className="w-full max-w-3xl rounded-2xl border border-zinc-800 bg-zinc-900/70 p-8 text-center shadow-2xl">
+            <img
+              src="/Logo_1024_whitehiRes.svg"
+              alt="Logo"
+              className="mx-auto h-24 w-auto object-contain"
+            />
+            <p className="mt-6 text-lg font-medium text-zinc-100">
+              Dieser Galerie-Link ist abgelaufen. Ihre endgültigen Bilder werden bearbeitet oder wurden bereits geliefert.
+            </p>
+          </div>
+        </section>
+      ) : (
+      <>
       <div className="mx-auto max-w-7xl px-4 pb-28 pt-4 sm:px-6">
         <header className="mb-4">
           <h1 className="text-xl font-semibold">Wählen Sie Ihre Lieblingsfotos aus</h1>
@@ -490,6 +520,8 @@ export default function GalleryPage() {
           </button>
         </div>
       </div>
+      </>
+      )}
     </main>
   );
 }

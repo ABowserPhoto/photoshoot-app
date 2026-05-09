@@ -276,8 +276,10 @@ export default function Home() {
     [task.photoshootType, taskClientDisplayLabel(task), task.shootLocation].filter(Boolean).join(" - ") || "Untitled";
 
   const calculateTaskPrice = (task: BoardTask) => {
-    const serviceTotal = task.services.reduce((sum, row) => sum + row.quantity * row.price, 0);
-    const productTotal = task.products.reduce((sum, row) => sum + row.quantity * row.price, 0);
+    const safeServices = Array.isArray(task.services) ? task.services : [];
+    const safeProducts = Array.isArray(task.products) ? task.products : [];
+    const serviceTotal = safeServices.reduce((sum, row) => sum + row.quantity * row.price, 0);
+    const productTotal = safeProducts.reduce((sum, row) => sum + row.quantity * row.price, 0);
     return serviceTotal + productTotal;
   };
 
@@ -390,7 +392,11 @@ export default function Home() {
 
   const handleTaskMoved = (task: BoardTask, _from: string, to: string) => {
     if (to === "edited") {
-      setUploadTask(task);
+      setUploadTask({
+        ...task,
+        services: Array.isArray(task.services) ? task.services : [],
+        products: Array.isArray(task.products) ? task.products : [],
+      });
       setUploadFiles([]);
       setUploadError(null);
       setShowUploadModal(true);
@@ -751,12 +757,12 @@ export default function Home() {
       photoshoot_date: uploadTask.photoshootDate,
       due_date: uploadTask.dueDate,
       price: calculateTaskPrice(uploadTask),
-      services: uploadTask.services,
-      products: uploadTask.products,
-      services_lexoffice_id: uploadTask.services.map(
+      services: Array.isArray(uploadTask.services) ? uploadTask.services : [],
+      products: Array.isArray(uploadTask.products) ? uploadTask.products : [],
+      services_lexoffice_id: (Array.isArray(uploadTask.services) ? uploadTask.services : []).map(
         (s) => s.lexoffice_id ?? ""
       ),
-      products_lexoffice_id: uploadTask.products.map(
+      products_lexoffice_id: (Array.isArray(uploadTask.products) ? uploadTask.products : []).map(
         (p) => p.lexoffice_id ?? ""
       ),
     };

@@ -31,7 +31,7 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
 
   const { data, error } = await supabase
     .from("tasks")
-    .select("local_folder_name, gallery_previews")
+    .select("local_folder_name, gallery_previews, status")
     .eq("id", shootId)
     .maybeSingle();
   if (error) {
@@ -59,6 +59,7 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
   return {
     success: true,
     localFolderName: data?.local_folder_name ?? "",
+    status: typeof data?.status === "string" ? data.status : "",
     bracketSize,
     totalChunks: gallery.length,
     gallery,
