@@ -781,7 +781,7 @@ async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
 async function processAwaitingFolderCreation(supabase) {
   const { data, error } = await supabase
     .from("tasks")
-    .select("id, title, company_name, shoot_location, photoshoot_date")
+    .select("id, title, company_name, photoshoot_type, street, city, shoot_location, photoshoot_date")
     .eq("status", AWAITING_FOLDER_STATUS)
     .order("id", { ascending: true })
     .limit(20);

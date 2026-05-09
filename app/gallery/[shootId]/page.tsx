@@ -32,6 +32,10 @@ export default function GalleryPage() {
   const routeParams = useParams<{ shootId: string }>();
   const shootId = typeof routeParams?.shootId === "string" ? routeParams.shootId : "";
   const bracketSizeFromUrl = searchParams.get("bracketSize") ?? "3";
+  const selectionStorageKey = useMemo(
+    () => (shootId.trim() ? `gallery_selection_${shootId.trim()}` : ""),
+    [shootId]
+  );
 
   const [localFolderName, setLocalFolderName] = useState("");
   const [gallery, setGallery] = useState<GalleryItem[]>([]);
@@ -83,11 +87,38 @@ export default function GalleryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shootId, bracketSizeFromUrl]);
 
+  useEffect(() => {
+    if (!selectionStorageKey) {
+      setSelectedChunks(new Set());
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(selectionStorageKey);
+      if (!raw) {
+        setSelectedChunks(new Set());
+        return;
+      }
+      const parsed = JSON.parse(raw) as unknown;
+      const selected = Array.isArray(parsed)
+        ? parsed.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 0)
+        : [];
+      setSelectedChunks(new Set(selected));
+    } catch {
+      setSelectedChunks(new Set());
+    }
+  }, [selectionStorageKey]);
+
+  useEffect(() => {
+    if (!selectionStorageKey) {
+      return;
+    }
+    window.localStorage.setItem(selectionStorageKey, JSON.stringify(selectedIndices));
+  }, [selectionStorageKey, selectedIndices]);
+
   async function loadGallery(targetShootId: string) {
     setIsLoading(true);
     setErrorMessage(null);
     setIsSuccess(false);
-    setSelectedChunks(new Set());
     setRatingsByChunk({});
     setActiveChunkIndex(null);
     try {
@@ -190,6 +221,9 @@ export default function GalleryPage() {
         );
         return;
       }
+      if (selectionStorageKey) {
+        window.localStorage.removeItem(selectionStorageKey);
+      }
       setIsSuccess(true);
     } catch {
       setErrorMessage("Netzwerkfehler beim Absenden der Auswahl.");
@@ -240,27 +274,15 @@ export default function GalleryPage() {
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-100">
       <header className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
-        <div className="mx-auto flex h-14 w-full max-w-7xl items-center justify-between px-4 sm:px-6">
+        <div className="mx-auto flex h-32 w-full max-w-7xl items-center justify-between px-4 sm:px-6">
           <div className="flex items-center">
             <img
               src="/Logo_1024_whitehiRes.svg"
               alt="Logo"
-              className="h-10 w-auto object-contain"
+              className="h-28 w-auto object-contain"
             />
           </div>
           <div className="text-sm font-medium uppercase tracking-[0.22em] text-zinc-100">Vorschau</div>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-700 text-zinc-200"
-              aria-label="Filter"
-            >
-              ≡
-            </button>
-            <div className="inline-flex h-8 min-w-8 items-center justify-center rounded-full border border-zinc-700 px-2 text-xs text-zinc-200">
-              U
-            </div>
-          </div>
         </div>
       </header>
 

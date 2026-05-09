@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Select from "react-select";
 import KanbanBoard, { type BoardTask } from "./components/KanbanBoard";
@@ -206,6 +206,36 @@ export default function Home() {
   });
   const { isAdmin, isLoading: authRoleLoading } = useAuthRole();
   const [preservedTaskTitle, setPreservedTaskTitle] = useState("");
+  const invoiceTotals = useMemo(() => {
+    const validServices = services.filter((item) => item.name.trim() !== "");
+    const validProducts = products.filter((item) => item.name.trim() !== "");
+    const serviceSubtotal = validServices.reduce((sum, item) => {
+      const quantity = Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : 0;
+      const price = Number.isFinite(Number(item.price)) ? Number(item.price) : 0;
+      return sum + quantity * price;
+    }, 0);
+    const productSubtotal = validProducts.reduce((sum, item) => {
+      const quantity = Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : 0;
+      const price = Number.isFinite(Number(item.price)) ? Number(item.price) : 0;
+      return sum + quantity * price;
+    }, 0);
+    const safeDiscount = Number.isFinite(Number(discount)) ? Number(discount) : 0;
+    const safeTaxPercentage = Number.isFinite(Number(taxPercentage)) ? Number(taxPercentage) : 0;
+    const totalNet = Math.max(0, serviceSubtotal + productSubtotal - safeDiscount);
+    const totalTax = totalNet * (safeTaxPercentage / 100);
+    const totalGross = totalNet + totalTax;
+    return { totalNet, totalTax, totalGross };
+  }, [services, products, discount, taxPercentage]);
+  const currencyFormatter = useMemo(
+    () =>
+      new Intl.NumberFormat("de-DE", {
+        style: "currency",
+        currency: "EUR",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }),
+    []
+  );
 
   useEffect(() => {
     if (authRoleLoading) {
@@ -1189,6 +1219,26 @@ export default function Home() {
                     </label>
                   </div>
                 </fieldset>
+                    </div>
+                    <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-800/60">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium text-zinc-700 dark:text-zinc-300">Total Net</span>
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                          {currencyFormatter.format(invoiceTotals.totalNet)}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex items-center justify-between text-sm">
+                        <span className="font-medium text-zinc-700 dark:text-zinc-300">Total Tax</span>
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                          {currencyFormatter.format(invoiceTotals.totalTax)}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex items-center justify-between text-sm">
+                        <span className="font-medium text-zinc-700 dark:text-zinc-300">Total Gross</span>
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                          {currencyFormatter.format(invoiceTotals.totalGross)}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 ) : null}
