@@ -14,6 +14,9 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   allowedDevOrigins: allowedDevOrigins.length > 0 ? allowedDevOrigins : undefined,
+  experimental: {
+    proxyClientMaxBodySize: 1024 * 1024 * 1024,
+  },
 };
 
 export default nextConfig;

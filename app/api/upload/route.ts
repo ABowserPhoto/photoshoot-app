@@ -6,6 +6,8 @@ import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 export const runtime = "nodejs";
 
+const ILLEGAL_FOLDER_CHARS = /[<>:"/\\|?*]/g;
+
 type UploadTaskData = {
   id?: string | number;
   title?: string;
@@ -116,6 +118,15 @@ function normalizeLineItems(items: unknown): Array<{ name: string; quantity: num
 
 function sumLineItems(items: Array<{ quantity: number; price: number }>): number {
   return items.reduce((sum, item) => sum + item.quantity * item.price, 0);
+}
+
+function sanitizeFolderSegment(value: string): string {
+  const cleaned = value
+    .replace(ILLEGAL_FOLDER_CHARS, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.\s]+$/g, "");
+  return cleaned || "task-upload";
 }
 
 export async function POST(request: Request) {
@@ -244,31 +255,37 @@ export async function POST(request: Request) {
     }
 
     const baseDirectory = getBaseDirectory(photoshootType);
-    const taskDirectory = path.join(baseDirectory, title);
-    await mkdir(taskDirectory, { recursive: true });
-    const localFolderName =
+    const taskDirectory = path.join(baseDirectory, sanitizeFolderSegment(title));
+    const localFolderNameRaw =
       typeof taskData.local_folder_name === "string" && taskData.local_folder_name.trim()
         ? taskData.local_folder_name.trim()
         : dbLocalFolderName.trim();
+    const localFolderName = sanitizeFolderSegment(
+      localFolderNameRaw || (taskId ? taskId.trim() : "") || "task-upload"
+    );
+    const localFinalDirectory = path.join(PHOTOS_ROOT, localFolderName, "4_Final");
 
-    if (!localFolderName) {
+    try {
+      fs.mkdirSync(taskDirectory, { recursive: true });
+      fs.mkdirSync(localFinalDirectory, { recursive: true });
+
+      for (const file of files) {
+        const fileBuffer = Buffer.from(await file.arrayBuffer());
+        const driveDestination = path.join(taskDirectory, file.name);
+        const localDestination = path.join(localFinalDirectory, file.name);
+        await Promise.all([writeFile(driveDestination, fileBuffer), writeFile(localDestination, fileBuffer)]);
+      }
+    } catch (fsError) {
+      const fsMessage = fsError instanceof Error ? fsError.message : String(fsError);
       return Response.json(
         {
-          error:
-            "Missing local folder name. Include local_folder_name in payload or ensure tasks.local_folder_name is set.",
+          error: `File system write failed: ${fsMessage}`,
+          taskDirectory,
+          localFinalDirectory,
+          localFolderName,
         },
-        { status: 400 }
+        { status: 500 }
       );
-    }
-
-    const localFinalDirectory = path.join(PHOTOS_ROOT, localFolderName, "4_Final");
-    fs.mkdirSync(localFinalDirectory, { recursive: true });
-
-    for (const file of files) {
-      const fileBuffer = Buffer.from(await file.arrayBuffer());
-      const driveDestination = path.join(taskDirectory, file.name);
-      const localDestination = path.join(localFinalDirectory, file.name);
-      await Promise.all([writeFile(driveDestination, fileBuffer), writeFile(localDestination, fileBuffer)]);
     }
 
     const servicesSource = dbServices !== undefined ? dbServices : taskData.services;
