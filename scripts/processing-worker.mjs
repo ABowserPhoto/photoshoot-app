@@ -17,6 +17,8 @@ const execFileAsync = promisify(execFile);
 
 const FOLDER_POLL_INTERVAL_MS = 15 * 1000;
 const PROCESSING_POLL_INTERVAL_MS = 5 * 60 * 1000;
+const PREVIEW_FALLBACK_SYNC_INTERVAL_MS = 4 * 60 * 1000;
+const LOCAL_PROCESS_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 const AWAITING_FOLDER_STATUS = "awaiting_folder_creation";
 const BOOKING_STATUS = "Booking";
@@ -518,16 +520,20 @@ async function processInitialPreviewSync(supabase) {
 function localFolderNameFromRawPath(filePath) {
   const root = getShootFoldersRoot();
   const absolute = path.resolve(filePath);
-  const rawDir = path.dirname(absolute);
-  if (path.basename(rawDir) !== "1_Raw") {
+  const relativeToRoot = path.relative(root, absolute);
+  if (!relativeToRoot || relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
     return null;
   }
-  const taskDir = path.dirname(rawDir);
-  const rel = path.relative(root, taskDir);
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+  const segments = relativeToRoot.split(path.sep).filter(Boolean);
+  const rawIndex = segments.indexOf("1_Raw");
+  if (rawIndex < 1) {
     return null;
   }
-  return rel;
+  const taskSegments = segments.slice(0, rawIndex);
+  if (taskSegments.length === 0) {
+    return null;
+  }
+  return taskSegments.join(path.sep);
 }
 
 function schedulePreviewSync(localFolderName) {
@@ -554,17 +560,17 @@ function startRawFolderWatcher() {
   rawWatcherStarted = true;
 
   const root = getShootFoldersRoot();
-  const watchPattern = path.join(root, "**", "1_Raw", "*");
-  const watcher = chokidar.watch(watchPattern, {
+  const watcher = chokidar.watch(root, {
     ignoreInitial: false,
     awaitWriteFinish: {
-      stabilityThreshold: 1000,
-      pollInterval: 200,
+      stabilityThreshold: 2000,
+      pollInterval: 100,
     },
+    usePolling: true,
   });
 
   watcher.on("all", (eventName, filePath) => {
-    if (!["add", "change", "unlink"].includes(eventName)) {
+    if (!["add", "change", "unlink", "addDir"].includes(eventName)) {
       return;
     }
     const localFolderName = localFolderNameFromRawPath(filePath);
@@ -578,7 +584,9 @@ function startRawFolderWatcher() {
     console.error("[worker] chokidar watcher error:", error);
   });
 
-  console.info(`[worker] Watching RAW folders: ${watchPattern}`);
+  console.info(
+    `[worker] Watching shoot root for RAW changes: ${root} (polling enabled, awaitWriteFinish=2000/100)`
+  );
 }
 
 async function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) {
@@ -625,31 +633,54 @@ async function processTaskLocally(task) {
   const localOrigin = process.env.LOCAL_APP_ORIGIN?.trim() || "http://127.0.0.1:3000";
   const workerSecret = requiredEnv("LOCAL_WORKER_SECRET");
   const url = `${localOrigin.replace(/\/$/, "")}/api/worker/process-task`;
-  console.info(`[worker] Calling local process-task endpoint: ${url}`);
+  console.info(
+    `[worker] Calling local process-task endpoint: ${url} (timeout ${LOCAL_PROCESS_TIMEOUT_MS}ms)`
+  );
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-worker-secret": workerSecret,
-    },
-    body: JSON.stringify({
-      taskId: String(task.id),
-      local_folder_name: task.local_folder_name,
-    }),
-  });
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-worker-secret": workerSecret,
+      },
+      body: JSON.stringify({
+        taskId: String(task.id),
+        local_folder_name: task.local_folder_name,
+      }),
+      signal: AbortSignal.timeout(LOCAL_PROCESS_TIMEOUT_MS),
+    });
 
-  const payload = await response.json().catch(() => null);
-  if (!response.ok || !payload?.success) {
-    const message =
-      payload?.error || `Local processing failed for task ${task.id} (HTTP ${response.status}).`;
-    throw new Error(message);
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.success) {
+      const message =
+        payload?.error || `Local processing failed for task ${task.id} (HTTP ${response.status}).`;
+      throw new Error(message);
+    }
+    return {
+      comfyQueuedCount: Number(payload?.comfyQueuedCount) || 0,
+      comfyFailedCount: Number(payload?.comfyFailedCount) || 0,
+      comfyErrors: Array.isArray(payload?.comfyErrors) ? payload.comfyErrors.map((v) => String(v)) : [],
+    };
+  } catch (err) {
+    const errMessage = err instanceof Error ? err.message : String(err);
+    const isTimeout =
+      errMessage.includes("UND_ERR_HEADERS_TIMEOUT") ||
+      errMessage.includes("HeadersTimeoutError") ||
+      errMessage.includes("The operation was aborted") ||
+      errMessage.includes("aborted");
+    if (isTimeout) {
+      console.error(
+        `[worker] process-task request timed out after ${LOCAL_PROCESS_TIMEOUT_MS}ms for task ${task.id}:`,
+        err
+      );
+      throw new Error(
+        `Local processing timed out after ${LOCAL_PROCESS_TIMEOUT_MS}ms for task ${task.id}.`
+      );
+    }
+    console.error(`[worker] process-task request failed for task ${task.id}:`, err);
+    throw err instanceof Error ? err : new Error(errMessage);
   }
-  return {
-    comfyQueuedCount: Number(payload?.comfyQueuedCount) || 0,
-    comfyFailedCount: Number(payload?.comfyFailedCount) || 0,
-    comfyErrors: Array.isArray(payload?.comfyErrors) ? payload.comfyErrors.map((v) => String(v)) : [],
-  };
 }
 
 async function finalizeTask(supabase, taskId, status) {
@@ -1034,6 +1065,12 @@ async function main() {
         console.error("[worker] Processing poll failed:", err instanceof Error ? err.message : err);
       });
   }, PROCESSING_POLL_INTERVAL_MS);
+
+  setInterval(() => {
+    void processInitialPreviewSync(getSupabaseClient()).catch((err) => {
+      console.error("[worker] Preview fallback sync failed:", err instanceof Error ? err.message : err);
+    });
+  }, PREVIEW_FALLBACK_SYNC_INTERVAL_MS);
 }
 
 void main();
