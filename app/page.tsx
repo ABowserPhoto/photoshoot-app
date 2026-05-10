@@ -2,7 +2,8 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import Select from "react-select";
+import Select, { type ActionMeta, type ClassNamesConfig, type SingleValue } from "react-select";
+import CreatableSelect from "react-select/creatable";
 import KanbanBoard, { type BoardTask } from "./components/KanbanBoard";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { supabase } from "@/lib/supabaseClient";
@@ -24,6 +25,8 @@ type Client = {
   street: string | null;
   zip_code: string | null;
   city: string | null;
+  email?: string | null;
+  phone?: string | null;
   lexoffice_contact_id: string | null;
 };
 
@@ -40,8 +43,19 @@ type SelectOption = {
   label: string;
 };
 
-type ClientOption = SelectOption & {
-  client: Client;
+type ClientDirectoryEntry = {
+  id: string | null;
+  company_name: string;
+  street: string;
+  zip_code: string;
+  city: string;
+  email: string;
+  phone: string;
+  lexoffice_contact_id: string;
+};
+
+type ClientNameOption = SelectOption & {
+  client: ClientDirectoryEntry | null;
 };
 
 type CatalogOption = SelectOption & {
@@ -135,6 +149,35 @@ const selectStyles = {
   }),
 };
 
+const clientNameSelectClassNames: ClassNamesConfig<ClientNameOption, false> = {
+  control: (state) =>
+    [
+      "mt-1 min-h-10 rounded-lg border bg-white px-1 text-sm text-zinc-900 transition",
+      "dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100",
+      state.isFocused ? "border-zinc-500 ring-2 ring-zinc-400 dark:border-zinc-500" : "border-zinc-300",
+    ].join(" "),
+  valueContainer: () => "px-2 py-1",
+  placeholder: () => "text-zinc-500 dark:text-zinc-400",
+  singleValue: () => "text-zinc-900 dark:text-zinc-100",
+  input: () => "text-zinc-900 dark:text-zinc-100",
+  indicatorsContainer: () => "text-zinc-500",
+  indicatorSeparator: () => "bg-zinc-300 dark:bg-zinc-700",
+  dropdownIndicator: () => "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300",
+  clearIndicator: () => "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300",
+  menu: () =>
+    "z-40 mt-1 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900",
+  menuList: () => "py-1",
+  option: (state) =>
+    [
+      "cursor-pointer px-3 py-2 text-sm",
+      state.isSelected
+        ? "bg-zinc-900 text-white dark:bg-zinc-200 dark:text-zinc-900"
+        : "text-zinc-900 hover:bg-zinc-100 dark:text-zinc-100 dark:hover:bg-zinc-800",
+    ].join(" "),
+};
+
+const normalizeClientName = (value: string) => value.trim().toLowerCase();
+
 function ensureSingleTrailingEmptyRow(items: LineItem[]): LineItem[] {
   const normalized = [...items];
 
@@ -161,10 +204,9 @@ export default function Home() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
-  const [clients, setClients] = useState<Client[]>([]);
+  const [clientDirectory, setClientDirectory] = useState<ClientDirectoryEntry[]>([]);
   const [serviceCatalog, setServiceCatalog] = useState<CatalogItem[]>([]);
   const [productCatalog, setProductCatalog] = useState<CatalogItem[]>([]);
-  const [selectedClientId, setSelectedClientId] = useState("");
   const [saveAsNewClient, setSaveAsNewClient] = useState(false);
   const [saveToClientAddressBook, setSaveToClientAddressBook] = useState(false);
   const [showCatalogModal, setShowCatalogModal] = useState(false);
@@ -246,11 +288,21 @@ export default function Home() {
     }
   }, [authRoleLoading, isAdmin]);
 
-  const clientOptions: ClientOption[] = clients.map((client) => ({
-    value: client.id,
-    label: client.company_name || "Unnamed Client",
+  const clientNameOptions: ClientNameOption[] = clientDirectory.map((client) => ({
+    value: client.company_name,
+    label: client.company_name,
     client,
   }));
+  const selectedClientNameOption = useMemo<ClientNameOption | null>(() => {
+    const trimmedName = companyName.trim();
+    if (!trimmedName) {
+      return null;
+    }
+    const existingOption = clientNameOptions.find(
+      (option) => normalizeClientName(option.label) === normalizeClientName(trimmedName)
+    );
+    return existingOption ?? { value: trimmedName, label: trimmedName, client: null };
+  }, [clientNameOptions, companyName]);
   const serviceOptions: CatalogOption[] = serviceCatalog.map((item) => ({
     value: item.id,
     label: item.name,
@@ -288,23 +340,73 @@ export default function Home() {
       return;
     }
 
-    const [{ data: clientsData, error: clientsError }, { data: catalogData, error: catalogLoadError }] =
+    const [
+      { data: clientsData, error: clientsError },
+      { data: taskClientData, error: taskClientError },
+      { data: catalogData, error: catalogLoadError },
+    ] =
       await Promise.all([
         supabase
           .from("clients")
           .select("id, company_name, street, zip_code, city, lexoffice_contact_id")
           .order("company_name", { ascending: true }),
         supabase
+          .from("tasks")
+          .select("company_name, email, phone, street, zip_code, city, lexoffice_contact_id")
+          .not("company_name", "is", null)
+          .neq("company_name", ""),
+        supabase
           .from("catalog")
           .select("id, item_type, name, default_price, lexoffice_id")
           .order("name", { ascending: true }),
       ]);
 
-    if (clientsError) {
+    const clientsTableMissing = clientsError?.code === "42P01";
+    if (clientsError && !clientsTableMissing) {
       setFormError(`Failed to load clients: ${clientsError.message}`);
-    } else {
-      setClients((clientsData ?? []) as Client[]);
     }
+    if (taskClientError) {
+      setFormError(`Failed to load client suggestions: ${taskClientError.message}`);
+    }
+
+    const mergedClients = new Map<string, ClientDirectoryEntry>();
+    const applyClientRecord = (record: {
+      id?: string | null;
+      company_name?: string | null;
+      street?: string | null;
+      zip_code?: string | null;
+      city?: string | null;
+      email?: string | null;
+      phone?: string | null;
+      lexoffice_contact_id?: string | null;
+    }) => {
+      const companyNameValue = (record.company_name ?? "").trim();
+      if (!companyNameValue) {
+        return;
+      }
+      const key = normalizeClientName(companyNameValue);
+      const existing = mergedClients.get(key);
+
+      const nextEntry: ClientDirectoryEntry = {
+        id: existing?.id ?? record.id ?? null,
+        company_name: existing?.company_name ?? companyNameValue,
+        street: existing?.street || record.street || "",
+        zip_code: existing?.zip_code || record.zip_code || "",
+        city: existing?.city || record.city || "",
+        email: existing?.email || record.email || "",
+        phone: existing?.phone || record.phone || "",
+        lexoffice_contact_id: existing?.lexoffice_contact_id || record.lexoffice_contact_id || "",
+      };
+      mergedClients.set(key, nextEntry);
+    };
+
+    if (!clientsError || clientsTableMissing) {
+      ((clientsData ?? []) as Client[]).forEach((record) => applyClientRecord(record));
+    }
+    ((taskClientData ?? []) as Client[]).forEach((record) => applyClientRecord(record));
+    setClientDirectory(
+      Array.from(mergedClients.values()).sort((a, b) => a.company_name.localeCompare(b.company_name, "en"))
+    );
 
     if (catalogLoadError) {
       setFormError(`Failed to load catalog: ${catalogLoadError.message}`);
@@ -347,7 +449,6 @@ export default function Home() {
   };
 
   const resetForm = () => {
-    setSelectedClientId("");
     setSaveAsNewClient(false);
     setSaveToClientAddressBook(false);
     setCompanyName("");
@@ -408,7 +509,6 @@ export default function Home() {
     setOpenSections({ client: true, invoice: false, info: false });
     setShowBookingModal(true);
     setFormError(null);
-    setSelectedClientId("");
     setSaveAsNewClient(false);
     setCompanyName(task.companyName);
     setContactFirstName(task.contactFirstName);
@@ -447,22 +547,35 @@ export default function Home() {
     setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
-  const handleClientSelect = (clientId: string) => {
-    setSelectedClientId(clientId);
-    if (!clientId) {
+  const handleClientNameChange = (
+    option: SingleValue<ClientNameOption>,
+    actionMeta: ActionMeta<ClientNameOption>
+  ) => {
+    if (!option) {
+      setCompanyName("");
       return;
     }
 
-    const selected = clients.find((client) => client.id === clientId);
-    if (!selected) {
+    setCompanyName(option.label);
+
+    if (option.client) {
+      setEmail(option.client.email);
+      setPhone(option.client.phone);
+      setStreet(option.client.street);
+      setZipCode(option.client.zip_code);
+      setCity(option.client.city);
+      setLexofficeContactId(option.client.lexoffice_contact_id);
       return;
     }
 
-    setCompanyName(selected.company_name ?? "");
-    setStreet(selected.street ?? "");
-    setZipCode(selected.zip_code ?? "");
-    setCity(selected.city ?? "");
-    setLexofficeContactId(selected.lexoffice_contact_id ?? "");
+    if (actionMeta.action === "create-option") {
+      setEmail("");
+      setPhone("");
+      setStreet("");
+      setZipCode("");
+      setCity("");
+      setLexofficeContactId("");
+    }
   };
 
   const openCatalogModal = (type: ItemType) => {
@@ -908,21 +1021,6 @@ export default function Home() {
                 </button>
                 {openSections.client ? (
                   <div className="space-y-4 bg-white px-4 py-4 dark:bg-zinc-900">
-                    {editingTaskId ? (
-                      <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Select Existing Client
-                        <div className="mt-1">
-                          <Select<ClientOption, false>
-                            isClearable
-                            options={clientOptions}
-                            value={clientOptions.find((option) => option.value === selectedClientId) ?? null}
-                            onChange={(option) => handleClientSelect(option?.value ?? "")}
-                            placeholder="Select a client (optional)"
-                            styles={selectStyles}
-                          />
-                        </div>
-                      </label>
-                    ) : null}
                     <div className="grid gap-4 sm:grid-cols-2">
                       <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
                         Contact First Name
@@ -943,11 +1041,15 @@ export default function Home() {
                         />
                       </label>
                       <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Company Name <span className="font-normal text-zinc-500">(optional)</span>
-                        <input
-                          value={companyName}
-                          onChange={(event) => setCompanyName(event.target.value)}
-                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        Client/Business Name <span className="font-normal text-zinc-500">(optional)</span>
+                        <CreatableSelect<ClientNameOption, false>
+                          isClearable
+                          options={clientNameOptions}
+                          value={selectedClientNameOption}
+                          onChange={handleClientNameChange}
+                          placeholder="Search or create a client"
+                          formatCreateLabel={(inputValue) => `Create "${inputValue}"`}
+                          classNames={clientNameSelectClassNames}
                         />
                       </label>
                       <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
