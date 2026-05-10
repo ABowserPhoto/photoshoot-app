@@ -262,6 +262,43 @@ function shouldRunComfyForFilename(fileName: string): boolean {
   return COMFY_TRIGGER_TOKENS.some((token) => lower.includes(token));
 }
 
+async function enhanceMergedPhotoInPlace(filePath: string): Promise<void> {
+  let originalBuffer: Buffer;
+  try {
+    originalBuffer = await fs.promises.readFile(filePath);
+  } catch (error) {
+    console.warn(
+      `[processingEngine] Skipping merged enhancement for ${path.basename(filePath)}: could not read original file.`,
+      error instanceof Error ? error.message : error
+    );
+    return;
+  }
+
+  try {
+    const enhancedBuffer = await sharp(originalBuffer)
+      .normalize()
+      .clahe({ width: 200, height: 200, maxSlope: 3 })
+      .modulate({ brightness: 1.1, saturation: 1.05 })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+    await fs.promises.writeFile(filePath, enhancedBuffer);
+    console.info(`[processingEngine] Sharp enhancement complete: ${path.basename(filePath)}`);
+  } catch (error) {
+    console.warn(
+      `[processingEngine] Sharp enhancement failed for ${path.basename(filePath)}. Keeping original merged file.`,
+      error instanceof Error ? error.message : error
+    );
+    try {
+      await fs.promises.writeFile(filePath, originalBuffer);
+    } catch (restoreError) {
+      console.warn(
+        `[processingEngine] Failed to restore original merged file ${path.basename(filePath)} after enhancement error.`,
+        restoreError instanceof Error ? restoreError.message : restoreError
+      );
+    }
+  }
+}
+
 export async function startProcessing(taskId: string, shootFolderPath: string): Promise<ProcessingSummary> {
   const supabase = createSupabase();
   const { taskRoot, localFolderName } = validateShootFolder(shootFolderPath);
@@ -322,6 +359,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
         console.error(`[processingEngine] ImageMagick normalization failed for ${outBaseName}:`, message);
         throw new Error(`ImageMagick normalization failed for ${outBaseName}: ${message}`);
       }
+      await enhanceMergedPhotoInPlace(outFile);
 
       const removalTarget = extractRemovalTargetFromFilename(outBaseName);
       if (removalTarget) {
