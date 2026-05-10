@@ -12,7 +12,12 @@ type ReviewMergedModalProps = {
 type FileStatus = "idle" | "loading" | "ok" | "error";
 type FileAction = "sky" | "remove";
 
-type MergedItem = { name: string; storagePath: string; url: string };
+type MergedItem = {
+  name: string;
+  storagePath: string;
+  displayUrl: string;
+  absoluteLocalPath: string;
+};
 
 function toErrorString(value: unknown, fallback: string): string {
   if (typeof value === "string" && value.trim()) return value;
@@ -48,7 +53,8 @@ function toSafeFilename(value: string): string {
 
 export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMergedModalProps) {
   const [files, setFiles] = useState<string[]>([]);
-  const [fileUrlByName, setFileUrlByName] = useState<Record<string, string>>({});
+  const [displayUrlByName, setDisplayUrlByName] = useState<Record<string, string>>({});
+  const [absolutePathByName, setAbsolutePathByName] = useState<Record<string, string>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoadingList, setIsLoadingList] = useState(false);
   const [actionByFile, setActionByFile] = useState<Record<string, FileStatus>>({});
@@ -82,9 +88,15 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
         return;
       }
       setFiles(data?.files ?? []);
-      setFileUrlByName(
+      const items = (data?.items ?? []) || [];
+      setDisplayUrlByName(
         Object.fromEntries(
-          ((data?.items ?? []) || []).map((item) => [item.name, typeof item.url === "string" ? item.url : ""])
+          items.map((item) => [item.name, typeof item.displayUrl === "string" ? item.displayUrl : ""])
+        )
+      );
+      setAbsolutePathByName(
+        Object.fromEntries(
+          items.map((item) => [item.name, typeof item.absoluteLocalPath === "string" ? item.absoluteLocalPath : ""])
         )
       );
       setActionByFile({});
@@ -96,7 +108,8 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     } catch {
       setLoadError("Network error while loading merged files.");
       setFiles([]);
-      setFileUrlByName({});
+      setDisplayUrlByName({});
+      setAbsolutePathByName({});
     } finally {
       setIsLoadingList(false);
     }
@@ -172,13 +185,13 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     }
   };
 
-  const submitRemoveObject = async (filename: string, removalTarget: string) => {
-    const safeFilename = toSafeFilename(filename);
-    if (!safeFilename) {
+  const submitRemoveObject = async (filename: string, absoluteLocalPath: string, removalTarget: string) => {
+    const safeAbsolutePath = absoluteLocalPath.trim();
+    if (!safeAbsolutePath) {
       setActionByFile((prev) => ({ ...prev, [filename]: "error" }));
       setMessageByFile((prev) => ({
         ...prev,
-        [filename]: "Invalid filename.",
+        [filename]: "Missing local file path.",
       }));
       return;
     }
@@ -195,9 +208,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          local_folder_name: localFolderName,
-          task_id: taskId,
-          filename: safeFilename,
+          imagePath: safeAbsolutePath,
           removalTarget,
         }),
       });
@@ -252,8 +263,9 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
       return;
     }
     const targetFile = removeDialogFile;
+    const absoluteLocalPath = absolutePathByName[targetFile] ?? "";
     handleCloseRemoveDialog();
-    await submitRemoveObject(targetFile, promptText);
+    await submitRemoveObject(targetFile, absoluteLocalPath, promptText);
   };
 
   return (
@@ -302,7 +314,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {(files ?? []).map((filename) => {
               const cacheBuster = cacheBusterByFile[filename] ?? 0;
-              const baseUrl = fileUrlByName[filename] ?? "";
+              const baseUrl = displayUrlByName[filename] ?? "";
               const src = baseUrl ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}v=${cacheBuster}` : "";
               const status = actionByFile[filename] ?? "idle";
               const activeAction = activeActionByFile[filename] ?? null;
