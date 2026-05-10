@@ -2,12 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 import sharp from "sharp";
 
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
+import { sanitizeStoragePath } from "@/lib/sanitizeStoragePath.mjs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const SUPABASE_FINALS_BUCKET = process.env.SUPABASE_FINALS_BUCKET?.trim() || "finals";
 
 type WorkflowNode = {
   inputs?: Record<string, unknown>;
@@ -39,9 +42,16 @@ function normalizeErrorMessage(value: unknown, fallback: string): string {
 function normalizeFilenameInput(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
+  const safeDecode = (raw: string): string => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  };
   try {
     const parsed = new URL(trimmed);
-    const decodedPath = decodeURIComponent(parsed.pathname);
+    const decodedPath = safeDecode(parsed.pathname);
     const parts = decodedPath.split("/").filter(Boolean);
     return (parts.at(-1) ?? "").trim();
   } catch {
@@ -50,38 +60,106 @@ function normalizeFilenameInput(value: string): string {
     const last = parts.at(-1) ?? trimmed;
     const [withoutQuery] = last.split("?");
     const [withoutHash] = withoutQuery.split("#");
-    return decodeURIComponent(withoutHash).trim();
+    return safeDecode(withoutHash).trim();
   }
 }
 
-function resolveAndValidateImagePath(imagePathOrFilename: string, localFolderName?: string): string {
-  const trimmed = imagePathOrFilename.trim();
-  if (!trimmed) {
-    throw new Error("imagePath or filename is required.");
-  }
-  const hasFolder = typeof localFolderName === "string" && localFolderName.trim().length > 0;
-  let resolved: string;
-  if (hasFolder) {
-    const safeFolder = localFolderName!.trim();
-    if (safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder)) {
-      throw new Error("Invalid local_folder_name.");
-    }
-    const safeFile = path.basename(normalizeFilenameInput(trimmed));
-    if (!safeFile) {
-      throw new Error("Invalid filename.");
-    }
-    resolved = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFile);
-  } else {
-    resolved = path.resolve(trimmed);
-  }
+function resolveAndValidateAbsoluteImagePath(imagePath: string): string {
+  const resolved = path.resolve(imagePath.trim());
   const rootResolved = path.resolve(PHOTOS_ROOT);
   if (!resolved.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
     throw new Error("Access denied.");
   }
+  console.info(`[ai-remove] Trying absolute source path: ${resolved}`);
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-    throw new Error("Image not found.");
+    throw new Error(`Image not found. attempted_local_path=${resolved}`);
   }
   return resolved;
+}
+
+async function resolveMergedSourceByFilename(
+  localFolderName: string,
+  filename: string,
+  taskId?: string
+): Promise<{
+  sourceInput: string | Buffer;
+  resolvedLocalFolderName: string;
+  sourceType: "local" | "supabase";
+  sourceRef: string;
+}> {
+  const attemptedLocalPaths: string[] = [];
+  const attemptedStoragePaths: string[] = [];
+  let safeFolder = localFolderName.trim();
+  if (safeFolder && (safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder))) {
+    throw new Error("Invalid local_folder_name.");
+  }
+
+  const safeFile = path.basename(normalizeFilenameInput(filename));
+  if (!safeFile) {
+    throw new Error("Invalid filename.");
+  }
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+  const supabase =
+    supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } }) : null;
+  if (!safeFolder && taskId && supabase) {
+    const { data: taskRow } = await supabase
+      .from("tasks")
+      .select("local_folder_name")
+      .eq("id", taskId)
+      .maybeSingle();
+    const maybeLocal = (taskRow as { local_folder_name?: unknown } | null)?.local_folder_name;
+    safeFolder = typeof maybeLocal === "string" ? maybeLocal.trim() : "";
+  }
+
+  if (safeFolder) {
+    const localPath = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFile);
+    attemptedLocalPaths.push(localPath);
+    console.info(`[ai-remove] Trying local merged source path: ${localPath}`);
+    const rootResolved = path.resolve(PHOTOS_ROOT);
+    if (!localPath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
+      throw new Error("Access denied.");
+    }
+    if (fs.existsSync(localPath) && fs.statSync(localPath).isFile()) {
+      return {
+        sourceInput: localPath,
+        resolvedLocalFolderName: safeFolder,
+        sourceType: "local",
+        sourceRef: localPath,
+      };
+    }
+  }
+
+  if (supabase) {
+    const folderPrefixes = [
+      safeFolder ? sanitizeStoragePath(`${safeFolder}/3_Merged`) : "",
+      taskId ? sanitizeStoragePath(`${taskId}/3_Merged`) : "",
+    ].filter(Boolean);
+    for (const prefix of folderPrefixes) {
+      const storagePath = sanitizeStoragePath(`${prefix}/${safeFile}`);
+      attemptedStoragePaths.push(storagePath);
+      const { data, error } = await supabase.storage.from(SUPABASE_FINALS_BUCKET).download(storagePath);
+      if (!error && data) {
+        const buffer = Buffer.from(await data.arrayBuffer());
+        return {
+          sourceInput: buffer,
+          resolvedLocalFolderName: safeFolder,
+          sourceType: "supabase",
+          sourceRef: storagePath,
+        };
+      }
+    }
+  }
+
+  console.error("[ai-remove] Merged source lookup failed.", {
+    localPaths: attemptedLocalPaths,
+    storagePaths: attemptedStoragePaths,
+  });
+  throw new Error(
+    `Image not found. attempted_local_paths=${attemptedLocalPaths.join(" | ") || "(none)"}`
+  );
 }
 
 function selectPositivePrompt(removalTarget: string): string {
@@ -436,6 +514,7 @@ export async function POST(request: Request) {
     const body = (await request.json()) as {
       imagePath?: string;
       local_folder_name?: string;
+      task_id?: string;
       filename?: string;
       removalTarget?: string;
     };
@@ -443,6 +522,7 @@ export async function POST(request: Request) {
     const imagePath = typeof body.imagePath === "string" ? body.imagePath.trim() : "";
     const localFolderName =
       typeof body.local_folder_name === "string" ? body.local_folder_name.trim() : "";
+    const taskId = typeof body.task_id === "string" ? body.task_id.trim() : "";
     const filename = typeof body.filename === "string" ? body.filename.trim() : "";
     const removalTarget = typeof body.removalTarget === "string" ? body.removalTarget.trim() : "";
 
@@ -453,14 +533,28 @@ export async function POST(request: Request) {
       );
     }
 
-    if (filename && !localFolderName) {
+    if (filename && !localFolderName && !taskId) {
       return NextResponse.json(
-        { error: "local_folder_name is required when filename is provided." },
+        { error: "local_folder_name or task_id is required when filename is provided." },
         { status: 400 }
       );
     }
 
-    const sourcePath = resolveAndValidateImagePath(filename || imagePath, localFolderName || undefined);
+    const sourceResult = filename
+      ? await resolveMergedSourceByFilename(localFolderName, filename, taskId)
+      : {
+          sourceInput: resolveAndValidateAbsoluteImagePath(imagePath),
+          resolvedLocalFolderName: localFolderName,
+          sourceType: "local" as const,
+          sourceRef: path.resolve(imagePath),
+        };
+    const sourceInput = sourceResult.sourceInput;
+    const resolvedLocalFolderName = sourceResult.resolvedLocalFolderName;
+    console.info(
+      `[ai-remove] source_lookup task_id=${taskId || "(none)"} filename=${normalizeFilenameInput(
+        filename || imagePath
+      )} source=${sourceResult.sourceType} ref=${sourceResult.sourceRef}`
+    );
     const comfyInputDir = process.env.COMFYUI_INPUT_DIR?.trim();
     const comfyBase = process.env.COMFYUI_BASE_URL?.trim() || "http://127.0.0.1:8188";
 
@@ -477,15 +571,18 @@ export async function POST(request: Request) {
 
     const inputRoot = path.resolve(comfyInputDir);
     fs.mkdirSync(inputRoot, { recursive: true });
-    const safeFilename = path.basename(sourcePath);
+    const safeFilename = path.basename(normalizeFilenameInput(filename || imagePath));
     const comfyFilename = `remove_${safeFilename}`.replace(/[^a-zA-Z0-9._-]/g, "_");
     const comfyInputPath = path.join(inputRoot, comfyFilename);
-    await sharp(sourcePath)
+    await sharp(sourceInput)
       .resize({ width: 2048, height: 2048, fit: "inside" })
       .toFile(comfyInputPath);
 
     const outputBaseName = path.basename(safeFilename, path.extname(safeFilename));
-    const outputPrefix = path.join(path.dirname(sourcePath), `AI_REMOVE_${outputBaseName}`);
+    const effectiveFolderForOutput = resolvedLocalFolderName || localFolderName || taskId;
+    const outputPrefix = effectiveFolderForOutput
+      ? path.join(PHOTOS_ROOT, effectiveFolderForOutput, "3_Merged", `AI_REMOVE_${outputBaseName}`)
+      : path.join(PHOTOS_ROOT, "3_Merged", `AI_REMOVE_${outputBaseName}`);
     const { workflow, positivePrompt } = buildRemovalWorkflow(comfyFilename, outputPrefix, removalTarget);
 
     const clientId = randomUUID();
@@ -527,7 +624,7 @@ export async function POST(request: Request) {
       success: true,
       comfyQueued: true,
       promptId: comfyPayload?.prompt_id,
-      imagePath: sourcePath,
+      imagePath: typeof sourceInput === "string" ? sourceInput : "",
       removalTarget,
       positivePrompt,
     });

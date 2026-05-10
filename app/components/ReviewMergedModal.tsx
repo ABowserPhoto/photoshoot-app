@@ -138,6 +138,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           local_folder_name: localFolderName,
+          task_id: taskId,
           filename: safeFilename,
         }),
       });
@@ -195,6 +196,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           local_folder_name: localFolderName,
+          task_id: taskId,
           filename: safeFilename,
           removalTarget,
         }),

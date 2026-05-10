@@ -2,12 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 import sharp from "sharp";
 
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
+import { sanitizeStoragePath } from "@/lib/sanitizeStoragePath.mjs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const SUPABASE_FINALS_BUCKET = process.env.SUPABASE_FINALS_BUCKET?.trim() || "finals";
 
 type WorkflowNode = {
   inputs?: Record<string, unknown>;
@@ -42,9 +45,16 @@ function loadWorkflowTemplate(): Record<string, WorkflowNode> {
 function normalizeFilenameInput(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
+  const safeDecode = (raw: string): string => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  };
   try {
     const parsed = new URL(trimmed);
-    const decodedPath = decodeURIComponent(parsed.pathname);
+    const decodedPath = safeDecode(parsed.pathname);
     const parts = decodedPath.split("/").filter(Boolean);
     return (parts.at(-1) ?? "").trim();
   } catch {
@@ -53,55 +63,127 @@ function normalizeFilenameInput(value: string): string {
     const last = parts.at(-1) ?? trimmed;
     const [withoutQuery] = last.split("?");
     const [withoutHash] = withoutQuery.split("#");
-    return decodeURIComponent(withoutHash).trim();
+    return safeDecode(withoutHash).trim();
   }
 }
 
-function validateMergedFile(localFolderName: string, filename: string): string {
-  const safeFolder = localFolderName.trim();
+async function resolveMergedSource(
+  localFolderName: string,
+  filename: string,
+  taskId?: string
+): Promise<{
+  sourceInput: string | Buffer;
+  resolvedLocalFolderName: string;
+  sourceType: "local" | "supabase";
+  sourceRef: string;
+}> {
+  const attemptedLocalPaths: string[] = [];
+  const attemptedStoragePaths: string[] = [];
+  let safeFolder = localFolderName.trim();
   const safeFile = path.basename(filename.trim());
-  if (!safeFolder || !safeFile || safeFile !== filename.trim()) {
-    throw new Error("Invalid local_folder_name or filename.");
+  if (!safeFile || safeFile !== filename.trim()) {
+    throw new Error("Invalid filename.");
   }
   const ext = path.extname(safeFile).toLowerCase();
   if (!ext || ![".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp", ".gif"].includes(ext)) {
     throw new Error("Invalid filename extension for merged image.");
   }
-  if (safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder)) {
+  if (safeFolder && (safeFolder.includes("..") || /[<>:"|?*]/.test(safeFolder))) {
     throw new Error("Invalid local_folder_name.");
   }
-  const imagePath = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFile);
-  const rootResolved = path.resolve(PHOTOS_ROOT);
-  if (!imagePath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
-    throw new Error("Access denied.");
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+  const supabase =
+    supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } }) : null;
+  if (!safeFolder && taskId && supabase) {
+    const { data: taskRow } = await supabase
+      .from("tasks")
+      .select("local_folder_name")
+      .eq("id", taskId)
+      .maybeSingle();
+    const maybeLocal = (taskRow as { local_folder_name?: unknown } | null)?.local_folder_name;
+    safeFolder = typeof maybeLocal === "string" ? maybeLocal.trim() : "";
   }
-  console.log("ComfyUI trying to find merged image at:", imagePath);
-  if (!fs.existsSync(imagePath) || !fs.statSync(imagePath).isFile()) {
-    throw new Error("Merged image not found.");
+
+  if (safeFolder) {
+    const imagePath = path.resolve(PHOTOS_ROOT, safeFolder, "3_Merged", safeFile);
+    attemptedLocalPaths.push(imagePath);
+    console.info(`[ai-edit] Trying local merged source path: ${imagePath}`);
+    const rootResolved = path.resolve(PHOTOS_ROOT);
+    if (!imagePath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
+      throw new Error("Access denied.");
+    }
+    if (fs.existsSync(imagePath) && fs.statSync(imagePath).isFile()) {
+      return {
+        sourceInput: imagePath,
+        resolvedLocalFolderName: safeFolder,
+        sourceType: "local",
+        sourceRef: imagePath,
+      };
+    }
   }
-  return imagePath;
+
+  if (supabase) {
+    const folderPrefixes = [
+      safeFolder ? sanitizeStoragePath(`${safeFolder}/3_Merged`) : "",
+      taskId ? sanitizeStoragePath(`${taskId}/3_Merged`) : "",
+    ].filter(Boolean);
+    for (const prefix of folderPrefixes) {
+      const storagePath = sanitizeStoragePath(`${prefix}/${safeFile}`);
+      attemptedStoragePaths.push(storagePath);
+      const { data, error } = await supabase.storage.from(SUPABASE_FINALS_BUCKET).download(storagePath);
+      if (!error && data) {
+        const buffer = Buffer.from(await data.arrayBuffer());
+        return {
+          sourceInput: buffer,
+          resolvedLocalFolderName: safeFolder,
+          sourceType: "supabase",
+          sourceRef: storagePath,
+        };
+      }
+    }
+  }
+
+  console.error("[ai-edit] Merged source lookup failed.", {
+    localPaths: attemptedLocalPaths,
+    storagePaths: attemptedStoragePaths,
+  });
+  throw new Error(
+    `Merged image not found. attempted_local_paths=${attemptedLocalPaths.join(" | ") || "(none)"}`
+  );
 }
 
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as {
       local_folder_name?: string;
+      task_id?: string;
       filename?: string;
     };
 
     const localFolderName =
       typeof body.local_folder_name === "string" ? body.local_folder_name.trim() : "";
+    const taskId = typeof body.task_id === "string" ? body.task_id.trim() : "";
     const filenameRaw = typeof body.filename === "string" ? body.filename.trim() : "";
     const filename = normalizeFilenameInput(filenameRaw);
 
-    if (!localFolderName || !filename) {
+    if ((!localFolderName && !taskId) || !filename) {
       return NextResponse.json(
-        { error: "local_folder_name and filename are required." },
+        { error: "filename and either local_folder_name or task_id are required." },
         { status: 400 }
       );
     }
 
-    const sourcePath = validateMergedFile(localFolderName, filename);
+    const { sourceInput, resolvedLocalFolderName, sourceType, sourceRef } = await resolveMergedSource(
+      localFolderName,
+      filename,
+      taskId
+    );
+    console.info(
+      `[ai-edit] source_lookup task_id=${taskId || "(none)"} filename=${filename} source=${sourceType} ref=${sourceRef}`
+    );
 
     const comfyInputDir = process.env.COMFYUI_INPUT_DIR?.trim();
 
@@ -121,17 +203,13 @@ export async function POST(request: Request) {
     const safeFilename = path.basename(filename);
     const resizedFilename = `resized_${safeFilename}`.replace(/[^a-zA-Z0-9._-]/g, "_");
     const resizedPath = path.join(inputRoot, resizedFilename);
-    await sharp(sourcePath)
+    await sharp(sourceInput)
       .resize({ width: 2048, height: 2048, fit: "inside" })
       .toFile(resizedPath);
 
     const outputBaseName = path.basename(safeFilename, path.extname(safeFilename));
-    const outputPrefix = path.join(
-      PHOTOS_ROOT,
-      localFolderName,
-      "4_Final",
-      `AI_${outputBaseName}`
-    );
+    const effectiveFolderForOutput = resolvedLocalFolderName || localFolderName || taskId;
+    const outputPrefix = path.join(PHOTOS_ROOT, effectiveFolderForOutput, "4_Final", `AI_${outputBaseName}`);
 
     const workflow = loadWorkflowTemplate();
     if (!workflow["1"]?.inputs || !workflow["9"]?.inputs || !workflow["11"]?.inputs) {
@@ -149,7 +227,9 @@ export async function POST(request: Request) {
     let promptId: string | undefined;
 
     try {
-      console.info(`[ai-edit] Triggering ComfyUI prompt for ${localFolderName}/${filename} at ${promptUrl}`);
+      console.info(
+        `[ai-edit] Triggering ComfyUI prompt for ${effectiveFolderForOutput || "(unknown-folder)"}/${filename} at ${promptUrl}`
+      );
       const promptPayload = {
         prompt: workflow,
         client_id: clientId,
@@ -192,7 +272,7 @@ export async function POST(request: Request) {
       comfyQueued = true;
       promptId = comfyPayload?.prompt_id;
       console.info(
-        `[ai-edit] ComfyUI prompt accepted for ${localFolderName}/${filename}${promptId ? ` (prompt ${promptId})` : ""}.`
+        `[ai-edit] ComfyUI prompt accepted for ${effectiveFolderForOutput || "(unknown-folder)"}/${filename}${promptId ? ` (prompt ${promptId})` : ""}.`
       );
     } catch (err) {
       console.error("ComfyUI fetch error:", err);
@@ -214,6 +294,7 @@ export async function POST(request: Request) {
       comfyQueued,
       promptId,
       local_folder_name: localFolderName,
+      task_id: taskId,
       filename,
     });
   } catch (error) {
