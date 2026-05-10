@@ -167,13 +167,38 @@ async function claimTaskForStatus(supabase, taskId, fromStatus, toStatus) {
 }
 
 function isImageFile(fileName) {
-  return [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp", ".gif", ".heic", ".heif", ".nef"].includes(
-    path.extname(fileName).toLowerCase()
-  );
+  return [
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".heif",
+    ".nef",
+    ".arw",
+    ".cr2",
+    ".cr3",
+    ".dng",
+    ".raf",
+    ".rw2",
+    ".orf",
+  ].includes(path.extname(fileName).toLowerCase());
 }
 
-function safePreviewStem(localFolderName, middleFilename, chunkIndex) {
-  const stem = `${localFolderName}_${chunkIndex}_${path.basename(middleFilename, path.extname(middleFilename))}`;
+function isPreviewSourceFile(fileName) {
+  const normalized = String(fileName || "").toLowerCase();
+  if (!normalized || normalized === ".ds_store" || normalized === "thumbs.db") {
+    return false;
+  }
+  return isImageFile(normalized);
+}
+
+function safePreviewStem(localFolderName, firstFilename, chunkIndex) {
+  const stem = `${localFolderName}_${chunkIndex}_${path.basename(firstFilename, path.extname(firstFilename))}`;
   return stem.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
@@ -208,13 +233,18 @@ function parsePreviewItems(raw) {
         return null;
       }
       const chunkIndex = Number(item.chunkIndex);
-      const middleFilename = typeof item.middleFilename === "string" ? item.middleFilename : "";
+      const firstFilename =
+        typeof item.firstFilename === "string"
+          ? item.firstFilename
+          : typeof item.middleFilename === "string"
+            ? item.middleFilename
+            : "";
       const previewUrl = typeof item.previewUrl === "string" ? item.previewUrl : "";
       const storagePath = typeof item.storagePath === "string" ? item.storagePath : "";
-      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !middleFilename || !previewUrl || !storagePath) {
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !firstFilename || !previewUrl || !storagePath) {
         return null;
       }
-      return { chunkIndex, middleFilename, previewUrl, storagePath };
+      return { chunkIndex, firstFilename, previewUrl, storagePath };
     })
     .filter(Boolean);
 }
@@ -310,7 +340,7 @@ async function uploadPreviewBuffer(supabase, params) {
   const storagePath = sanitizeStoragePath(
     `${params.localFolderName}/${safePreviewStem(
       params.localFolderName,
-      params.middleFilename,
+      params.firstFilename,
       params.chunkIndex
     )}.jpg`
   );
@@ -337,8 +367,11 @@ async function ensureCoverImageOnce(supabase, taskRow, rawDir, chunks) {
     return;
   }
   const firstChunk = chunks[0];
-  const middleFilename = firstChunk[Math.floor(firstChunk.length / 2)];
-  const sourcePath = path.join(rawDir, middleFilename);
+  const firstFilename = firstChunk[0];
+  if (!firstFilename || !isPreviewSourceFile(firstFilename)) {
+    return;
+  }
+  const sourcePath = path.join(rawDir, firstFilename);
   if (!fs.existsSync(sourcePath)) {
     return;
   }
@@ -389,6 +422,9 @@ async function syncTaskPreviews(supabase, taskRow) {
   const existingItems = parsePreviewItems(taskRow.gallery_previews);
   const existingByChunk = new Map(existingItems.map((item) => [item.chunkIndex, item]));
   const nextItems = [];
+  let processedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
 
   await ensureCoverImageOnce(supabase, taskRow, rawDir, chunks).catch((err) => {
     console.warn(
@@ -399,29 +435,45 @@ async function syncTaskPreviews(supabase, taskRow) {
 
   for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
     const chunk = chunks[chunkIndex];
-    const middleFilename = chunk[Math.floor(chunk.length / 2)];
+    const firstFilename = chunk[0];
+    if (!firstFilename || !isPreviewSourceFile(firstFilename)) {
+      console.warn("[worker] Skipping file due to error:", firstFilename || "(missing filename)");
+      skippedCount += 1;
+      continue;
+    }
     const existing = existingByChunk.get(chunkIndex);
-    if (existing && existing.middleFilename === middleFilename && existing.previewUrl) {
+    if (existing && existing.firstFilename === firstFilename && existing.previewUrl) {
       nextItems.push(existing);
+      processedCount += 1;
       continue;
     }
 
-    const sourcePath = path.join(rawDir, middleFilename);
-    const previewBuffer = await withPreviewRetry(`render preview ${localFolderName}/${middleFilename}`, async () =>
-      buildPreviewBuffer(sourcePath)
-    );
-    const uploaded = await uploadPreviewBuffer(supabase, {
-      localFolderName,
-      chunkIndex,
-      middleFilename,
-      buffer: previewBuffer,
-    });
-    nextItems.push({
-      chunkIndex,
-      middleFilename,
-      previewUrl: uploaded.previewUrl,
-      storagePath: uploaded.storagePath,
-    });
+    try {
+      const sourcePath = path.join(rawDir, firstFilename);
+      const previewBuffer = await withPreviewRetry(`render preview ${localFolderName}/${firstFilename}`, async () =>
+        buildPreviewBuffer(sourcePath)
+      );
+      const uploaded = await uploadPreviewBuffer(supabase, {
+        localFolderName,
+        chunkIndex,
+        firstFilename,
+        buffer: previewBuffer,
+      });
+      nextItems.push({
+        chunkIndex,
+        firstFilename,
+        previewUrl: uploaded.previewUrl,
+        storagePath: uploaded.storagePath,
+      });
+      processedCount += 1;
+    } catch (error) {
+      failedCount += 1;
+      console.warn(
+        "[worker] Skipping file due to error:",
+        firstFilename,
+        error instanceof Error ? error.message : error
+      );
+    }
   }
 
   await withPreviewRetry(`persist gallery_previews for task ${taskRow.id}`, async () => {
@@ -439,6 +491,9 @@ async function syncTaskPreviews(supabase, taskRow) {
       throw new Error(error.message);
     }
   });
+  console.info(
+    `[worker] Folder [${localFolderName}] complete. Processed: ${processedCount} | Skipped: ${skippedCount} | Failed: ${failedCount}`
+  );
 }
 
 async function syncPreviewsForLocalFolder(localFolderName) {

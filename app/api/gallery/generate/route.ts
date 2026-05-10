@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 type GalleryItem = {
   chunkIndex: number;
-  middleFilename: string;
+  firstFilename: string;
   previewUrl: string;
 };
 
@@ -44,14 +44,24 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
       if (!item || typeof item !== "object") {
         return null;
       }
-      const row = item as { chunkIndex?: unknown; middleFilename?: unknown; previewUrl?: unknown };
+      const row = item as {
+        chunkIndex?: unknown;
+        firstFilename?: unknown;
+        middleFilename?: unknown;
+        previewUrl?: unknown;
+      };
       const chunkIndex = Number(row.chunkIndex);
-      const middleFilename = typeof row.middleFilename === "string" ? row.middleFilename : "";
+      const firstFilename =
+        typeof row.firstFilename === "string"
+          ? row.firstFilename
+          : typeof row.middleFilename === "string"
+            ? row.middleFilename
+            : "";
       const previewUrl = typeof row.previewUrl === "string" ? row.previewUrl : "";
-      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !middleFilename || !previewUrl) {
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !firstFilename || !previewUrl) {
         return null;
       }
-      return { chunkIndex, middleFilename, previewUrl };
+      return { chunkIndex, firstFilename, previewUrl };
     })
     .filter((value): value is GalleryItem => value !== null)
     .sort((a, b) => a.chunkIndex - b.chunkIndex);

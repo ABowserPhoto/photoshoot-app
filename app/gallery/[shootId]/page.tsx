@@ -5,7 +5,7 @@ import { useParams, useSearchParams } from "next/navigation";
 
 type GalleryItem = {
   chunkIndex: number;
-  middleFilename: string;
+  firstFilename: string;
   previewUrl: string;
 };
 
@@ -395,7 +395,7 @@ export default function GalleryPage() {
                     />
                   </button>
                   <div className="border-t border-zinc-800 px-2 py-2">
-                    <div className="truncate text-[11px] text-zinc-400">{displayFilename(item.middleFilename)}</div>
+                    <div className="truncate text-[11px] text-zinc-400">{displayFilename(item.firstFilename)}</div>
                     <div className="mt-1 flex items-center justify-between gap-2">
                       <StarsRow chunkIndex={item.chunkIndex} disabled={isSuccess} />
                       <button
@@ -476,11 +476,11 @@ export default function GalleryPage() {
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={activeModalItem.previewUrl}
-              alt={activeModalItem.middleFilename}
+              alt={activeModalItem.firstFilename}
               className="max-h-[78vh] w-auto max-w-full object-contain"
             />
             <div className="mt-3 w-full max-w-3xl rounded-lg border border-zinc-700 bg-zinc-900/80 px-4 py-3">
-              <div className="truncate text-sm text-zinc-300">{displayFilename(activeModalItem.middleFilename)}</div>
+              <div className="truncate text-sm text-zinc-300">{displayFilename(activeModalItem.firstFilename)}</div>
               <div className="mt-2 flex items-center justify-between gap-3">
                 <StarsRow chunkIndex={activeModalItem.chunkIndex} size="text-xl" disabled={isSuccess} />
                 <button
