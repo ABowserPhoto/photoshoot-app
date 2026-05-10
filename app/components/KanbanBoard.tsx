@@ -448,6 +448,7 @@ export default function KanbanBoard({
   const [collapsedColumns, setCollapsedColumns] = useState<Partial<Record<ColumnKey, boolean>>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [staleDataBanner, setStaleDataBanner] = useState<string | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [sourceColumn, setSourceColumn] = useState<ColumnKey | null>(null);
   const [activeDropColumn, setActiveDropColumn] = useState<ColumnKey | null>(null);
@@ -469,6 +470,7 @@ export default function KanbanBoard({
     async function loadTasks() {
       setIsLoading(true);
       setStatusMessage(null);
+      setStaleDataBanner(null);
 
       try {
         const response = await fetch("/api/tasks", { cache: "no-store" });
@@ -482,11 +484,16 @@ export default function KanbanBoard({
               : `Failed to load tasks (${response.status}).`);
           if (isMounted) {
             setStatusMessage(message);
+            setStaleDataBanner(null);
           }
           return;
         }
 
-        const json = (await response.json()) as { data?: DbTask[] };
+        const json = (await response.json()) as {
+          data?: DbTask[];
+          warning?: string;
+          meta?: { stale?: boolean };
+        };
         const data = json.data ?? [];
 
         if (!isMounted) {
@@ -501,6 +508,7 @@ export default function KanbanBoard({
           setBoard(fallbackBoard);
           setArchivedTasks([]);
           setStatusMessage("No tasks found in Supabase. Showing local dummy tasks.");
+          setStaleDataBanner(json.meta?.stale ? (json.warning ?? "Showing cached task data.") : null);
           return;
         }
 
@@ -523,11 +531,13 @@ export default function KanbanBoard({
 
         setBoard(grouped);
         setArchivedTasks(archived);
+        setStaleDataBanner(json.meta?.stale ? (json.warning ?? "Showing cached task data.") : null);
       } catch {
         if (isMounted) {
           setStatusMessage(
             "Failed to load tasks: network error. Ensure the dev server listens on all interfaces (see package.json \"dev\" script) and retry."
           );
+          setStaleDataBanner(null);
         }
       } finally {
         if (isMounted) {
@@ -1110,6 +1120,11 @@ export default function KanbanBoard({
         )}
         {isLoading ? (
           <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">Loading tasks from Supabase...</p>
+        ) : null}
+        {staleDataBanner ? (
+          <div className="mt-4 rounded-md border border-amber-400/40 bg-amber-100/60 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/30 dark:text-amber-200">
+            {staleDataBanner}
+          </div>
         ) : null}
         {statusMessage ? (
           <p className="mt-4 text-sm text-zinc-600 dark:text-zinc-400">{statusMessage}</p>
