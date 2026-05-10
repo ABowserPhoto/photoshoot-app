@@ -82,7 +82,8 @@ export default function GalleryPage() {
   }, [activeChunkIndex, gridItems]);
   const isSelectionAvailable = useMemo(() => {
     const normalized = (taskStatus ?? "").trim().toLowerCase().replace(/\s+/g, "-");
-    return normalized === "selection-available";
+    const allowedStatuses = new Set(["preview-sent", "selection-available"]);
+    return allowedStatuses.has(normalized);
   }, [taskStatus]);
   const isExpired = useMemo(() => {
     if (taskStatus == null) {
