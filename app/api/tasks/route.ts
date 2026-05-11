@@ -6,7 +6,7 @@ import { redactTaskRowForRole } from "@/lib/tasksRedact";
 import type { TaskRow } from "@/lib/tasksRedact";
 
 export const dynamic = "force-dynamic";
-const TASKS_FETCH_TIMEOUT_MS = Number(process.env.TASKS_FETCH_TIMEOUT_MS ?? "2000");
+const TASKS_FETCH_TIMEOUT_MS = Number(process.env.TASKS_FETCH_TIMEOUT_MS ?? "8000");
 let cachedRows: TaskRow[] = [];
 
 function withTimeoutFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {

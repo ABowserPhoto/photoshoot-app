@@ -293,7 +293,7 @@ export default function GalleryPage() {
         <div className="mx-auto flex h-32 w-full max-w-7xl items-center justify-between px-4 sm:px-6">
           <div className="flex items-center">
             <img
-              src="/Logo_1024_whitehiRes.svg"
+              src="/Logo_1024_white.webp"
               alt="Logo"
               className="h-28 w-auto object-contain"
             />
@@ -306,7 +306,7 @@ export default function GalleryPage() {
         <section className="flex min-h-[calc(100vh-8rem)] items-center justify-center px-6">
           <div className="w-full max-w-3xl rounded-2xl border border-zinc-800 bg-zinc-900/70 p-8 text-center shadow-2xl">
             <img
-              src="/Logo_1024_whitehiRes.svg"
+              src="/Logo_1024_white.webp"
               alt="Logo"
               className="mx-auto h-24 w-auto object-contain"
             />

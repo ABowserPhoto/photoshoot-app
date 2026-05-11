@@ -12,6 +12,18 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const SUPABASE_FINALS_BUCKET = process.env.SUPABASE_FINALS_BUCKET?.trim() || "finals";
 
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  const intValue = Math.trunc(parsed);
+  return intValue > 0 ? intValue : fallback;
+}
+
+const AI_REMOVE_MASK_EXPAND = readPositiveIntEnv("AI_REMOVE_MASK_EXPAND", 8);
+const AI_REMOVE_INPAINT_GROW_MASK_BY = readPositiveIntEnv("AI_REMOVE_INPAINT_GROW_MASK_BY", 4);
+
 type WorkflowNode = {
   inputs?: Record<string, unknown>;
   class_type?: string;
@@ -168,15 +180,15 @@ function selectPositivePrompt(removalTarget: string): string {
     return "empty street, bare concrete driveway, asphalt, empty space";
   }
   if (t.includes("cable") || t.includes("wire")) {
-    return "clear sky, empty wall, seamless background, clean";
+    return "background, wall texture, seamless";
   }
   if (t.includes("picture") || t.includes("frame")) {
-    return "blank wall, clean painted wall, seamless interior wall";
+    return "background, wall texture, seamless";
   }
   if (t.includes("clutter") || t.includes("counter")) {
-    return "clean empty kitchen counter, bare table top, flat surface, wood grain, marble";
+    return "background, wall texture, seamless";
   }
-  return "clean empty background, seamless matching texture";
+  return "background, wall texture, seamless";
 }
 
 function buildRemovalWorkflow(imageFilename: string, outputPrefix: string, removalTarget: string) {
@@ -227,7 +239,7 @@ function buildRemovalWorkflow(imageFilename: string, outputPrefix: string, remov
       },
       "5": {
         "inputs": {
-          "expand": 15,
+          "expand": AI_REMOVE_MASK_EXPAND,
           "tapered_corners": false,
           "mask": [
             "2",
@@ -355,7 +367,7 @@ function buildRemovalWorkflow(imageFilename: string, outputPrefix: string, remov
       },
       "23": {
         "inputs": {
-          "grow_mask_by": 6,
+          "grow_mask_by": AI_REMOVE_INPAINT_GROW_MASK_BY,
           "pixels": [
             "1",
             0
@@ -513,13 +525,17 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json()) as {
       imagePath?: string;
+      absoluteLocalPath?: string;
       local_folder_name?: string;
       task_id?: string;
       filename?: string;
       removalTarget?: string;
     };
 
-    const imagePath = typeof body.imagePath === "string" ? body.imagePath.trim() : "";
+    const absoluteLocalPath =
+      typeof body.absoluteLocalPath === "string" ? body.absoluteLocalPath.trim() : "";
+    const imagePathInput = typeof body.imagePath === "string" ? body.imagePath.trim() : "";
+    const imagePath = absoluteLocalPath || imagePathInput;
     const localFolderName =
       typeof body.local_folder_name === "string" ? body.local_folder_name.trim() : "";
     const taskId = typeof body.task_id === "string" ? body.task_id.trim() : "";
@@ -528,7 +544,10 @@ export async function POST(request: Request) {
 
     if ((!imagePath && !filename) || !removalTarget) {
       return NextResponse.json(
-        { error: "Provide imagePath or (local_folder_name + filename), plus removalTarget." },
+        {
+          error:
+            "Provide absoluteLocalPath/imagePath or (local_folder_name + filename), plus removalTarget.",
+        },
         { status: 400 }
       );
     }
@@ -579,10 +598,16 @@ export async function POST(request: Request) {
       .toFile(comfyInputPath);
 
     const outputBaseName = path.basename(safeFilename, path.extname(safeFilename));
-    const effectiveFolderForOutput = resolvedLocalFolderName || localFolderName || taskId;
-    const outputPrefix = effectiveFolderForOutput
-      ? path.join(PHOTOS_ROOT, effectiveFolderForOutput, "3_Merged", `AI_REMOVE_${outputBaseName}`)
-      : path.join(PHOTOS_ROOT, "3_Merged", `AI_REMOVE_${outputBaseName}`);
+    const derivedOutputDir =
+      typeof sourceInput === "string" && sourceInput.trim() ? path.dirname(path.resolve(sourceInput)) : "";
+    const fallbackOutputDir = resolvedLocalFolderName || localFolderName || taskId
+      ? path.join(PHOTOS_ROOT, resolvedLocalFolderName || localFolderName || taskId, "3_Merged")
+      : path.join(PHOTOS_ROOT, "3_Merged");
+    const outputDir = derivedOutputDir || fallbackOutputDir;
+    const outputPrefix = path.join(outputDir, `AI_REMOVE_${outputBaseName}`);
+    console.info(
+      `[ai-remove] comfy_output_prefix source=${typeof sourceInput === "string" ? path.resolve(sourceInput) : sourceResult.sourceRef} outputPrefix=${outputPrefix}`
+    );
     const { workflow, positivePrompt } = buildRemovalWorkflow(comfyFilename, outputPrefix, removalTarget);
 
     const clientId = randomUUID();

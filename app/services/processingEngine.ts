@@ -277,8 +277,9 @@ async function enhanceMergedPhotoInPlace(filePath: string): Promise<void> {
   try {
     const enhancedBuffer = await sharp(originalBuffer)
       .normalize()
+      .gamma(1.8)
       .clahe({ width: 200, height: 200, maxSlope: 3 })
-      .modulate({ brightness: 1.1, saturation: 1.05 })
+      .modulate({ brightness: 1.05, saturation: 1.05 })
       .jpeg({ quality: 92 })
       .toBuffer();
     await fs.promises.writeFile(filePath, enhancedBuffer);

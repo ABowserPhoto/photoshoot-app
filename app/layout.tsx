@@ -44,7 +44,7 @@ export default function RootLayout({
         <footer className="border-t border-zinc-800 bg-black px-4 py-8">
           <div className="mx-auto flex max-w-[1800px] flex-col items-center justify-center gap-3">
             <Image
-              src="/footer-logo.png"
+              src="/Logo_1024_white.webp"
               alt="Aaron Bowser Photography"
               width={120}
               height={40}
