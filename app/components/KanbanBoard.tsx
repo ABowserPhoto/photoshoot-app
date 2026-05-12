@@ -40,7 +40,7 @@ export type BoardTask = {
   taxPercentage: number;
   amountType: "Net" | "Gross";
   discount: number;
-  photoshootType: "Real Estate" | "Business Portraits";
+  photoshootType: "Real Estate" | "Business Portraits" | "Food";
   shootLocation: string;
   photoshootDate: string;
   dueDate: string;
@@ -431,6 +431,8 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
         ? "Business Portraits"
         : row.photoshoot_type === "Real Estate"
           ? "Real Estate"
+          : row.photoshoot_type === "Food"
+            ? "Food"
           : (existing?.photoshootType ?? "Real Estate"),
     shootLocation: typeof row.shoot_location === "string" ? row.shoot_location : (existing?.shootLocation ?? ""),
     photoshootDate,

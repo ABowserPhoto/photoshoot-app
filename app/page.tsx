@@ -10,7 +10,7 @@ import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { supabase } from "@/lib/supabaseClient";
 
 type AmountType = "Net" | "Gross";
-type PhotoshootType = "Real Estate" | "Business Portraits";
+type PhotoshootType = "Real Estate" | "Business Portraits" | "Food";
 type ItemType = "Service" | "Product";
 type PreviewPreference = "first" | "middle" | "last";
 
@@ -1406,6 +1406,7 @@ export default function Home() {
                       >
                         <option value="Real Estate">Real Estate</option>
                         <option value="Business Portraits">Business Portraits</option>
+                        <option value="Food">Food</option>
                       </select>
                     </label>
                     <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
