@@ -47,6 +47,10 @@ export async function POST(request: Request) {
   delete insertRow.id;
 
   insertRow.status = "awaiting_folder_creation";
+  insertRow.preview_preference =
+    insertRow.preview_preference === "middle" || insertRow.preview_preference === "last"
+      ? insertRow.preview_preference
+      : "first";
 
   const cookieStore = await cookies();
   const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {

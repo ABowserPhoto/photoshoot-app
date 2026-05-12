@@ -24,6 +24,7 @@ export type BoardTask = {
   taskTitle: string;
   localFolderName: string;
   bracketSize: 3 | 5;
+  previewPreference: "first" | "middle" | "last";
   companyName: string;
   lexofficeContactId: string;
   contactFirstName: string;
@@ -83,6 +84,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     taskTitle: "",
     localFolderName: "",
     bracketSize: 3,
+    previewPreference: "first",
     companyName: "Nike",
     lexofficeContactId: "",
     contactFirstName: "Alex",
@@ -114,6 +116,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     taskTitle: "",
     localFolderName: "",
     bracketSize: 5,
+    previewPreference: "first",
     companyName: "Immo Group",
     lexofficeContactId: "",
     contactFirstName: "Maria",
@@ -170,6 +173,7 @@ type DbTask = {
   is_archived: boolean | null;
   local_folder_name: string | null;
   bracket_size: number | null;
+  preview_preference: string | null;
   cover_image_url: string | null;
 };
 
@@ -377,6 +381,13 @@ function safeLineItems(value: unknown): Array<{ name: string; quantity: number; 
     );
 }
 
+function normalizePreviewPreference(value: unknown): "first" | "middle" | "last" {
+  if (value === "middle" || value === "last") {
+    return value;
+  }
+  return "first";
+}
+
 function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): BoardTask {
   const bracketRaw = Number(row.bracket_size ?? existing?.bracketSize ?? 3);
   const bracketSize: 3 | 5 = bracketRaw === 5 ? 5 : 3;
@@ -393,6 +404,7 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
     localFolderName:
       typeof row.local_folder_name === "string" ? row.local_folder_name : (existing?.localFolderName ?? ""),
     bracketSize,
+    previewPreference: normalizePreviewPreference(row.preview_preference ?? existing?.previewPreference),
     companyName: typeof row.company_name === "string" ? row.company_name : (existing?.companyName ?? ""),
     lexofficeContactId:
       typeof row.lexoffice_contact_id === "string"

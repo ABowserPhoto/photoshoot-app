@@ -32,6 +32,8 @@ const FAILED_STATUS = "Failed";
 const PREVIEW_DEBOUNCE_MS = 1500;
 const PREVIEW_WIDTH = 1080;
 const PREVIEW_QUALITY = 45;
+const RAW_PREVIEW_EXTENSIONS = new Set([".nef", ".cr2", ".cr3", ".arw", ".dng", ".raf", ".rw2", ".orf"]);
+const RAW_PREVIEW_TAGS = ["PreviewImage", "JpgFromRaw", "OtherImage", "ThumbnailImage"];
 
 const DEFAULT_PHOTOS_ROOT = "D:\\Photos_2026";
 
@@ -91,9 +93,91 @@ const COMFY_WAIT_TIMEOUT_MS = readPositiveIntEnv("COMFY_WAIT_TIMEOUT_MS", 12 * 6
 
 const previewSyncTimers = new Map();
 let rawWatcherStarted = false;
+let exiftoolPathPromise = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRawPreviewFile(filePath) {
+  return RAW_PREVIEW_EXTENSIONS.has(path.extname(String(filePath || "")).toLowerCase());
+}
+
+async function getExiftoolPath() {
+  if (!exiftoolPathPromise) {
+    exiftoolPathPromise = import("exiftool-vendored").then((module) => {
+      const directExport = module?.exiftoolPath;
+      const defaultExport = module?.default?.exiftoolPath;
+      const exportValue = directExport ?? defaultExport;
+      if (typeof exportValue === "function") {
+        return exportValue();
+      }
+      if (typeof exportValue === "string" && exportValue.trim()) {
+        return exportValue;
+      }
+      throw new Error(
+        "exiftool-vendored did not expose exiftoolPath (expected a function or non-empty string)."
+      );
+    });
+  }
+  return exiftoolPathPromise;
+}
+
+async function extractEmbeddedRawPreviewBuffer(sourcePath) {
+  const exiftoolPath = await getExiftoolPath();
+  let lastError = null;
+  for (const tag of RAW_PREVIEW_TAGS) {
+    try {
+      const { stdout } = await execFileAsync(exiftoolPath, ["-b", `-${tag}`, sourcePath], {
+        windowsHide: true,
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      const previewBuffer = Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout ?? ""), "binary");
+      if (previewBuffer.length > 0) {
+        return previewBuffer;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(
+    `No embedded RAW preview found (${RAW_PREVIEW_TAGS.join(", ")}).${
+      lastError instanceof Error ? ` Last error: ${lastError.message}` : ""
+    }`
+  );
+}
+
+async function getPreviewSharpInput(sourcePath, contextLabel) {
+  if (!isRawPreviewFile(sourcePath)) {
+    return sourcePath;
+  }
+  try {
+    const extractedPreview = await extractEmbeddedRawPreviewBuffer(sourcePath);
+    console.info(
+      `[worker] Extracted embedded RAW preview for ${path.basename(sourcePath)} (${contextLabel}) via exiftool-vendored.`
+    );
+    return extractedPreview;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[worker] RAW preview extraction failed for ${path.basename(sourcePath)} (${contextLabel}); skipping file.`,
+      message
+    );
+    throw new Error(message);
+  }
+}
+
+async function logExiftoolStartupStatus() {
+  try {
+    const exiftoolPath = await getExiftoolPath();
+    console.info(`[worker] exiftool-vendored path resolved: ${exiftoolPath}`);
+  } catch (error) {
+    console.warn(
+      "[worker] exiftool-vendored path check failed at startup. RAW preview extraction may be skipped.",
+      error instanceof Error ? error.message : error
+    );
+  }
 }
 
 async function withRetry(label, fn, attempts = RETRY_ATTEMPTS) {
@@ -197,6 +281,42 @@ function isPreviewSourceFile(fileName) {
   return isImageFile(normalized);
 }
 
+function normalizePreviewPreference(value) {
+  if (value === "middle" || value === "last") {
+    return value;
+  }
+  return "first";
+}
+
+function resolvePreviewSourceFilename(bracket, preference) {
+  if (!Array.isArray(bracket) || bracket.length === 0) {
+    return null;
+  }
+  const fileNames = bracket.filter((entry) => typeof entry === "string");
+  if (fileNames.length === 0) {
+    return null;
+  }
+
+  let preferredIndex = 0;
+  if (preference === "middle") {
+    preferredIndex = Math.floor(fileNames.length / 2);
+  } else if (preference === "last") {
+    preferredIndex = fileNames.length - 1;
+  }
+
+  // Bounds guard to prevent crashes if bracket content is unexpected.
+  if (preferredIndex < 0 || preferredIndex >= fileNames.length) {
+    preferredIndex = 0;
+  }
+
+  const preferredFile = fileNames[preferredIndex];
+  if (preferredFile && isPreviewSourceFile(preferredFile)) {
+    return preferredFile;
+  }
+
+  return fileNames.find((name) => isPreviewSourceFile(name)) ?? null;
+}
+
 function safePreviewStem(localFolderName, firstFilename, chunkIndex) {
   const stem = `${localFolderName}_${chunkIndex}_${path.basename(firstFilename, path.extname(firstFilename))}`;
   return stem.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -253,7 +373,8 @@ function parsePreviewItems(raw) {
  * Clean Kanban cover: resize only, then same ImageMagick exposure pass as watermarked previews (no watermark).
  */
 async function buildCoverThumbnailBuffer(sourcePath) {
-  const resizedBuffer = await sharp(sourcePath)
+  const sourceInput = await getPreviewSharpInput(sourcePath, "cover-thumbnail");
+  const resizedBuffer = await sharp(sourceInput)
     .resize({ width: COVER_THUMB_WIDTH, fit: "inside", withoutEnlargement: true })
     .jpeg({ quality: 82, mozjpeg: true, chromaSubsampling: "4:2:0" })
     .toBuffer();
@@ -288,8 +409,12 @@ async function buildPreviewBuffer(sourcePath) {
     throw new Error(`Watermark file not found at "${WATERMARK_PATH}".`);
   }
 
-  const resizedBuffer = await sharp(sourcePath)
+  const sourceInput = await getPreviewSharpInput(sourcePath, "gallery-preview");
+  const resizedBuffer = await sharp(sourceInput)
     .resize({ width: PREVIEW_WIDTH, fit: "inside", withoutEnlargement: true })
+    .gamma(1.8)
+    .clahe({ width: 200, height: 200, maxSlope: 3 })
+    .modulate({ brightness: 1.05, saturation: 1.05 })
     .toBuffer();
   const metadata = await sharp(resizedBuffer).metadata();
   if (!metadata.width || !metadata.height) {
@@ -366,9 +491,10 @@ async function ensureCoverImageOnce(supabase, taskRow, rawDir, chunks) {
   if (!chunks.length) {
     return;
   }
+  const previewPreference = normalizePreviewPreference(taskRow.preview_preference);
   const firstChunk = chunks[0];
-  const firstFilename = firstChunk[0];
-  if (!firstFilename || !isPreviewSourceFile(firstFilename)) {
+  const firstFilename = resolvePreviewSourceFilename(firstChunk, previewPreference);
+  if (!firstFilename) {
     return;
   }
   const sourcePath = path.join(rawDir, firstFilename);
@@ -419,6 +545,7 @@ async function syncTaskPreviews(supabase, taskRow) {
   }
 
   const chunks = await buildTimestampBracketsFromDir(rawDir);
+  const previewPreference = normalizePreviewPreference(taskRow.preview_preference);
   const existingItems = parsePreviewItems(taskRow.gallery_previews);
   const existingByChunk = new Map(existingItems.map((item) => [item.chunkIndex, item]));
   const nextItems = [];
@@ -435,9 +562,11 @@ async function syncTaskPreviews(supabase, taskRow) {
 
   for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
     const chunk = chunks[chunkIndex];
-    const firstFilename = chunk[0];
-    if (!firstFilename || !isPreviewSourceFile(firstFilename)) {
-      console.warn("[worker] Skipping file due to error:", firstFilename || "(missing filename)");
+    const firstFilename = resolvePreviewSourceFilename(chunk, previewPreference);
+    if (!firstFilename) {
+      console.warn(
+        `[worker] Skipping chunk ${chunkIndex}: no valid source file for preview_preference="${previewPreference}".`
+      );
       skippedCount += 1;
       continue;
     }
@@ -500,7 +629,7 @@ async function syncPreviewsForLocalFolder(localFolderName) {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("tasks")
-    .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url")
+    .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference")
     .eq("local_folder_name", localFolderName)
     .order("id", { ascending: false })
     .limit(1)
@@ -526,7 +655,7 @@ async function processInitialPreviewSync(supabase) {
   while (true) {
     const { data, error } = await supabase
       .from("tasks")
-      .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url")
+      .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference")
       .not("local_folder_name", "is", null)
       .order("id", { ascending: true })
       .range(offset, offset + pageSize - 1);
@@ -1091,6 +1220,7 @@ async function main() {
   console.info(
     `[worker] Comfy output dir: ${COMFY_OUTPUT_DIR}; wait_timeout_ms=${COMFY_WAIT_TIMEOUT_MS}; SUPABASE_FINALS_BUCKET=${SUPABASE_FINALS_BUCKET}`
   );
+  await logExiftoolStartupStatus();
   await processInitialPreviewSync(getSupabaseClient()).catch((err) => {
     console.error("[worker] Initial full preview sync failed:", err instanceof Error ? err.message : err);
   });

@@ -31,7 +31,7 @@ export async function triggerPreviewEmail(taskId: string): Promise<TriggerPrevie
 
   const { data: row, error } = await supabase
     .from("tasks")
-    .select("id, email, contact_first_name, contact_last_name, company_name")
+    .select("id, email, contact_first_name, contact_last_name, company_name, shoot_location, photoshoot_date")
     .eq("id", trimmedId)
     .maybeSingle();
 
@@ -51,11 +51,13 @@ export async function triggerPreviewEmail(taskId: string): Promise<TriggerPrevie
     nameFromContact ||
     (typeof row.company_name === "string" ? row.company_name.trim() : "") ||
     "Client";
+  const shootLocation = typeof row.shoot_location === "string" ? row.shoot_location.trim() : "";
+  const shootDate = typeof row.photoshoot_date === "string" ? row.photoshoot_date.trim() : "";
 
   const base =
     (process.env.NEXT_PUBLIC_APP_URL ?? "https://workflow.abowserphoto.com").replace(/\/$/, "");
   const previewLink = `${base}/gallery/${String(row.id)}`;
-  console.log("SENDING TO ZAPIER:", { email: clientEmail, link: previewLink });
+  console.log("SENDING TO ZAPIER:", { email: clientEmail, link: previewLink, shootLocation, shootDate });
   const response = await fetch(webhook, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -63,6 +65,8 @@ export async function triggerPreviewEmail(taskId: string): Promise<TriggerPrevie
       clientEmail,
       clientName,
       previewLink,
+      shootLocation,
+      shootDate,
       taskId: String(row.id),
     }),
   });

@@ -5,12 +5,14 @@ import Image from "next/image";
 import Select, { type ActionMeta, type ClassNamesConfig, type SingleValue } from "react-select";
 import CreatableSelect from "react-select/creatable";
 import KanbanBoard, { type BoardTask } from "./components/KanbanBoard";
+import StatsSidebar from "./components/StatsSidebar";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { supabase } from "@/lib/supabaseClient";
 
 type AmountType = "Net" | "Gross";
 type PhotoshootType = "Real Estate" | "Business Portraits";
 type ItemType = "Service" | "Product";
+type PreviewPreference = "first" | "middle" | "last";
 
 type LineItem = {
   name: string;
@@ -86,6 +88,7 @@ type TaskSupabasePayload = {
   photoshoot_type: PhotoshootType;
   shoot_location: string;
   photoshoot_date: string;
+  preview_preference: PreviewPreference;
   due_date: string | null;
   status: string;
   title: string;
@@ -237,6 +240,7 @@ export default function Home() {
   const [photoshootType, setPhotoshootType] = useState<PhotoshootType>("Real Estate");
   const [shootLocation, setShootLocation] = useState("");
   const [photoshootDate, setPhotoshootDate] = useState("");
+  const [previewPreference, setPreviewPreference] = useState<PreviewPreference>("first");
   const [dueDate, setDueDate] = useState("");
   const [discount, setDiscount] = useState(0);
   const [currentTaskStatus, setCurrentTaskStatus] = useState<BoardTask["status"]>("booking");
@@ -468,6 +472,7 @@ export default function Home() {
     setPhotoshootType("Real Estate");
     setShootLocation("");
     setPhotoshootDate("");
+    setPreviewPreference("first");
     setDueDate("");
     setDiscount(0);
     setCurrentTaskStatus("booking");
@@ -535,6 +540,7 @@ export default function Home() {
     setPhotoshootType(task.photoshootType);
     setShootLocation(task.shootLocation);
     setPhotoshootDate(task.photoshootDate);
+    setPreviewPreference(task.previewPreference ?? "first");
     setDueDate(task.dueDate);
     setDiscount(task.discount);
     setCurrentTaskStatus(task.status);
@@ -678,6 +684,7 @@ export default function Home() {
         photoshoot_type: photoshootType,
         shoot_location: shootLocation,
         photoshoot_date: photoshootDate,
+        preview_preference: previewPreference,
         due_date: dueDate || null,
         title:
           preservedTaskTitle.trim() ||
@@ -773,6 +780,7 @@ export default function Home() {
       photoshoot_type: photoshootType,
       shoot_location: shootLocation,
       photoshoot_date: photoshootDate,
+      preview_preference: previewPreference,
       due_date: dueDate || null,
       status: editingTaskId
         ? {
@@ -977,12 +985,28 @@ export default function Home() {
           </p>
         ) : null}
 
-        <KanbanBoard
-          refreshSignal={refreshSignal}
-          onTaskClick={openEditModal}
-          onTaskMoved={handleTaskMoved}
-          showArchived={showArchiveView}
-        />
+        {!authRoleLoading && isAdmin ? (
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,10fr)_minmax(120px,0.4fr)]">
+            <div className="min-w-0">
+              <KanbanBoard
+                refreshSignal={refreshSignal}
+                onTaskClick={openEditModal}
+                onTaskMoved={handleTaskMoved}
+                showArchived={showArchiveView}
+              />
+            </div>
+            <div className="min-w-0">
+              <StatsSidebar />
+            </div>
+          </div>
+        ) : (
+          <KanbanBoard
+            refreshSignal={refreshSignal}
+            onTaskClick={openEditModal}
+            onTaskMoved={handleTaskMoved}
+            showArchived={showArchiveView}
+          />
+        )}
       </main>
 
       {showBookingModal ? (
@@ -1393,6 +1417,18 @@ export default function Home() {
                         onChange={(event) => setPhotoshootDate(event.target.value)}
                         className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                       />
+                    </label>
+                    <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                      Preview Photo Selection
+                      <select
+                        value={previewPreference}
+                        onChange={(event) => setPreviewPreference(event.target.value as PreviewPreference)}
+                        className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      >
+                        <option value="first">First Photo (Darkest)</option>
+                        <option value="middle">Middle Photo (Balanced)</option>
+                        <option value="last">Last Photo (Brightest)</option>
+                      </select>
                     </label>
                     <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
                       Due Date
