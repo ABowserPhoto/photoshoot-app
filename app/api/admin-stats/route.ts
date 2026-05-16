@@ -227,7 +227,12 @@ export async function GET() {
   }
 
   const supabase = createClient(url, key, { auth: { persistSession: false } });
-  const { data, error } = await supabase.from("tasks").select("*");
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("*")
+    .not("title", "ilike", "%test%")
+    .not("company_name", "ilike", "%test%")
+    .not("client", "ilike", "%test%");
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 400 });
   }

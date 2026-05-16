@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { formatDurationLong, formatEuro } from "@/lib/adminStatsFormat";
+import { supabase } from "@/lib/supabaseClient";
 
 type TimeframeKey = "week" | "month" | "year" | "lastYear";
 
@@ -30,46 +31,101 @@ type StatsResponse = {
 
 const TIMEFRAME_ORDER: TimeframeKey[] = ["week", "month", "year", "lastYear"];
 
-export default function StatsSidebar() {
+type StatsSidebarProps = {
+  refreshSignal?: number;
+};
+
+export default function StatsSidebar({ refreshSignal = 0 }: StatsSidebarProps) {
   const [activeFrame, setActiveFrame] = useState<TimeframeKey>("week");
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const isMountedRef = useRef(true);
+  const realtimeRefreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    let isMounted = true;
-    const run = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const response = await fetch("/api/admin-stats", { cache: "no-store" });
-        const payload = (await response.json().catch(() => null)) as
-          | StatsResponse
-          | {
-              error?: string;
-            }
-          | null;
-        if (!response.ok) {
-          throw new Error(payload && "error" in payload ? payload.error || "Failed to load business stats." : "");
-        }
-        if (isMounted) {
-          setStats(payload as StatsResponse);
-        }
-      } catch (fetchError) {
-        if (isMounted) {
-          setError(fetchError instanceof Error ? fetchError.message : "Failed to load business stats.");
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
-      }
-    };
-    void run();
+    isMountedRef.current = true;
     return () => {
-      isMounted = false;
+      if (realtimeRefreshTimeoutRef.current) {
+        clearTimeout(realtimeRefreshTimeoutRef.current);
+        realtimeRefreshTimeoutRef.current = null;
+      }
+      isMountedRef.current = false;
     };
   }, []);
+
+  const fetchStats = useCallback(async (showLoading = true) => {
+    if (showLoading && isMountedRef.current) {
+      setLoading(true);
+    }
+    if (isMountedRef.current) {
+      setError(null);
+    }
+    try {
+      const response = await fetch("/api/admin-stats", { cache: "no-store" });
+      const payload = (await response.json().catch(() => null)) as
+        | StatsResponse
+        | {
+            error?: string;
+          }
+        | null;
+      if (!response.ok) {
+        throw new Error(payload && "error" in payload ? payload.error || "Failed to load business stats." : "");
+      }
+      if (isMountedRef.current) {
+        setStats(payload as StatsResponse);
+      }
+    } catch (fetchError) {
+      if (isMountedRef.current) {
+        setError(fetchError instanceof Error ? fetchError.message : "Failed to load business stats.");
+      }
+    } finally {
+      if (showLoading && isMountedRef.current) {
+        setLoading(false);
+      }
+    }
+  }, []);
+
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (realtimeRefreshTimeoutRef.current) {
+      clearTimeout(realtimeRefreshTimeoutRef.current);
+    }
+    realtimeRefreshTimeoutRef.current = setTimeout(() => {
+      realtimeRefreshTimeoutRef.current = null;
+      void fetchStats(false);
+    }, 400);
+  }, [fetchStats]);
+
+  useEffect(() => {
+    if (realtimeRefreshTimeoutRef.current) {
+      clearTimeout(realtimeRefreshTimeoutRef.current);
+      realtimeRefreshTimeoutRef.current = null;
+    }
+    void fetchStats();
+  }, [fetchStats, refreshSignal]);
+
+  useEffect(() => {
+    if (!supabase) {
+      return;
+    }
+
+    const channel = supabase
+      .channel("admin-stats-realtime")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "tasks" }, () => {
+        scheduleRealtimeRefresh();
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "tasks" }, () => {
+        scheduleRealtimeRefresh();
+      })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "tasks" }, () => {
+        scheduleRealtimeRefresh();
+      })
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [scheduleRealtimeRefresh]);
 
   const activeMetrics = useMemo<StatsMetrics>(() => {
     if (!stats) {

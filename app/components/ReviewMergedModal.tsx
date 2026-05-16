@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { BoardTask } from "./KanbanBoard";
 
 type ReviewMergedModalProps = {
@@ -52,6 +53,7 @@ function toSafeFilename(value: string): string {
 }
 
 export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMergedModalProps) {
+  const router = useRouter();
   const [files, setFiles] = useState<string[]>([]);
   const [displayUrlByName, setDisplayUrlByName] = useState<Record<string, string>>({});
   const [absolutePathByName, setAbsolutePathByName] = useState<Record<string, string>>({});
@@ -268,6 +270,27 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     await submitRemoveObject(targetFile, absoluteLocalPath, promptText);
   };
 
+  const handleOpenAiStudio = (filename: string, photoUrl: string) => {
+    const normalizedTaskId = taskId.trim() || localFolderName.trim();
+    const normalizedFilename = toSafeFilename(filename) || filename.trim();
+    const normalizedPhotoUrl = photoUrl.trim();
+    if (!normalizedPhotoUrl) {
+      return;
+    }
+    const params = new URLSearchParams();
+    params.set("photoUrl", normalizedPhotoUrl);
+    params.set("filename", normalizedFilename);
+    if (normalizedTaskId) {
+      params.set("taskId", normalizedTaskId);
+      params.set("task_id", normalizedTaskId);
+      params.set("id", normalizedTaskId);
+    }
+    if (localFolderName.trim()) {
+      params.set("localFolderName", localFolderName.trim());
+    }
+    router.push(`/ai-studio?${params.toString()}`);
+  };
+
   return (
     <div
       className="fixed inset-0 z-[85] flex items-center justify-center bg-black/60 p-4"
@@ -357,6 +380,15 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
                       ) : (
                         "☁️"
                       )}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!src}
+                      onClick={() => handleOpenAiStudio(filename, src)}
+                      className="absolute bottom-2 left-2 z-10 rounded-md border border-zinc-300/90 bg-white/90 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-900 shadow-sm backdrop-blur hover:bg-white disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-600/90 dark:bg-zinc-900/90 dark:text-zinc-100 dark:hover:bg-zinc-800"
+                      title="Open this photo in AI Studio"
+                    >
+                      Open in AI Studio
                     </button>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     {src ? (

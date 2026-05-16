@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import Select, { type ActionMeta, type ClassNamesConfig, type SingleValue } from "react-select";
 import CreatableSelect from "react-select/creatable";
 import KanbanBoard, { type BoardTask } from "./components/KanbanBoard";
@@ -200,6 +201,7 @@ function ensureSingleTrailingEmptyRow(items: LineItem[]): LineItem[] {
 }
 
 export default function Home() {
+  const router = useRouter();
   const [showBookingModal, setShowBookingModal] = useState(false);
   const [showArchiveView, setShowArchiveView] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
@@ -957,6 +959,20 @@ export default function Home() {
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              onClick={() => router.push("/ai-studio")}
+              className="inline-flex h-11 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+            >
+              AI Studio
+            </button>
+            <button
+              type="button"
+              onClick={() => router.push("/planner")}
+              className="inline-flex h-11 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+            >
+              Planner
+            </button>
+            <button
+              type="button"
               onClick={() => setShowArchiveView((prev) => !prev)}
               className="inline-flex h-11 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
             >
@@ -996,7 +1012,7 @@ export default function Home() {
               />
             </div>
             <div className="min-w-0">
-              <StatsSidebar />
+              <StatsSidebar refreshSignal={refreshSignal} />
             </div>
           </div>
         ) : (

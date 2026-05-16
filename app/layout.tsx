@@ -46,9 +46,9 @@ export default function RootLayout({
             <Image
               src="/Logo_1024_white.webp"
               alt="Aaron Bowser Photography"
-              width={120}
-              height={40}
-              className="h-8 w-auto opacity-90"
+              width={480}
+              height={160}
+              className="h-32 w-auto opacity-90"
             />
             <p className="text-center text-xs text-zinc-500">
               powered by Aaron Bowser Photography
