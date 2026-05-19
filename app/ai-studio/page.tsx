@@ -1,9 +1,10 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import MaskingCanvas, { type MaskingCanvasHandle } from "@/components/MaskingCanvas";
+import { getAllMoodboards, sendImageToMoodboard } from "@/app/actions/moodboard";
 
 type ToolKey =
   | "material-replacement"
@@ -34,6 +35,8 @@ const EMPTY_PROMPTS: Record<ToolKey, string> = {
   "text-to-photo": "",
   "text-to-video": "",
 };
+
+const AI_STUDIO_LAST_IMAGE_KEY = "aiStudioLastImage";
 
 const TOOL_PRESETS: Record<ToolKey, string[]> = {
   "material-replacement": [
@@ -71,7 +74,7 @@ const TOOL_PRESETS: Record<ToolKey, string[]> = {
   ],
 };
 
-export default function AiStudioPage() {
+function AiStudioPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const photoUrl = searchParams.get("photoUrl") ?? "";
@@ -109,6 +112,46 @@ export default function AiStudioPage() {
   const [promptByTool, setPromptByTool] = useState<Record<ToolKey, string>>({
     ...EMPTY_PROMPTS,
   });
+  const [moodboards, setMoodboards] = useState<{ id: string; title: string }[]>([]);
+  const [selectedBoardId, setSelectedBoardId] = useState<string>("");
+  const [isSendingToBoard, setIsSendingToBoard] = useState(false);
+  const [sendToBoardSuccess, setSendToBoardSuccess] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(AI_STUDIO_LAST_IMAGE_KEY);
+      if (saved) {
+        setPreviewImageUrl(saved);
+        setShowOriginalImage(false);
+      }
+    } catch {
+      // localStorage may be unavailable in some contexts
+    }
+  }, []);
+
+  useEffect(() => {
+    void getAllMoodboards().then((res) => {
+      if (!res.ok) {
+        return;
+      }
+      const boards = res.moodboards.map((board) => ({ id: board.id, title: board.title }));
+      setMoodboards(boards);
+      if (boards.length > 0) {
+        setSelectedBoardId(boards[0].id);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!previewImageUrl) {
+      return;
+    }
+    try {
+      localStorage.setItem(AI_STUDIO_LAST_IMAGE_KEY, previewImageUrl);
+    } catch {
+      // localStorage may be unavailable in some contexts
+    }
+  }, [previewImageUrl]);
 
   useEffect(() => {
     return () => {
@@ -420,6 +463,11 @@ export default function AiStudioPage() {
     setCurrentFilename("");
     setPreviewImageUrl(null);
     setShowOriginalImage(false);
+    try {
+      localStorage.removeItem(AI_STUDIO_LAST_IMAGE_KEY);
+    } catch {
+      // ignore
+    }
     setIsSaving(false);
     setIsGenerating(false);
     setGenerationMessage(null);
@@ -474,6 +522,38 @@ export default function AiStudioPage() {
     }
   };
 
+  const handleClearSavedImage = () => {
+    try {
+      localStorage.removeItem(AI_STUDIO_LAST_IMAGE_KEY);
+    } catch {
+      // ignore
+    }
+    setPreviewImageUrl(null);
+    setSendToBoardSuccess(false);
+    setShowOriginalImage(false);
+  };
+
+  const handleSendToMoodboard = async () => {
+    if (!previewImageUrl || !selectedBoardId) {
+      return;
+    }
+    setIsSendingToBoard(true);
+    setSendToBoardSuccess(false);
+    try {
+      const res = await sendImageToMoodboard(selectedBoardId, previewImageUrl);
+      if (!res.success) {
+        setGenerationError(res.error || "Failed to send image to moodboard.");
+        return;
+      }
+      setSendToBoardSuccess(true);
+      window.setTimeout(() => setSendToBoardSuccess(false), 2000);
+    } catch {
+      setGenerationError("Network error while sending to moodboard.");
+    } finally {
+      setIsSendingToBoard(false);
+    }
+  };
+
   return (
     <main className="flex min-h-screen flex-col bg-zinc-100 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <div className="mx-auto w-full max-w-[1800px] flex-1 px-4 py-5 sm:px-6 lg:px-8">
@@ -499,7 +579,7 @@ export default function AiStudioPage() {
             onClick={() => router.push("/")}
             className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 text-sm font-medium text-zinc-800 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
           >
-            Back to Kanban
+            Back to Workflow
           </button>
         </header>
 
@@ -541,6 +621,46 @@ export default function AiStudioPage() {
                 </div>
               )}
             </div>
+            {previewImageUrl ? (
+              <div className="mt-3 flex flex-wrap items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                <button
+                  type="button"
+                  onClick={handleClearSavedImage}
+                  className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-zinc-300 bg-white px-3 text-xs font-semibold text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                >
+                  Clear Image
+                </button>
+                <select
+                  value={selectedBoardId}
+                  onChange={(event) => setSelectedBoardId(event.target.value)}
+                  disabled={moodboards.length === 0 || isSendingToBoard}
+                  className="min-w-[180px] flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                  aria-label="Select moodboard destination"
+                >
+                  {moodboards.length === 0 ? (
+                    <option value="">No moodboards available</option>
+                  ) : (
+                    moodboards.map((board) => (
+                      <option key={board.id} value={board.id}>
+                        {board.title}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <button
+                  type="button"
+                  disabled={!selectedBoardId || isSendingToBoard}
+                  onClick={() => void handleSendToMoodboard()}
+                  className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-violet-600 px-4 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-violet-500 dark:hover:bg-violet-400"
+                >
+                  {sendToBoardSuccess
+                    ? "✅ Sent! (Refresh Moodboard to see)"
+                    : isSendingToBoard
+                      ? "Sending…"
+                      : "🎯 Send to Moodboard"}
+                </button>
+              </div>
+            ) : null}
             <div className="mx-auto mt-4 w-full max-w-3xl rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-center dark:border-zinc-800 dark:bg-zinc-950/60">
               <div className="mb-2 flex flex-wrap items-center justify-center gap-2">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -721,5 +841,13 @@ export default function AiStudioPage() {
         </section>
       </div>
     </main>
+  );
+}
+
+export default function AiStudioPage() {
+  return (
+    <Suspense fallback={null}>
+      <AiStudioPageContent />
+    </Suspense>
   );
 }

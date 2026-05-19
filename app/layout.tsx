@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Suspense } from "react";
 
-import GlobalLogoutButton from "@/app/components/GlobalLogoutButton";
+import GlobalAppHeader from "@/app/components/GlobalAppHeader";
+import ClientPlannerShell from "@/app/ClientPlannerShell";
 import { AuthRoleProvider } from "@/app/contexts/AuthRoleContext";
 
 import "./globals.css";
@@ -38,8 +40,12 @@ export default function RootLayout({
     >
       <body className="flex min-h-full flex-col bg-black text-white">
         <AuthRoleProvider>
-          <GlobalLogoutButton />
-          <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+          <ClientPlannerShell>
+            <Suspense fallback={null}>
+              <GlobalAppHeader />
+            </Suspense>
+            <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+          </ClientPlannerShell>
         </AuthRoleProvider>
         <footer className="border-t border-zinc-800 bg-black px-4 py-8">
           <div className="mx-auto flex max-w-[1800px] flex-col items-center justify-center gap-3">

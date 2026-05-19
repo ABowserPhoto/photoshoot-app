@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Gem, Home, User } from "lucide-react";
 import { triggerPreviewEmail } from "@/app/actions/zapierActions";
+import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
 import { supabase } from "@/lib/supabaseClient";
 import MergePromptModal from "./MergePromptModal";
 import ReviewMergedModal from "./ReviewMergedModal";
@@ -889,6 +890,17 @@ export default function KanbanBoard({
       setStatusMessage(`Could not update task status: ${error.message}`);
       return;
     }
+
+    void syncKanbanPhotoshootStatus({
+      photoshootId: dragged.task.id,
+      newStatusLabel: COLUMN_LABEL_BY_KEY[targetColumn],
+      photoshootDisplayName:
+        dragged.task.taskTitle?.trim() || dragged.task.companyName?.trim() || "Photoshoot",
+    }).then((res) => {
+      if (!res.ok) {
+        console.warn("[KanbanBoard] agency sync:", res.error);
+      }
+    });
 
     if (targetColumn === "preview-sent") {
       const zapResult = await triggerPreviewEmail(String(dragged.task.id));

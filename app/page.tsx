@@ -1,12 +1,15 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Select, { type ActionMeta, type ClassNamesConfig, type SingleValue } from "react-select";
 import CreatableSelect from "react-select/creatable";
 import KanbanBoard, { type BoardTask } from "./components/KanbanBoard";
 import StatsSidebar from "./components/StatsSidebar";
+import GlobalNavButtons from "@/app/components/GlobalNavButtons";
+import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
+import WorkflowArchiveLink from "@/app/components/WorkflowArchiveLink";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -200,8 +203,9 @@ function ensureSingleTrailingEmptyRow(items: LineItem[]): LineItem[] {
   return normalized;
 }
 
-export default function Home() {
+function HomeContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [showBookingModal, setShowBookingModal] = useState(false);
   const [showArchiveView, setShowArchiveView] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
@@ -252,7 +256,7 @@ export default function Home() {
     invoice: false,
     info: false,
   });
-  const { isAdmin, isLoading: authRoleLoading } = useAuthRole();
+  const { authenticated, isAdmin, isLoading: authRoleLoading } = useAuthRole();
   const [preservedTaskTitle, setPreservedTaskTitle] = useState("");
   const invoiceTotals = useMemo(() => {
     const validServices = services.filter((item) => item.name.trim() !== "");
@@ -453,6 +457,28 @@ export default function Home() {
       setProductCatalog(normalizedProducts);
     }
   };
+
+  useEffect(() => {
+    setShowArchiveView(searchParams.get("archive") === "1");
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (searchParams.get("booking") !== "1") {
+      return;
+    }
+    if (authRoleLoading) {
+      return;
+    }
+    if (!isAdmin) {
+      router.replace("/", { scroll: false });
+      return;
+    }
+    setShowBookingModal(true);
+    setFormError(null);
+    setFormSuccess(null);
+    void loadReferenceData();
+    router.replace("/", { scroll: false });
+  }, [searchParams, authRoleLoading, isAdmin, router]);
 
   const resetForm = () => {
     setSaveAsNewClient(false);
@@ -937,8 +963,8 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-zinc-50 px-4 py-8 font-sans dark:bg-black sm:px-6 lg:px-8">
       <main className="mx-auto w-full max-w-[1800px]">
-        <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex min-w-0 items-start gap-3">
+        <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 flex-1 items-start gap-3">
             <Image
               src="/logo.webp"
               alt="Workflow"
@@ -956,43 +982,18 @@ export default function Home() {
               </p>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => router.push("/ai-studio")}
-              className="inline-flex h-11 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
-            >
-              AI Studio
-            </button>
-            <button
-              type="button"
-              onClick={() => router.push("/planner")}
-              className="inline-flex h-11 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
-            >
-              Planner
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowArchiveView((prev) => !prev)}
-              className="inline-flex h-11 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
-            >
-              {showArchiveView ? "View Active Board" : "View Archive"}
-            </button>
-            {!authRoleLoading && isAdmin ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setShowBookingModal(true);
-                  setFormError(null);
-                  setFormSuccess(null);
-                  void loadReferenceData();
-                }}
-                className="inline-flex h-11 items-center justify-center rounded-lg bg-zinc-900 px-5 text-sm font-semibold text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-              >
-                Booking
-              </button>
-            ) : null}
-          </div>
+          {!authRoleLoading && authenticated ? (
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 sm:max-w-[780px] sm:justify-end">
+              <Suspense fallback={null}>
+                <GlobalNavButtons
+                  className="flex flex-wrap items-center justify-end gap-2"
+                  insertAfterPlanner={<WorkflowArchiveLink />}
+                >
+                  <GlobalLogoutControl />
+                </GlobalNavButtons>
+              </Suspense>
+            </div>
+          ) : null}
         </div>
 
         {formSuccess ? (
@@ -1641,5 +1642,13 @@ export default function Home() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={null}>
+      <HomeContent />
+    </Suspense>
   );
 }
