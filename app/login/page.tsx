@@ -16,12 +16,12 @@ function LoginForm() {
   const [password, setPassword] = useState("");
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleLogin(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
     setError(null);
-    setSubmitting(true);
+    setIsLoading(true);
     try {
       const normalizedEmail = email.trim();
 
@@ -58,6 +58,7 @@ function LoginForm() {
           return;
         }
       }
+
       refreshAuthRole();
       const safeRedirect =
         redirectTo.startsWith("/") && !redirectTo.startsWith("//") ? redirectTo : "/";
@@ -66,7 +67,7 @@ function LoginForm() {
     } catch {
       setError("Network error. Try again.");
     } finally {
-      setSubmitting(false);
+      setIsLoading(false);
     }
   }
 
@@ -75,9 +76,9 @@ function LoginForm() {
       <div className="w-full max-w-sm rounded-xl border border-zinc-800 bg-zinc-950 p-8 shadow-xl">
         <h1 className="text-center text-xl font-semibold text-white">Sign in</h1>
         <p className="mt-2 text-center text-sm text-zinc-400">
-          Enter the app password to continue.
+          Enter your email and password, or use the app password to continue.
         </p>
-        <form onSubmit={handleSubmit} className="mt-8 space-y-4">
+        <form onSubmit={handleLogin} className="mt-8 space-y-4" noValidate>
           <label className="block text-sm font-medium text-zinc-300">
             Email (optional)
             <input
@@ -86,7 +87,8 @@ function LoginForm() {
               autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white outline-none ring-zinc-500 focus:ring-2"
+              disabled={isLoading}
+              className="mt-1 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white outline-none ring-zinc-500 focus:ring-2 disabled:opacity-60"
               placeholder="name@example.com"
             />
           </label>
@@ -98,22 +100,23 @@ function LoginForm() {
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white outline-none ring-zinc-500 focus:ring-2"
+              disabled={isLoading}
+              className="mt-1 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white outline-none ring-zinc-500 focus:ring-2 disabled:opacity-60"
               required
             />
           </label>
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="flex h-10 w-full items-center justify-center rounded-lg bg-white px-4 text-sm font-semibold text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isLoading ? "Signing In..." : "Sign In"}
+          </button>
           {error ? (
-            <p className="text-sm text-zinc-400" role="alert">
+            <p className="text-sm text-red-400" role="alert">
               {error}
             </p>
           ) : null}
-          <button
-            type="submit"
-            disabled={submitting}
-            className="flex h-10 w-full items-center justify-center rounded-lg bg-white px-4 text-sm font-semibold text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {submitting ? "Signing in…" : "Continue"}
-          </button>
         </form>
       </div>
     </main>
