@@ -108,7 +108,7 @@ function LoginForm() {
           <button
             type="submit"
             disabled={isLoading}
-            className="flex h-10 w-full items-center justify-center rounded-lg bg-white px-4 text-sm font-semibold text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+            className="w-full rounded-md bg-[#ffffff] px-4 py-2 font-semibold text-[#000000] transition-colors hover:bg-[#e5e7eb] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isLoading ? "Signing In..." : "Sign In"}
           </button>
