@@ -93,6 +93,11 @@ export async function updateTaskStatus(
     }
   }
 
+  const normalizedStatus = status.trim().toLowerCase();
+  if (normalizedStatus === "completed" && payload.completed_at == null) {
+    payload.completed_at = new Date().toISOString();
+  }
+
   const { error } = await sb.from("tasks").update(payload).eq("id", id);
   if (error) {
     console.error("[updateTaskStatus]", error);

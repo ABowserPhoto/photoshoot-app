@@ -18,6 +18,11 @@ import {
   serializeAssignedUsers,
   type PlannerAssignee,
 } from "@/lib/plannerAssignees";
+import {
+  celebrateTaskCompletion,
+  isCelebrationMessage,
+  TASK_COMPLETION_MESSAGE,
+} from "@/lib/taskCompletionCelebration";
 import PlannerTaskModal, {
   createStandardPlannerSubtasks,
   STD_COMPLETED_ID,
@@ -304,6 +309,7 @@ export default function PlannerPage() {
   const [clockSec, setClockSec] = useState(() => Math.floor(Date.now() / 1000));
   const [loadingTasks, setLoadingTasks] = useState(true);
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
+  const [completionMessage, setCompletionMessage] = useState<string | null>(null);
   const [plannerUserId, setPlannerUserId] = useState<string | null>(null);
   const [profileAssignees, setProfileAssignees] = useState<PlannerAssignee[]>([]);
   const [masterListSubtaskDraft, setMasterListSubtaskDraft] = useState<Record<string, string>>({});
@@ -716,11 +722,18 @@ export default function PlannerPage() {
             { appendToBottom: true, initialOrderIndex: 999999 }
           );
         }
+        if (destinationStatus === "completed") {
+          celebrateTaskCompletion();
+          setCompletionMessage(TASK_COMPLETION_MESSAGE);
+        } else {
+          setCompletionMessage(null);
+        }
         setPersistenceError(null);
       } catch (error) {
         if (previousBoard) {
           setBoard(previousBoard);
         }
+        setCompletionMessage(null);
         setPersistenceError(error instanceof Error ? error.message : "Could not update planner task.");
       }
     })();
@@ -1477,6 +1490,17 @@ export default function PlannerPage() {
               ) : null}
               {persistenceError ? (
                 <p className="mt-1 text-xs text-red-600 dark:text-red-400">{persistenceError}</p>
+              ) : null}
+              {completionMessage ? (
+                <p
+                  className={`mt-1 text-xs ${
+                    isCelebrationMessage(completionMessage)
+                      ? "rounded-md border border-emerald-400/40 bg-emerald-100/60 px-3 py-2 font-medium text-emerald-900 dark:border-emerald-500/30 dark:bg-emerald-950/30 dark:text-emerald-200"
+                      : "text-zinc-600 dark:text-zinc-400"
+                  }`}
+                >
+                  {completionMessage}
+                </p>
               ) : null}
             </div>
           </div>

@@ -2,6 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Gem, Home, User } from "lucide-react";
+import {
+  celebrateTaskCompletion,
+  buildDailyCompletionMessage,
+} from "@/lib/taskCompletionCelebration";
+import { countTodayCompletions } from "@/lib/kanbanDailyStreak";
 import { triggerPreviewEmail } from "@/app/actions/zapierActions";
 import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
 import { updateTaskStatus } from "@/app/actions/tasks";
@@ -53,6 +58,8 @@ export type BoardTask = {
   coverImageUrl: string | null;
   status: ColumnKey;
   isArchived: boolean;
+  completedAt: string | null;
+  updatedAt: string | null;
 };
 
 type BoardState = Record<ColumnKey, BoardTask[]>;
@@ -112,6 +119,8 @@ const FALLBACK_TASKS: BoardTask[] = [
     coverImageUrl: null,
     status: "booking",
     isArchived: false,
+    completedAt: null,
+    updatedAt: null,
   },
   {
     id: "fallback-2",
@@ -144,6 +153,8 @@ const FALLBACK_TASKS: BoardTask[] = [
     coverImageUrl: null,
     status: "preview-sent",
     isArchived: false,
+    completedAt: null,
+    updatedAt: null,
   },
 ];
 
@@ -177,6 +188,8 @@ type DbTask = {
   bracket_size: number | null;
   preview_preference: string | null;
   cover_image_url: string | null;
+  completed_at: string | null;
+  updated_at: string | null;
 };
 
 const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
@@ -450,6 +463,18 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
     coverImageUrl,
     status: normalizeStatus(statusValue),
     isArchived: typeof row.is_archived === "boolean" ? row.is_archived : (existing?.isArchived ?? false),
+    completedAt:
+      typeof row.completed_at === "string"
+        ? row.completed_at
+        : row.completed_at === null
+          ? null
+          : (existing?.completedAt ?? null),
+    updatedAt:
+      typeof row.updated_at === "string"
+        ? row.updated_at
+        : row.updated_at === null
+          ? null
+          : (existing?.updatedAt ?? null),
   };
 }
 
@@ -464,6 +489,7 @@ export default function KanbanBoard({
   const [collapsedColumns, setCollapsedColumns] = useState<Partial<Record<ColumnKey, boolean>>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [celebrationToast, setCelebrationToast] = useState<string | null>(null);
   const [staleDataBanner, setStaleDataBanner] = useState<string | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [sourceColumn, setSourceColumn] = useState<ColumnKey | null>(null);
@@ -480,6 +506,24 @@ export default function KanbanBoard({
   useEffect(() => {
     archivedTasksRef.current = archivedTasks;
   }, [archivedTasks]);
+
+  useEffect(() => {
+    if (!celebrationToast) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setCelebrationToast(null);
+    }, 4000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [celebrationToast]);
+
+  const dailyCompletionCount = useMemo(
+    () => countTodayCompletions(board, archivedTasks),
+    [board, archivedTasks]
+  );
+
   useEffect(() => {
     let isMounted = true;
 
@@ -826,6 +870,7 @@ export default function KanbanBoard({
     }
 
     const now = new Date();
+    const nowIso = now.toISOString();
     const nextEditingStartedAt =
       targetColumn === "editing"
         ? now.toISOString()
@@ -855,18 +900,19 @@ export default function KanbanBoard({
       status: targetColumn,
       editingStartedAt: nextEditingStartedAt,
       totalEditingSeconds: nextTotalEditingSeconds,
+      ...(targetColumn === "completed"
+        ? { completedAt: nowIso, updatedAt: nowIso }
+        : targetColumn === "send-email"
+          ? { updatedAt: nowIso }
+          : {}),
     };
     const previousBoard = board;
-    setBoard((prev) => {
-      const updatedSource = prev[sourceColumn].filter((task) => task.id !== draggingTaskId);
-      const updatedTarget = sortTasksByShootDateAsc([...prev[targetColumn], movedTask]);
-
-      return {
-        ...prev,
-        [sourceColumn]: updatedSource,
-        [targetColumn]: updatedTarget,
-      };
-    });
+    const nextBoard: BoardState = {
+      ...board,
+      [sourceColumn]: board[sourceColumn].filter((task) => task.id !== draggingTaskId),
+      [targetColumn]: sortTasksByShootDateAsc([...board[targetColumn], movedTask]),
+    };
+    setBoard(nextBoard);
     clearDragState();
 
     if (!supabase) {
@@ -881,6 +927,7 @@ export default function KanbanBoard({
     const updateRes = await updateTaskStatus(dragged.task.id, statusLabel, {
       editing_started_at: nextEditingStartedAt,
       total_editing_seconds: nextTotalEditingSeconds,
+      ...(targetColumn === "completed" ? { completed_at: nowIso } : {}),
     });
 
     if (!updateRes.ok) {
@@ -900,7 +947,13 @@ export default function KanbanBoard({
       }
     });
 
-    if (targetColumn === "preview-sent") {
+    if (targetColumn === "completed") {
+      const todayCompletionCount = countTodayCompletions(nextBoard, archivedTasks, {
+        justCompletedTaskId: movedTask.id,
+      });
+      celebrateTaskCompletion();
+      setCelebrationToast(buildDailyCompletionMessage(todayCompletionCount));
+    } else if (targetColumn === "preview-sent") {
       const zapResult = await triggerPreviewEmail(String(dragged.task.id));
       if (!zapResult.ok) {
         setStatusMessage(zapResult.error ?? "Preview-E-Mail konnte nicht an Zapier gesendet werden.");
@@ -1002,7 +1055,25 @@ export default function KanbanBoard({
   };
 
   return (
-    <div className="w-full">
+    <div className="relative w-full">
+      {!showArchived ? (
+        <div className="mb-3 flex justify-end">
+          <span className="rounded-full border border-orange-400/40 bg-orange-100/70 px-3 py-1 text-sm font-semibold text-orange-900 dark:border-orange-500/30 dark:bg-orange-950/40 dark:text-orange-200">
+            🔥 {dailyCompletionCount} Today
+          </span>
+        </div>
+      ) : null}
+      {celebrationToast ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed left-1/2 top-1/2 z-[100] w-full max-w-md -translate-x-1/2 -translate-y-1/2 px-4"
+        >
+          <p className="rounded-xl border border-emerald-400/50 bg-emerald-100/95 px-5 py-4 text-center text-base font-semibold text-emerald-900 shadow-2xl dark:border-emerald-500/40 dark:bg-emerald-950/95 dark:text-emerald-100">
+            {celebrationToast}
+          </p>
+        </div>
+      ) : null}
       <div className="overflow-x-auto pb-3 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-black">
         {showArchived ? (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
