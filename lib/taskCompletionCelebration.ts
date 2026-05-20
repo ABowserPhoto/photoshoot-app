@@ -2,9 +2,22 @@ import confetti from "canvas-confetti";
 
 export const TASK_COMPLETION_MESSAGE = "🎉 Awesome work! Task completed.";
 
+export const COMPLETION_CELEBRATION_MESSAGES = [
+  "🎉 Awesome work!",
+  "🌟 Great Job!",
+  "🎂 Go, Go, Go Shawty its Your Birthday!!",
+  "💪 Keep up the good work!!",
+] as const;
+
+export function buildRandomDailyCompletionMessage(todayCompletionCount: number): string {
+  const randomMsg =
+    COMPLETION_CELEBRATION_MESSAGES[Math.floor(Math.random() * COMPLETION_CELEBRATION_MESSAGES.length)];
+  return `${randomMsg} That's ${todayCompletionCount} task(s) completed today! 🔥`;
+}
+
+/** @deprecated Use buildRandomDailyCompletionMessage instead. */
 export function buildDailyCompletionMessage(todayCompletionCount: number): string {
-  const label = todayCompletionCount === 1 ? "task" : "tasks";
-  return `🎉 Awesome work! That's ${todayCompletionCount} ${label} completed today! 🔥`;
+  return buildRandomDailyCompletionMessage(todayCompletionCount);
 }
 
 export function celebrateTaskCompletion() {

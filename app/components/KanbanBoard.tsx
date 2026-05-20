@@ -4,9 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Gem, Home, User } from "lucide-react";
 import {
   celebrateTaskCompletion,
-  buildDailyCompletionMessage,
+  buildRandomDailyCompletionMessage,
 } from "@/lib/taskCompletionCelebration";
 import { countTodayCompletions } from "@/lib/kanbanDailyStreak";
+import DailyStreakBadge from "@/app/components/DailyStreakBadge";
 import { triggerPreviewEmail } from "@/app/actions/zapierActions";
 import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
 import { updateTaskStatus } from "@/app/actions/tasks";
@@ -952,7 +953,7 @@ export default function KanbanBoard({
         justCompletedTaskId: movedTask.id,
       });
       celebrateTaskCompletion();
-      setCelebrationToast(buildDailyCompletionMessage(todayCompletionCount));
+      setCelebrationToast(buildRandomDailyCompletionMessage(todayCompletionCount));
     } else if (targetColumn === "preview-sent") {
       const zapResult = await triggerPreviewEmail(String(dragged.task.id));
       if (!zapResult.ok) {
@@ -1056,13 +1057,7 @@ export default function KanbanBoard({
 
   return (
     <div className="relative w-full">
-      {!showArchived ? (
-        <div className="mb-3 flex justify-end">
-          <span className="rounded-full border border-orange-400/40 bg-orange-100/70 px-3 py-1 text-sm font-semibold text-orange-900 dark:border-orange-500/30 dark:bg-orange-950/40 dark:text-orange-200">
-            🔥 {dailyCompletionCount} Today
-          </span>
-        </div>
-      ) : null}
+      {!showArchived ? <DailyStreakBadge count={dailyCompletionCount} /> : null}
       {celebrationToast ? (
         <div
           role="status"

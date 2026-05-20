@@ -66,3 +66,17 @@ export function countTodayCompletions(
 
   return count;
 }
+
+export function countPlannerTodayCompletions(
+  board: { completed: KanbanStreakTask[] },
+  options?: { justCompletedTaskId?: string }
+): number {
+  return countTodayCompletions(
+    {
+      completed: board.completed,
+      "send-email": [],
+    },
+    [],
+    options
+  );
+}

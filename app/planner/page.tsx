@@ -20,9 +20,10 @@ import {
 } from "@/lib/plannerAssignees";
 import {
   celebrateTaskCompletion,
-  isCelebrationMessage,
-  TASK_COMPLETION_MESSAGE,
+  buildRandomDailyCompletionMessage,
 } from "@/lib/taskCompletionCelebration";
+import { countPlannerTodayCompletions } from "@/lib/kanbanDailyStreak";
+import DailyStreakBadge from "@/app/components/DailyStreakBadge";
 import PlannerTaskModal, {
   createStandardPlannerSubtasks,
   STD_COMPLETED_ID,
@@ -325,6 +326,18 @@ export default function PlannerPage() {
   }, []);
 
   useEffect(() => {
+    if (!completionMessage) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setCompletionMessage(null);
+    }, 4000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [completionMessage]);
+
+  useEffect(() => {
     let isMounted = true;
 
     const loadTasks = async () => {
@@ -432,6 +445,11 @@ export default function PlannerPage() {
     });
     return map;
   }, [board]);
+
+  const dailyCompletionCount = useMemo(
+    () => countPlannerTodayCompletions({ completed: board.completed }),
+    [board.completed]
+  );
 
   const currentPlannerMember = useMemo((): PlannerAssignee | null => {
     if (!plannerUserId) {
@@ -666,16 +684,15 @@ export default function PlannerPage() {
     }
 
     let previousBoard: PlannerBoardState | null = null;
-    let optimisticBoard: PlannerBoardState | null = null;
+    const nextBoard = applyOrderIndexes({
+      ...boardRef.current,
+      [sourceStatus]: boardRef.current[sourceStatus].filter((task) => task.id !== taskId),
+      [destinationStatus]: [nextTask, ...boardRef.current[destinationStatus]],
+    });
 
     setBoard((prev) => {
       previousBoard = prev;
-      const next = { ...prev };
-      next[sourceStatus] = prev[sourceStatus].filter((task) => task.id !== taskId);
-      next[destinationStatus] = [nextTask, ...prev[destinationStatus]];
-      const ordered = applyOrderIndexes(next);
-      optimisticBoard = ordered;
-      return ordered;
+      return nextBoard;
     });
 
     void (async () => {
@@ -701,9 +718,7 @@ export default function PlannerPage() {
         if (!kanbanSync.ok) {
           console.warn("[planner] agency sync:", kanbanSync.error);
         }
-        if (optimisticBoard) {
-          await syncOrderIndexes(optimisticBoard);
-        }
+        await syncOrderIndexes(nextBoard);
         if (destinationStatus === "completed" && nextTask.recurringType !== "none") {
           const spawnBase = nextTask.completedAt ?? new Date().toISOString();
           const nextDueDate = calculateNextRecurringDueDate(nextTask.recurringType, spawnBase);
@@ -723,8 +738,12 @@ export default function PlannerPage() {
           );
         }
         if (destinationStatus === "completed") {
+          const todayCompletionCount = countPlannerTodayCompletions(
+            { completed: nextBoard.completed },
+            { justCompletedTaskId: taskId }
+          );
           celebrateTaskCompletion();
-          setCompletionMessage(TASK_COMPLETION_MESSAGE);
+          setCompletionMessage(buildRandomDailyCompletionMessage(todayCompletionCount));
         } else {
           setCompletionMessage(null);
         }
@@ -1466,7 +1485,17 @@ export default function PlannerPage() {
   }, [board, clockSec, setGlobalActiveTimer]);
 
   return (
-    <div className="min-h-screen bg-zinc-50 px-4 py-8 font-sans dark:bg-black sm:px-6 lg:px-8">
+    <div className="relative min-h-screen bg-zinc-50 px-4 py-8 font-sans dark:bg-black sm:px-6 lg:px-8">
+      <DailyStreakBadge count={dailyCompletionCount} />
+      {completionMessage ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 transform rounded-lg border border-green-500 bg-green-900 px-6 py-4 text-lg font-bold text-green-100 shadow-2xl"
+        >
+          {completionMessage}
+        </div>
+      ) : null}
       <main className="mx-auto w-full max-w-[1800px]">
         <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -1490,17 +1519,6 @@ export default function PlannerPage() {
               ) : null}
               {persistenceError ? (
                 <p className="mt-1 text-xs text-red-600 dark:text-red-400">{persistenceError}</p>
-              ) : null}
-              {completionMessage ? (
-                <p
-                  className={`mt-1 text-xs ${
-                    isCelebrationMessage(completionMessage)
-                      ? "rounded-md border border-emerald-400/40 bg-emerald-100/60 px-3 py-2 font-medium text-emerald-900 dark:border-emerald-500/30 dark:bg-emerald-950/30 dark:text-emerald-200"
-                      : "text-zinc-600 dark:text-zinc-400"
-                  }`}
-                >
-                  {completionMessage}
-                </p>
               ) : null}
             </div>
           </div>
