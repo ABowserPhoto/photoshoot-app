@@ -4,10 +4,16 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import { useRouter } from "next/navigation";
 
 import type { UserRole } from "@/lib/authRole";
+import { handleClockOut } from "@/app/actions/shifts";
 import { supabase } from "@/lib/supabaseClient";
+
+type AuthUser = {
+  id: string;
+};
 
 type AuthRoleState = {
   authenticated: boolean;
+  user: AuthUser | null;
   role: UserRole;
   isAdmin: boolean;
   isLoading: boolean;
@@ -20,6 +26,7 @@ const AuthRoleContext = createContext<AuthRoleState | null>(null);
 export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [authenticated, setAuthenticated] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [role, setRole] = useState<UserRole>("editor");
   const [isAdmin, setIsAdmin] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -48,14 +55,24 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
           setAuthenticated(true);
           setRole(json.role ?? "editor");
           setIsAdmin(Boolean(json.isAdmin));
+          if (supabase) {
+            const {
+              data: { user: sessionUser },
+            } = await supabase.auth.getUser();
+            setUser(sessionUser ? { id: sessionUser.id } : null);
+          } else {
+            setUser(null);
+          }
         } else {
           setAuthenticated(false);
+          setUser(null);
           setRole("editor");
           setIsAdmin(false);
         }
       } catch {
         if (!cancelled) {
           setAuthenticated(false);
+          setUser(null);
           setRole("editor");
           setIsAdmin(false);
         }
@@ -76,6 +93,15 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(true);
     try {
       if (supabase) {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (user?.id) {
+          const clockOutRes = await handleClockOut(user.id);
+          if (!clockOutRes.ok) {
+            console.warn("[logout clock-out]", clockOutRes.error);
+          }
+        }
         await supabase.auth.signOut();
       }
       await fetch("/api/auth/logout", {
@@ -84,6 +110,7 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
       }).catch(() => null);
     } finally {
       setAuthenticated(false);
+      setUser(null);
       setRole("editor");
       setIsAdmin(false);
       setIsLoading(false);
@@ -93,8 +120,8 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
   }, [router]);
 
   const value = useMemo(
-    () => ({ authenticated, role, isAdmin, isLoading, refresh, logout }),
-    [authenticated, role, isAdmin, isLoading, refresh, logout]
+    () => ({ authenticated, user, role, isAdmin, isLoading, refresh, logout }),
+    [authenticated, user, role, isAdmin, isLoading, refresh, logout]
   );
 
   return <AuthRoleContext.Provider value={value}>{children}</AuthRoleContext.Provider>;

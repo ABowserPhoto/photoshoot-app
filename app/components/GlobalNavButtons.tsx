@@ -32,6 +32,7 @@ export default function GlobalNavButtons({ className, insertAfterPlanner, childr
   const moodboardActive = pathname === "/moodboard" || pathname.startsWith("/moodboard/");
   const plannerActive = pathname === "/planner" || pathname.startsWith("/planner/");
   const schedulerActive = pathname === "/scheduler" || pathname.startsWith("/scheduler/");
+  const statisticsActive = pathname === "/admin/statistics" || pathname.startsWith("/admin/statistics/");
   const workflowActive = pathname === "/kanban" || pathname === "/";
   const bookingActive = onWorkflowBoard && !archive;
 
@@ -73,13 +74,22 @@ export default function GlobalNavButtons({ className, insertAfterPlanner, childr
           Booking
         </span>
       ) : isAdmin ? (
-        <Link
-          href="/?booking=1"
-          className={`${btnBase} ${bookingActive ? active : idle}`}
-          scroll={false}
-        >
-          Booking
-        </Link>
+        <>
+          <Link
+            href="/admin/statistics"
+            className={`${btnBase} ${statisticsActive ? active : idle}`}
+            prefetch
+          >
+            Statistics
+          </Link>
+          <Link
+            href="/?booking=1"
+            className={`${btnBase} ${bookingActive ? active : idle}`}
+            scroll={false}
+          >
+            Booking
+          </Link>
+        </>
       ) : (
         <Link href="/" className={`${btnBase} ${bookingActive ? active : idle}`}>
           Booking

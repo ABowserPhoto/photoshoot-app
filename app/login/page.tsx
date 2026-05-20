@@ -4,6 +4,7 @@ import { FormEvent, Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
+import { handleClockIn } from "@/app/actions/shifts";
 import { supabase } from "@/lib/supabaseClient";
 
 function LoginForm() {
@@ -31,13 +32,19 @@ function LoginForm() {
           );
           return;
         }
-        const { error: signInError } = await supabase.auth.signInWithPassword({
+        const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
           email: normalizedEmail,
           password,
         });
         if (signInError) {
           setError(signInError.message);
           return;
+        }
+        if (signInData.user?.id) {
+          const clockInRes = await handleClockIn(signInData.user.id);
+          if (!clockInRes.ok) {
+            console.warn("[login clock-in]", clockInRes.error);
+          }
         }
       } else {
         const res = await fetch("/api/auth/gate", {

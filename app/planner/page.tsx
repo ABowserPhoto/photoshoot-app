@@ -11,6 +11,7 @@ import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { usePlannerGlobalSafe } from "@/app/contexts/PlannerGlobalContext";
 import { supabase } from "@/lib/supabaseClient";
 import { syncPlannerAutoTaskToKanban } from "@/app/actions/agency-sync";
+import { updateStudioTaskStatus } from "@/app/actions/studio-tasks";
 import {
   appendCurrentUserIfMissing,
   parseAssignedUsers,
@@ -528,6 +529,15 @@ export default function PlannerPage() {
       throw new Error("Supabase is not configured.");
     }
     if (taskId.startsWith("temp-")) {
+      return;
+    }
+
+    if (updates.status !== undefined) {
+      const { status, ...rest } = updates;
+      const res = await updateStudioTaskStatus(taskId, status, rest);
+      if (!res.ok) {
+        throw new Error(res.error);
+      }
       return;
     }
 

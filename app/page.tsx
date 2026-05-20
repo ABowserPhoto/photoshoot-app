@@ -11,6 +11,7 @@ import GlobalNavButtons from "@/app/components/GlobalNavButtons";
 import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
 import WorkflowArchiveLink from "@/app/components/WorkflowArchiveLink";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
+import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
 
 type AmountType = "Net" | "Gross";
@@ -943,13 +944,9 @@ function HomeContent() {
         return;
       }
 
-      const { error: statusError } = await supabase
-        .from("tasks")
-        .update({ status: "Send Email" })
-        .eq("id", uploadTask.id);
-
-      if (statusError) {
-        setUploadError(`Files uploaded, but status update failed: ${statusError.message}`);
+      const statusRes = await updateTaskStatus(uploadTask.id, "Send Email");
+      if (!statusRes.ok) {
+        setUploadError(`Files uploaded, but status update failed: ${statusRes.error}`);
         return;
       }
 

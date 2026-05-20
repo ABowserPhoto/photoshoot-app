@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Gem, Home, User } from "lucide-react";
 import { triggerPreviewEmail } from "@/app/actions/zapierActions";
 import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
+import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
 import MergePromptModal from "./MergePromptModal";
 import ReviewMergedModal from "./ReviewMergedModal";
@@ -876,18 +877,15 @@ export default function KanbanBoard({
       return;
     }
 
-    const { error } = await supabase
-      .from("tasks")
-      .update({
-        status: COLUMN_LABEL_BY_KEY[targetColumn],
-        editing_started_at: nextEditingStartedAt,
-        total_editing_seconds: nextTotalEditingSeconds,
-      })
-      .eq("id", dragged.task.id);
+    const statusLabel = COLUMN_LABEL_BY_KEY[targetColumn];
+    const updateRes = await updateTaskStatus(dragged.task.id, statusLabel, {
+      editing_started_at: nextEditingStartedAt,
+      total_editing_seconds: nextTotalEditingSeconds,
+    });
 
-    if (error) {
+    if (!updateRes.ok) {
       setBoard(previousBoard);
-      setStatusMessage(`Could not update task status: ${error.message}`);
+      setStatusMessage(`Could not update task status: ${updateRes.error}`);
       return;
     }
 

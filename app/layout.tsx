@@ -4,6 +4,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { Suspense } from "react";
 
 import GlobalAppHeader from "@/app/components/GlobalAppHeader";
+import SessionWatchdog from "@/app/components/SessionWatchdog";
 import ClientPlannerShell from "@/app/ClientPlannerShell";
 import { AuthRoleProvider } from "@/app/contexts/AuthRoleContext";
 
@@ -40,6 +41,7 @@ export default function RootLayout({
     >
       <body className="flex min-h-full flex-col bg-black text-white">
         <AuthRoleProvider>
+          <SessionWatchdog />
           <ClientPlannerShell>
             <Suspense fallback={null}>
               <GlobalAppHeader />
