@@ -46,6 +46,14 @@ function LoginForm() {
             console.warn("[login clock-in]", clockInRes.error);
           }
         }
+
+        const sessionCheck = await fetch("/api/auth/me", { cache: "no-store" });
+        if (!sessionCheck.ok) {
+          setError(
+            "Signed in with Supabase, but the session cookie was not established. Try again or clear site cookies."
+          );
+          return;
+        }
       } else {
         const res = await fetch("/api/auth/gate", {
           method: "POST",
