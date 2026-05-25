@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import type { BoardTask } from "./KanbanBoard";
+import LightboxViewer from "./LightboxViewer";
 
 type ReviewMergedModalProps = {
   task: BoardTask | null;
@@ -57,6 +59,7 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
   const [files, setFiles] = useState<string[]>([]);
   const [displayUrlByName, setDisplayUrlByName] = useState<Record<string, string>>({});
   const [absolutePathByName, setAbsolutePathByName] = useState<Record<string, string>>({});
+  const [storagePathByName, setStoragePathByName] = useState<Record<string, string>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoadingList, setIsLoadingList] = useState(false);
   const [actionByFile, setActionByFile] = useState<Record<string, FileStatus>>({});
@@ -65,6 +68,17 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
   const [cacheBusterByFile, setCacheBusterByFile] = useState<Record<string, number>>({});
   const [removeDialogFile, setRemoveDialogFile] = useState<string | null>(null);
   const [removeDialogPrompt, setRemoveDialogPrompt] = useState("");
+  const [lightboxPhoto, setLightboxPhoto] = useState<{
+    imageUrl: string;
+    filename: string;
+    absoluteLocalPath: string;
+    storagePath: string;
+  } | null>(null);
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
 
   const localFolderName = task?.localFolderName?.trim() ?? "";
   const taskId = task?.id?.trim() ?? "";
@@ -101,17 +115,24 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
           items.map((item) => [item.name, typeof item.absoluteLocalPath === "string" ? item.absoluteLocalPath : ""])
         )
       );
+      setStoragePathByName(
+        Object.fromEntries(
+          items.map((item) => [item.name, typeof item.storagePath === "string" ? item.storagePath : ""])
+        )
+      );
       setActionByFile({});
       setActiveActionByFile({});
       setMessageByFile({});
       setCacheBusterByFile({});
       setRemoveDialogFile(null);
       setRemoveDialogPrompt("");
+      setLightboxPhoto(null);
     } catch {
       setLoadError("Network error while loading merged files.");
       setFiles([]);
       setDisplayUrlByName({});
       setAbsolutePathByName({});
+      setStoragePathByName({});
     } finally {
       setIsLoadingList(false);
     }
@@ -122,6 +143,12 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
       void loadList();
     }
   }, [isOpen, localFolderName, taskId, loadList]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setLightboxPhoto(null);
+    }
+  }, [isOpen]);
 
   if (!isOpen || !task) {
     return null;
@@ -270,16 +297,20 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
     await submitRemoveObject(targetFile, absoluteLocalPath, promptText);
   };
 
-  const handleOpenAiStudio = (filename: string, photoUrl: string) => {
+  const handleOpenAiStudio = (filename: string, photoUrl: string, absoluteLocalPath = "") => {
     const normalizedTaskId = taskId.trim() || localFolderName.trim();
     const normalizedFilename = toSafeFilename(filename) || filename.trim();
     const normalizedPhotoUrl = photoUrl.trim();
+    const normalizedAbsoluteLocalPath = absoluteLocalPath.trim();
     if (!normalizedPhotoUrl) {
       return;
     }
     const params = new URLSearchParams();
     params.set("photoUrl", normalizedPhotoUrl);
     params.set("filename", normalizedFilename);
+    if (normalizedAbsoluteLocalPath) {
+      params.set("absoluteLocalPath", normalizedAbsoluteLocalPath);
+    }
     if (normalizedTaskId) {
       params.set("taskId", normalizedTaskId);
       params.set("task_id", normalizedTaskId);
@@ -294,7 +325,12 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
   return (
     <div
       className="fixed inset-0 z-[85] flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
+      onClick={() => {
+        if (lightboxPhoto) {
+          return;
+        }
+        onClose();
+      }}
     >
       <div
         role="dialog"
@@ -384,7 +420,9 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
                     <button
                       type="button"
                       disabled={!src}
-                      onClick={() => handleOpenAiStudio(filename, src)}
+                      onClick={() =>
+                        handleOpenAiStudio(filename, src, absolutePathByName[filename] ?? "")
+                      }
                       className="absolute bottom-2 left-2 z-10 rounded-md border border-zinc-300/90 bg-white/90 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-900 shadow-sm backdrop-blur hover:bg-white disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-600/90 dark:bg-zinc-900/90 dark:text-zinc-100 dark:hover:bg-zinc-800"
                       title="Open this photo in AI Studio"
                     >
@@ -392,12 +430,29 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
                     </button>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     {src ? (
-                      <img
-                        src={src}
-                        alt={filename}
-                        className="h-full w-full object-contain"
-                        loading="lazy"
-                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!baseUrl) {
+                            return;
+                          }
+                          setLightboxPhoto({
+                            imageUrl: baseUrl,
+                            filename,
+                            absoluteLocalPath: absolutePathByName[filename] ?? "",
+                            storagePath: storagePathByName[filename] ?? "",
+                          });
+                        }}
+                        className="block h-full w-full cursor-zoom-in focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                        aria-label={`Open ${filename} in lightbox`}
+                      >
+                        <img
+                          src={src}
+                          alt={filename}
+                          className="pointer-events-none h-full w-full object-contain"
+                          loading="lazy"
+                        />
+                      </button>
                     ) : (
                       <div className="flex h-full w-full items-center justify-center text-xs text-zinc-500">
                         Image URL unavailable
@@ -468,6 +523,20 @@ export default function ReviewMergedModal({ task, isOpen, onClose }: ReviewMerge
           </div>
         </div>
       ) : null}
+      {isMounted && lightboxPhoto
+        ? createPortal(
+            <LightboxViewer
+              imageUrl={lightboxPhoto.imageUrl}
+              taskId={taskId}
+              localFolderName={localFolderName}
+              filename={lightboxPhoto.filename}
+              absoluteLocalPath={lightboxPhoto.absoluteLocalPath}
+              storagePath={lightboxPhoto.storagePath}
+              onClose={() => setLightboxPhoto(null)}
+            />,
+            document.body
+          )
+        : null}
     </div>
   );
 }

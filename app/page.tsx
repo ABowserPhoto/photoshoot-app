@@ -717,7 +717,7 @@ function HomeContent() {
         due_date: dueDate || null,
         title:
           preservedTaskTitle.trim() ||
-          `${photoshootType} - ${companyName.trim() || [contactFirstName, contactLastName].filter(Boolean).join(" ").trim() || "Client"}. - ${shootLocation}`,
+          `${photoshootType} - ${companyName.trim() || [contactFirstName, contactLastName].filter(Boolean).join(" ").trim() || "Client"} - ${shootLocation}`,
         status: {
           "awaiting-folders": "awaiting_folder_creation",
           booking: "Booking",
@@ -770,7 +770,7 @@ function HomeContent() {
       companyName.trim() ||
       [contactFirstName, contactLastName].filter(Boolean).join(" ").trim() ||
       "Client";
-    const generatedTitle = `${photoshootType} - ${displayClientLabel}. - ${shootLocation}`;
+    const generatedTitle = `${photoshootType} - ${displayClientLabel} - ${shootLocation}`;
 
     if (isAdmin && saveAsNewClient && !editingTaskId) {
       const { error: clientError } = await supabase.from("clients").insert({

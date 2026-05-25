@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import MaskingCanvas, { type MaskingCanvasHandle } from "@/components/MaskingCanvas";
 import { getAllMoodboards, sendImageToMoodboard } from "@/app/actions/moodboard";
@@ -9,6 +9,7 @@ import { getAllMoodboards, sendImageToMoodboard } from "@/app/actions/moodboard"
 type ToolKey =
   | "material-replacement"
   | "object-swap"
+  | "object-removal"
   | "relight"
   | "image-to-video"
   | "text-to-photo"
@@ -17,6 +18,7 @@ type ToolKey =
 const EDIT_TOOLS: Array<{ key: ToolKey; label: string }> = [
   { key: "material-replacement", label: "Material Replacement" },
   { key: "object-swap", label: "Object Swap" },
+  { key: "object-removal", label: "Object Removal" },
   { key: "relight", label: "Relight" },
 ];
 
@@ -30,6 +32,7 @@ const AI_TOOLS: Array<{ key: ToolKey; label: string }> = [...EDIT_TOOLS, ...GENE
 const EMPTY_PROMPTS: Record<ToolKey, string> = {
   "material-replacement": "",
   "object-swap": "",
+  "object-removal": "",
   relight: "",
   "image-to-video": "",
   "text-to-photo": "",
@@ -37,6 +40,77 @@ const EMPTY_PROMPTS: Record<ToolKey, string> = {
 };
 
 const AI_STUDIO_LAST_IMAGE_KEY = "aiStudioLastImage";
+
+const DEFAULT_TEXT2IMAGE_WIDTH = 1024;
+const DEFAULT_TEXT2IMAGE_HEIGHT = 1024;
+const DEFAULT_VIDEO_WIDTH = 832;
+const DEFAULT_VIDEO_HEIGHT = 480;
+const DEFAULT_IMAGE2VIDEO_WIDTH = 512;
+const DEFAULT_IMAGE2VIDEO_HEIGHT = 512;
+const DEFAULT_VIDEO_LENGTH = 33;
+const DEFAULT_BATCH_SIZE = 1;
+
+const DRAW_MASK_BRUSH_COLOR = "rgba(255, 0, 0, 0.5)";
+const DRAW_MASK_BRUSH_SIZE = 40;
+
+function extractSourceImagePathFromUrl(photoUrl: string): string {
+  const trimmed = photoUrl.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const url = new URL(trimmed, typeof window !== "undefined" ? window.location.origin : "http://localhost");
+    const pathParam = url.searchParams.get("path") ?? url.searchParams.get("imagePath");
+    if (pathParam) {
+      return decodeURIComponent(pathParam);
+    }
+  } catch {
+    // Ignore malformed URLs and fall back to server-side filename lookup.
+  }
+  return "";
+}
+
+function exportDrawMaskBase64(
+  drawCanvas: HTMLCanvasElement,
+  naturalWidth: number,
+  naturalHeight: number
+): string {
+  const exportCanvas = document.createElement("canvas");
+  exportCanvas.width = naturalWidth > 0 ? naturalWidth : drawCanvas.width;
+  exportCanvas.height = naturalHeight > 0 ? naturalHeight : drawCanvas.height;
+
+  const exportCtx = exportCanvas.getContext("2d");
+  const sourceCtx = drawCanvas.getContext("2d");
+  if (!exportCtx || !sourceCtx) {
+    return "";
+  }
+
+  exportCtx.fillStyle = "#000000";
+  exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+
+  const sourceData = sourceCtx.getImageData(0, 0, drawCanvas.width, drawCanvas.height);
+  const exportData = exportCtx.createImageData(exportCanvas.width, exportCanvas.height);
+  const scaleX = exportCanvas.width / drawCanvas.width;
+  const scaleY = exportCanvas.height / drawCanvas.height;
+
+  for (let y = 0; y < exportCanvas.height; y += 1) {
+    for (let x = 0; x < exportCanvas.width; x += 1) {
+      const sourceX = Math.min(drawCanvas.width - 1, Math.floor(x / scaleX));
+      const sourceY = Math.min(drawCanvas.height - 1, Math.floor(y / scaleY));
+      const sourceIndex = (sourceY * drawCanvas.width + sourceX) * 4;
+      const exportIndex = (y * exportCanvas.width + x) * 4;
+      const painted = sourceData.data[sourceIndex + 3]! > 16;
+      const value = painted ? 255 : 0;
+      exportData.data[exportIndex] = value;
+      exportData.data[exportIndex + 1] = value;
+      exportData.data[exportIndex + 2] = value;
+      exportData.data[exportIndex + 3] = 255;
+    }
+  }
+
+  exportCtx.putImageData(exportData, 0, 0);
+  return exportCanvas.toDataURL("image/png");
+}
 
 const TOOL_PRESETS: Record<ToolKey, string[]> = {
   "material-replacement": [
@@ -50,6 +124,12 @@ const TOOL_PRESETS: Record<ToolKey, string[]> = {
     "Replace old sofa with a modern neutral sectional",
     "Remove pictures and art from the walls",
     "Remove visible cables and small floor clutter",
+  ],
+  "object-removal": [
+    "Remove the object painted in the mask",
+    "Remove unwanted furniture from the scene",
+    "Remove reflections and distractions from glass surfaces",
+    "Remove power lines and small visual clutter",
   ],
   relight: [
     "Enhance natural window light for a bright interior",
@@ -88,6 +168,8 @@ function AiStudioPageContent() {
     "";
   const taskIdForRequest = taskId.trim();
   const filename = searchParams.get("filename") ?? "";
+  const absoluteLocalPathFromQuery =
+    searchParams.get("absoluteLocalPath") ?? searchParams.get("absolute_local_path") ?? "";
   const isStandaloneMode = !photoUrl.trim();
 
   const [uploadedPhotoUrl, setUploadedPhotoUrl] = useState("");
@@ -95,20 +177,30 @@ function AiStudioPageContent() {
   const [savedPhotoUrl, setSavedPhotoUrl] = useState<string | null>(null);
   const [currentFilename, setCurrentFilename] = useState(filename);
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  const [previewMediaType, setPreviewMediaType] = useState<"image" | "video">("image");
+  const [genWidth, setGenWidth] = useState(DEFAULT_TEXT2IMAGE_WIDTH);
+  const [genHeight, setGenHeight] = useState(DEFAULT_TEXT2IMAGE_HEIGHT);
+  const [genLength, setGenLength] = useState(DEFAULT_VIDEO_LENGTH);
+  const [genBatchSize, setGenBatchSize] = useState(DEFAULT_BATCH_SIZE);
   const [referenceImages, setReferenceImages] = useState<File[]>([]);
   const [showOriginalImage, setShowOriginalImage] = useState(false);
   const [activeTool, setActiveTool] = useState<ToolKey>(isStandaloneMode ? "text-to-photo" : "material-replacement");
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isRemovingObject, setIsRemovingObject] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [generationMessage, setGenerationMessage] = useState<string | null>(null);
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [objectSwapHasSelection, setObjectSwapHasSelection] = useState(false);
+  const [hasDrawnMask, setHasDrawnMask] = useState(false);
   const [maskCanvasViewport, setMaskCanvasViewport] = useState({ width: 0, height: 0 });
   const [sourceImageNaturalSize, setSourceImageNaturalSize] = useState({ width: 0, height: 0 });
   const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   const maskingCanvasRef = useRef<MaskingCanvasHandle | null>(null);
+  const drawMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const isDrawingMaskRef = useRef(false);
+  const lastDrawPointRef = useRef<{ x: number; y: number } | null>(null);
   const [promptByTool, setPromptByTool] = useState<Record<ToolKey, string>>({
     ...EMPTY_PROMPTS,
   });
@@ -178,13 +270,31 @@ function AiStudioPageContent() {
     [activeTool]
   );
   const activePresets = TOOL_PRESETS[activeTool] ?? [];
+  const isTextToPhotoTool = activeTool === "text-to-photo";
+  const isTextToVideoTool = activeTool === "text-to-video";
+  const isImageToVideoTool = activeTool === "image-to-video";
+  const isMediaGenerationTool = isTextToPhotoTool || isTextToVideoTool || isImageToVideoTool;
   const isObjectSwapTool = activeTool === "object-swap";
-  const shouldShowMaskingCanvas = isObjectSwapTool && Boolean(effectivePhotoUrl) && !showingPreview && !isGenerating;
+  const isObjectRemovalTool = activeTool === "object-removal";
+  const shouldShowMaskingCanvas =
+    isObjectSwapTool && Boolean(effectivePhotoUrl) && !showingPreview && !isGenerating && !isRemovingObject;
+  const shouldShowDrawMaskCanvas =
+    isObjectRemovalTool && Boolean(effectivePhotoUrl) && !showingPreview && !isGenerating && !isRemovingObject;
   const canGenerateObjectSwap = !isObjectSwapTool || objectSwapHasSelection;
   const promptPlaceholder =
-    activeTool === "text-to-photo" || activeTool === "text-to-video"
+    isTextToPhotoTool || isTextToVideoTool
       ? "Describe what you want to generate..."
       : "Describe the edit you want to apply...";
+  const showPromptField = !isImageToVideoTool;
+  const generationButtonLabel = isGenerating
+    ? isTextToPhotoTool
+      ? "Generating Photo..."
+      : isTextToVideoTool || isImageToVideoTool
+        ? "Generating Video..."
+        : "Generating..."
+    : isMediaGenerationTool
+      ? "Generate"
+      : "Generate Preview";
   const referenceImagePreviews = useMemo(
     () =>
       referenceImages.map((file) => ({
@@ -265,8 +375,197 @@ function AiStudioPageContent() {
     if (tool !== "object-swap") {
       setObjectSwapHasSelection(false);
     }
+    if (tool !== "object-removal") {
+      setHasDrawnMask(false);
+      isDrawingMaskRef.current = false;
+      lastDrawPointRef.current = null;
+    }
     setActiveTool(tool);
+    if (tool === "text-to-photo") {
+      setGenWidth(DEFAULT_TEXT2IMAGE_WIDTH);
+      setGenHeight(DEFAULT_TEXT2IMAGE_HEIGHT);
+    } else if (tool === "text-to-video") {
+      setGenWidth(DEFAULT_VIDEO_WIDTH);
+      setGenHeight(DEFAULT_VIDEO_HEIGHT);
+      setGenLength(DEFAULT_VIDEO_LENGTH);
+      setGenBatchSize(DEFAULT_BATCH_SIZE);
+    } else if (tool === "image-to-video") {
+      setGenWidth(DEFAULT_IMAGE2VIDEO_WIDTH);
+      setGenHeight(DEFAULT_IMAGE2VIDEO_HEIGHT);
+      setGenLength(DEFAULT_VIDEO_LENGTH);
+      setGenBatchSize(DEFAULT_BATCH_SIZE);
+    }
   };
+
+  const getDrawMaskPoint = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = drawMaskCanvasRef.current;
+    if (!canvas) {
+      return null;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return {
+      x: (event.clientX - rect.left) * scaleX,
+      y: (event.clientY - rect.top) * scaleY,
+    };
+  }, []);
+
+  const paintDrawMaskStroke = useCallback((from: { x: number; y: number }, to: { x: number; y: number }) => {
+    const canvas = drawMaskCanvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) {
+      return;
+    }
+    ctx.strokeStyle = DRAW_MASK_BRUSH_COLOR;
+    ctx.lineWidth = DRAW_MASK_BRUSH_SIZE;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+  }, []);
+
+  const handleDrawMaskMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLCanvasElement>) => {
+      const point = getDrawMaskPoint(event);
+      if (!point) {
+        return;
+      }
+      isDrawingMaskRef.current = true;
+      lastDrawPointRef.current = point;
+      paintDrawMaskStroke(point, point);
+      setHasDrawnMask(true);
+    },
+    [getDrawMaskPoint, paintDrawMaskStroke]
+  );
+
+  const handleDrawMaskMouseMove = useCallback(
+    (event: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!isDrawingMaskRef.current) {
+        return;
+      }
+      const point = getDrawMaskPoint(event);
+      const lastPoint = lastDrawPointRef.current;
+      if (!point || !lastPoint) {
+        return;
+      }
+      paintDrawMaskStroke(lastPoint, point);
+      lastDrawPointRef.current = point;
+      setHasDrawnMask(true);
+    },
+    [getDrawMaskPoint, paintDrawMaskStroke]
+  );
+
+  const stopDrawMask = useCallback(() => {
+    isDrawingMaskRef.current = false;
+    lastDrawPointRef.current = null;
+  }, []);
+
+  const handleClearDrawMask = useCallback(() => {
+    const canvas = drawMaskCanvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) {
+      return;
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setHasDrawnMask(false);
+    isDrawingMaskRef.current = false;
+    lastDrawPointRef.current = null;
+  }, []);
+
+  const handleRemoveObject = useCallback(async () => {
+    const canvas = drawMaskCanvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    const maskBase64 = exportDrawMaskBase64(
+      canvas,
+      sourceImageNaturalSize.width,
+      sourceImageNaturalSize.height
+    );
+    if (!maskBase64) {
+      setGenerationError("Mask export failed. Draw a mask over the object you want to remove.");
+      setGenerationMessage(null);
+      return;
+    }
+
+    const filenameForRequest = effectiveFilename.trim();
+    const sourceImagePath =
+      absoluteLocalPathFromQuery.trim() ||
+      extractSourceImagePathFromUrl(effectivePhotoUrl) ||
+      extractSourceImagePathFromUrl(photoUrl);
+    if (!sourceImagePath && !filenameForRequest) {
+      setGenerationError("Cannot resolve the source image. Open AI Studio from a merged photo or upload a named image.");
+      setGenerationMessage(null);
+      return;
+    }
+
+    setIsRemovingObject(true);
+    setGenerationError(null);
+    setGenerationMessage("Removing Object... Please wait");
+    setShowOriginalImage(false);
+
+    try {
+      const response = await fetch("/api/ai-inpaint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceImagePath,
+          maskBase64,
+          filename: filenameForRequest,
+          taskId: taskIdForRequest,
+        }),
+      });
+
+      const payload = (await response.json().catch(() => null)) as
+        | { imageUrl?: string; error?: string }
+        | null;
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Object removal failed (${response.status}).`);
+      }
+
+      const imageUrl = payload?.imageUrl?.trim() ?? "";
+      if (!imageUrl) {
+        throw new Error("Object removal completed but no image URL was returned.");
+      }
+
+      setPreviewImageUrl(imageUrl);
+      setPreviewMediaType("image");
+      setGenerationMessage("Object removed successfully.");
+      handleClearDrawMask();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Object removal failed.";
+      setGenerationError(message);
+      setGenerationMessage(null);
+    } finally {
+      setIsRemovingObject(false);
+    }
+  }, [
+    absoluteLocalPathFromQuery,
+    effectiveFilename,
+    effectivePhotoUrl,
+    handleClearDrawMask,
+    photoUrl,
+    sourceImageNaturalSize.height,
+    sourceImageNaturalSize.width,
+    taskIdForRequest,
+  ]);
+
+  useEffect(() => {
+    if (!shouldShowDrawMaskCanvas) {
+      return;
+    }
+    handleClearDrawMask();
+  }, [
+    effectivePhotoUrl,
+    handleClearDrawMask,
+    maskingCanvasSize.height,
+    maskingCanvasSize.width,
+    shouldShowDrawMaskCanvas,
+  ]);
 
   const handleUploadImage = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -282,6 +581,7 @@ function AiStudioPageContent() {
     setCurrentFilename(file.name);
     setSavedPhotoUrl(null);
     setPreviewImageUrl(null);
+    setPreviewMediaType("image");
     setShowOriginalImage(false);
     setGenerationMessage(null);
     setGenerationError(null);
@@ -316,17 +616,103 @@ function AiStudioPageContent() {
       activeTool !== "material-replacement" &&
       activeTool !== "relight" &&
       activeTool !== "object-swap" &&
-      activeTool !== "image-to-video" &&
-      activeTool !== "text-to-photo" &&
-      activeTool !== "text-to-video"
+      !isMediaGenerationTool
     ) {
       setGenerationError(
-        "Preview generation is currently wired for Material Replacement, Relight, Object Swap, Image to Video, Text to Photo, and Text to Video."
+        "Preview generation is currently wired for Material Replacement, Relight, Object Swap, and the Media Generation tools."
       );
       setGenerationMessage(null);
       return;
     }
-    const requiresSourceImage = activeTool !== "text-to-photo" && activeTool !== "text-to-video";
+
+    if (isMediaGenerationTool) {
+      const promptText = promptByTool[activeTool].trim();
+      if ((isTextToPhotoTool || isTextToVideoTool) && !promptText) {
+        setGenerationError("Please enter a prompt before generating.");
+        setGenerationMessage(null);
+        return;
+      }
+
+      const filenameForRequest = effectiveFilename.trim();
+      const sourceImagePath =
+        absoluteLocalPathFromQuery.trim() ||
+        extractSourceImagePathFromUrl(effectivePhotoUrl) ||
+        extractSourceImagePathFromUrl(photoUrl);
+      if (isImageToVideoTool && !sourceImagePath && !filenameForRequest) {
+        setGenerationError("Please load or upload a source image before generating video.");
+        setGenerationMessage(null);
+        return;
+      }
+      if (isImageToVideoTool && !effectivePhotoUrl) {
+        setGenerationError("Image to Video requires a loaded source image in the viewer.");
+        setGenerationMessage(null);
+        return;
+      }
+
+      setIsGenerating(true);
+      setGenerationError(null);
+      setGenerationMessage(
+        isTextToPhotoTool
+          ? "Generating photo... Please wait."
+          : "Generating video... This may take several minutes."
+      );
+      setPreviewImageUrl(null);
+      setPreviewMediaType("image");
+      setShowOriginalImage(false);
+      clearStatusPolling();
+
+      try {
+        const mode = isTextToPhotoTool
+          ? "text2image"
+          : isTextToVideoTool
+            ? "text2video"
+            : "image2video";
+        const response = await fetch("/api/ai-generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode,
+            prompt: promptText,
+            width: genWidth,
+            height: genHeight,
+            length: genLength,
+            batchSize: genBatchSize,
+            sourceImagePath,
+            filename: filenameForRequest,
+            taskId: taskIdForRequest,
+          }),
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | {
+              success?: boolean;
+              mediaUrl?: string;
+              type?: "image" | "video";
+              error?: string;
+            }
+          | null;
+
+        if (!response.ok || !payload?.success || !payload.mediaUrl) {
+          setGenerationError(payload?.error || `Generation failed (${response.status}).`);
+          setGenerationMessage(null);
+          return;
+        }
+
+        const mediaUrl = `${payload.mediaUrl}${payload.mediaUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
+        setPreviewImageUrl(mediaUrl);
+        setPreviewMediaType(payload.type === "video" ? "video" : "image");
+        setGenerationMessage(
+          payload.type === "video" ? "Video generated successfully." : "Photo generated successfully."
+        );
+      } catch {
+        setGenerationError(`Network error while generating ${activeToolLabel}.`);
+        setGenerationMessage(null);
+      } finally {
+        setIsGenerating(false);
+      }
+      return;
+    }
+
+    const requiresSourceImage = true;
     const filenameForRequest = effectiveFilename.trim();
     if (requiresSourceImage && !filenameForRequest) {
       setGenerationError(`Please select or upload an image before generating a ${activeToolLabel} preview.`);
@@ -343,13 +729,12 @@ function AiStudioPageContent() {
     setGenerationError(null);
     setGenerationMessage(null);
     setPreviewImageUrl(null);
+    setPreviewMediaType("image");
     setShowOriginalImage(false);
     clearStatusPolling();
     try {
       const formPayload = new FormData();
-      if (requiresSourceImage) {
-        formPayload.append("filename", filenameForRequest);
-      }
+      formPayload.append("filename", filenameForRequest);
       if (isObjectSwapTool) {
         const maskBlob = await maskingCanvasRef.current?.exportMaskBlob();
         if (!maskBlob) {
@@ -424,6 +809,7 @@ function AiStudioPageContent() {
             setPreviewImageUrl(
               `${statusPayload.previewUrl}${statusPayload.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`
             );
+            setPreviewMediaType("image");
             setShowOriginalImage(false);
             setGenerationMessage("Preview generated successfully.");
           }
@@ -462,6 +848,7 @@ function AiStudioPageContent() {
     setSavedPhotoUrl(null);
     setCurrentFilename("");
     setPreviewImageUrl(null);
+    setPreviewMediaType("image");
     setShowOriginalImage(false);
     try {
       localStorage.removeItem(AI_STUDIO_LAST_IMAGE_KEY);
@@ -529,6 +916,7 @@ function AiStudioPageContent() {
       // ignore
     }
     setPreviewImageUrl(null);
+    setPreviewMediaType("image");
     setSendToBoardSuccess(false);
     setShowOriginalImage(false);
   };
@@ -601,13 +989,53 @@ function AiStudioPageContent() {
                   height={maskingCanvasSize.height}
                   onSelectionChange={setObjectSwapHasSelection}
                 />
+              ) : shouldShowDrawMaskCanvas ? (
+                <div
+                  className="relative"
+                  style={{
+                    width: maskingCanvasSize.width,
+                    height: maskingCanvasSize.height,
+                  }}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={effectivePhotoUrl}
+                    alt={effectiveFilename || "Selected photo"}
+                    className="h-full w-full rounded-lg object-contain shadow-lg shadow-black/20"
+                    draggable={false}
+                  />
+                  <canvas
+                    ref={drawMaskCanvasRef}
+                    width={maskingCanvasSize.width}
+                    height={maskingCanvasSize.height}
+                    className="absolute inset-0 cursor-crosshair touch-none rounded-lg"
+                    aria-label="Draw object removal mask"
+                    onMouseDown={handleDrawMaskMouseDown}
+                    onMouseMove={handleDrawMaskMouseMove}
+                    onMouseUp={stopDrawMask}
+                    onMouseLeave={stopDrawMask}
+                  />
+                </div>
               ) : displayedImageUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={displayedImageUrl}
-                  alt={effectiveFilename || "Selected photo"}
-                  className="max-h-[66vh] w-auto max-w-full rounded-lg object-contain shadow-lg shadow-black/20"
-                />
+                showingPreview && previewMediaType === "video" ? (
+                  // eslint-disable-next-line jsx-a11y/media-has-caption
+                  <video
+                    src={displayedImageUrl}
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                    controls
+                    className="max-h-[66vh] w-auto max-w-full rounded-lg object-contain shadow-lg shadow-black/20"
+                  />
+                ) : (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={displayedImageUrl}
+                    alt={effectiveFilename || "Selected photo"}
+                    className="max-h-[66vh] w-auto max-w-full rounded-lg object-contain shadow-lg shadow-black/20"
+                  />
+                )
               ) : (
                 <div className="w-full max-w-xl rounded-lg border border-dashed border-zinc-300 px-6 py-10 text-center dark:border-zinc-700">
                   <p className="text-sm font-medium">Upload Image</p>
@@ -662,46 +1090,54 @@ function AiStudioPageContent() {
               </div>
             ) : null}
             <div className="mx-auto mt-4 w-full max-w-3xl rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-center dark:border-zinc-800 dark:bg-zinc-950/60">
-              <div className="mb-2 flex flex-wrap items-center justify-center gap-2">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                  Reference Images
-                </p>
-                <label className="inline-flex cursor-pointer items-center justify-center rounded-md border border-zinc-300 bg-white px-2 py-1 text-[11px] font-semibold text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800">
-                  Add Images
-                  <input
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={handleReferenceImagesSelected}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-              {referenceImagePreviews.length > 0 ? (
-                <div className="grid grid-cols-4 justify-items-center gap-2 sm:grid-cols-6 md:grid-cols-8">
-                  {referenceImagePreviews.map((item, index) => (
-                    <div
-                      key={`${item.key}-${index}`}
-                      className="relative h-14 w-14 overflow-hidden rounded-md border border-zinc-300 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800"
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={item.previewUrl} alt={item.file.name} className="h-full w-full object-cover" />
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveReferenceImage(index)}
-                        className="absolute right-0 top-0 inline-flex h-4 w-4 items-center justify-center rounded-bl bg-black/70 text-[10px] font-bold text-white"
-                        aria-label={`Remove reference image ${item.file.name}`}
-                      >
-                        ×
-                      </button>
+              {!isMediaGenerationTool ? (
+                <>
+                  <div className="mb-2 flex flex-wrap items-center justify-center gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                      Reference Images
+                    </p>
+                    <label className="inline-flex cursor-pointer items-center justify-center rounded-md border border-zinc-300 bg-white px-2 py-1 text-[11px] font-semibold text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800">
+                      Add Images
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        onChange={handleReferenceImagesSelected}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+                  {referenceImagePreviews.length > 0 ? (
+                    <div className="grid grid-cols-4 justify-items-center gap-2 sm:grid-cols-6 md:grid-cols-8">
+                      {referenceImagePreviews.map((item, index) => (
+                        <div
+                          key={`${item.key}-${index}`}
+                          className="relative h-14 w-14 overflow-hidden rounded-md border border-zinc-300 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={item.previewUrl} alt={item.file.name} className="h-full w-full object-cover" />
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveReferenceImage(index)}
+                            className="absolute right-0 top-0 inline-flex h-4 w-4 items-center justify-center rounded-bl bg-black/70 text-[10px] font-bold text-white"
+                            aria-label={`Remove reference image ${item.file.name}`}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              ) : (
+                  ) : (
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      Upload one or more reference images to guide the generation.
+                    </p>
+                  )}
+                </>
+              ) : isImageToVideoTool ? (
                 <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                  Upload one or more reference images to guide the generation.
+                  Image to Video animates the currently loaded source image using Wan 2.1.
                 </p>
-              )}
+              ) : null}
             </div>
             <div className="mt-3 flex items-center justify-end gap-2">
               <button
@@ -771,21 +1207,84 @@ function AiStudioPageContent() {
               <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
                 {activeToolLabel}
               </p>
-              <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                Prompt
-                <textarea
-                  value={promptByTool[activeTool]}
-                  onChange={(event) =>
-                    setPromptByTool((prev) => ({
-                      ...prev,
-                      [activeTool]: event.target.value,
-                    }))
-                  }
-                  placeholder={promptPlaceholder}
-                  className="mt-1 h-32 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-zinc-500"
-                />
-              </label>
-              {activePresets.length > 0 ? (
+              {showPromptField ? (
+                <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                  {isTextToPhotoTool || isTextToVideoTool ? "Text Prompt" : "Prompt"}
+                  <textarea
+                    value={promptByTool[activeTool]}
+                    onChange={(event) =>
+                      setPromptByTool((prev) => ({
+                        ...prev,
+                        [activeTool]: event.target.value,
+                      }))
+                    }
+                    placeholder={promptPlaceholder}
+                    className="mt-1 h-32 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-zinc-500"
+                  />
+                </label>
+              ) : null}
+              {isMediaGenerationTool ? (
+                <div className="mt-3 space-y-3">
+                  <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                    Base Dimensions
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Width
+                      <input
+                        type="number"
+                        min={64}
+                        max={2048}
+                        step={8}
+                        value={genWidth}
+                        onChange={(event) => setGenWidth(Number(event.target.value) || DEFAULT_TEXT2IMAGE_WIDTH)}
+                        className="mt-1 h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                      />
+                    </label>
+                    <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Height
+                      <input
+                        type="number"
+                        min={64}
+                        max={2048}
+                        step={8}
+                        value={genHeight}
+                        onChange={(event) => setGenHeight(Number(event.target.value) || DEFAULT_TEXT2IMAGE_HEIGHT)}
+                        className="mt-1 h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                      />
+                    </label>
+                  </div>
+                  {isTextToVideoTool || isImageToVideoTool ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                        Video Length (frames)
+                        <input
+                          type="number"
+                          min={1}
+                          max={256}
+                          step={1}
+                          value={genLength}
+                          onChange={(event) => setGenLength(Number(event.target.value) || DEFAULT_VIDEO_LENGTH)}
+                          className="mt-1 h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        />
+                      </label>
+                      <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                        Batch Size
+                        <input
+                          type="number"
+                          min={1}
+                          max={4}
+                          step={1}
+                          value={genBatchSize}
+                          onChange={(event) => setGenBatchSize(Number(event.target.value) || DEFAULT_BATCH_SIZE)}
+                          className="mt-1 h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {showPromptField && activePresets.length > 0 ? (
                 <div className="mt-2">
                   <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
                     Tool Presets
@@ -809,26 +1308,53 @@ function AiStudioPageContent() {
                   </div>
                 </div>
               ) : null}
+              {isObjectRemovalTool ? (
+                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={handleClearDrawMask}
+                    className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  >
+                    Clear Mask
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!hasDrawnMask || isRemovingObject}
+                    onClick={() => void handleRemoveObject()}
+                    className="inline-flex h-10 items-center justify-center rounded-lg bg-red-600 px-4 text-sm font-semibold text-white transition hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-red-500 dark:hover:bg-red-400"
+                  >
+                    {isRemovingObject ? "Removing Object..." : "Remove Object"}
+                  </button>
+                </div>
+              ) : null}
               <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <button
                   type="button"
-                  disabled={isGenerating || !canGenerateObjectSwap}
+                  disabled={
+                    isGenerating ||
+                    !canGenerateObjectSwap ||
+                    (isImageToVideoTool && !effectivePhotoUrl)
+                  }
                   onClick={() => void handleGeneratePreview()}
                   className="inline-flex h-10 items-center justify-center rounded-lg bg-zinc-900 px-4 text-sm font-semibold text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
                 >
-                  {isGenerating ? "Generating..." : "Generate Preview"}
+                  {generationButtonLabel}
                 </button>
                 <button
                   type="button"
-                  disabled={!previewImageUrl}
+                  disabled={!previewImageUrl || previewMediaType === "video"}
                   onClick={() => void handleConfirmSaveFinalEdit()}
-                  className="inline-flex h-10 items-center justify-center rounded-lg bg-emerald-600 px-4 text-sm font-semibold text-white transition hover:bg-emerald-500 dark:bg-emerald-500 dark:text-zinc-950 dark:hover:bg-emerald-400"
+                  className="inline-flex h-10 items-center justify-center rounded-lg bg-emerald-600 px-4 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-emerald-500 dark:text-zinc-950 dark:hover:bg-emerald-400"
                 >
                   {isSaving ? "Saving..." : "Confirm & Save Final Edit"}
                 </button>
               </div>
               <p className="mt-2 text-[11px] text-zinc-500 dark:text-zinc-400">
-                (Generates a preview below. &quot;Confirm &amp; Save&quot; creates the final _wf file)
+                {isMediaGenerationTool
+                  ? isTextToPhotoTool
+                    ? "Generates a Flux photo preview in the viewer."
+                    : "Generates a Wan 2.1 video preview. Video jobs may take 5–10 minutes."
+                  : '(Generates a preview below. "Confirm & Save" creates the final _wf file)'}
               </p>
               {generationMessage ? (
                 <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">{generationMessage}</p>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type DragEvent } from "react";
 import { useRouter } from "next/navigation";
 
 import { getOrCreateTaskMoodboard } from "@/app/actions/moodboard";
@@ -11,6 +11,7 @@ import {
   STD_TODO_ID as STD_TODO_REF,
 } from "@/lib/plannerStandardSubtasks";
 import type { PlannerAssignee } from "@/lib/plannerAssignees";
+import { getDirectoryFromFilePath, getElectronFilePath } from "@/lib/plannerFilePath";
 
 export const STD_PREPARE_ID = STD_PREPARE_REF;
 export const STD_TODO_ID = STD_TODO_REF;
@@ -125,6 +126,7 @@ export default function PlannerTaskModal({
   const [assignedTo, setAssignedTo] = useState<string | null>(task?.assignedTo ?? null);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [newSubtaskText, setNewSubtaskText] = useState("");
+  const [isFileDropzoneActive, setIsFileDropzoneActive] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
@@ -180,6 +182,40 @@ export default function PlannerTaskModal({
       },
     ]);
     setNewSubtaskText("");
+  };
+
+  const handleFileDropzoneDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsFileDropzoneActive(true);
+  };
+
+  const handleFileDropzoneDragOver = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsFileDropzoneActive(true);
+  };
+
+  const handleFileDropzoneDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsFileDropzoneActive(false);
+  };
+
+  const handleFileDropzoneDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsFileDropzoneActive(false);
+
+    const file = event.dataTransfer.files[0];
+    if (!file) {
+      return;
+    }
+
+    const absolutePath = getElectronFilePath(file);
+    if (absolutePath) {
+      setFilePath(getDirectoryFromFilePath(absolutePath));
+    }
   };
 
   const handleOpenReviewBoard = async () => {
@@ -415,15 +451,6 @@ export default function PlannerTaskModal({
             />
           </label>
           <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            File Links
-            <input
-              value={filePath}
-              onChange={(event) => setFilePath(event.target.value)}
-              placeholder="Paste local path or URL"
-              className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-            />
-          </label>
-          <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
             Repeat
             <select
               value={recurringType}
@@ -438,6 +465,34 @@ export default function PlannerTaskModal({
           </label>
         </div>
 
+        <div className="mt-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            Finished Files Location
+          </p>
+          <div
+            onDragEnter={handleFileDropzoneDragEnter}
+            onDragOver={handleFileDropzoneDragOver}
+            onDragLeave={handleFileDropzoneDragLeave}
+            onDrop={handleFileDropzoneDrop}
+            className={`mt-1 rounded-lg border-2 border-dashed p-3 transition-colors ${
+              isFileDropzoneActive
+                ? "border-blue-500 bg-blue-50/10 dark:bg-blue-950/20"
+                : "border-zinc-300 bg-zinc-50/50 dark:border-zinc-700 dark:bg-zinc-800/40"
+            }`}
+          >
+            <input
+              value={filePath}
+              onChange={(event) => setFilePath(event.target.value)}
+              placeholder="Drag a file here (Electron) or paste a local folder path"
+              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+            />
+            <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+              In the desktop app, dropping a file captures its folder path automatically. In the browser, type or paste
+              the path manually.
+            </p>
+          </div>
+        </div>
+
         <div className="mt-4 rounded-lg border border-zinc-300 bg-zinc-50 px-3 py-2 text-xs text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-300">
           {!isCreateMode && task?.status === "completed" ? (
             <div className="space-y-1">
@@ -445,7 +500,8 @@ export default function PlannerTaskModal({
                 Total time: <span className="font-semibold">{task.totalTimeLabel || "N/A"}</span>
               </p>
               <p className="truncate">
-                File path: <span className="font-semibold">{task.filePath || "Not provided"}</span>
+                Finished files location:{" "}
+                <span className="font-semibold">{task.filePath || "Not provided"}</span>
               </p>
             </div>
           ) : (

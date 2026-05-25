@@ -8,6 +8,8 @@ import dotenv from "dotenv";
 import chokidar from "chokidar";
 import sharp from "sharp";
 
+import { buildWatermarkedPreviewFile, assertReadableWatermark } from "../app/api/gallery/previewMagick.mjs";
+
 import { buildLocalFolderNameFromTask } from "./localFolderName.mjs";
 import { buildTimestampBracketsFromDir } from "../lib/bracketGrouping.mjs";
 import { sanitizeStoragePath } from "../lib/sanitizeStoragePath.mjs";
@@ -30,8 +32,6 @@ const ACTIVE_STATUS = "Processing";
 const READY_FOR_REVIEW_STATUS = "Ready for Review";
 const FAILED_STATUS = "Failed";
 const PREVIEW_DEBOUNCE_MS = 1500;
-const PREVIEW_WIDTH = 1080;
-const PREVIEW_QUALITY = 45;
 const RAW_PREVIEW_EXTENSIONS = new Set([".nef", ".cr2", ".cr3", ".arw", ".dng", ".raf", ".rw2", ".orf"]);
 const RAW_PREVIEW_TAGS = ["PreviewImage", "JpgFromRaw", "OtherImage", "ThumbnailImage"];
 
@@ -92,6 +92,8 @@ const COMFY_OUTPUT_DIR =
 const COMFY_WAIT_TIMEOUT_MS = readPositiveIntEnv("COMFY_WAIT_TIMEOUT_MS", 12 * 60 * 1000);
 
 const previewSyncTimers = new Map();
+const previewSyncInFlight = new Set();
+const previewSyncPending = new Set();
 let rawWatcherStarted = false;
 let exiftoolPathPromise = null;
 
@@ -146,6 +148,34 @@ async function extractEmbeddedRawPreviewBuffer(sourcePath) {
       lastError instanceof Error ? ` Last error: ${lastError.message}` : ""
     }`
   );
+}
+
+async function resolvePreviewSourcePath(sourcePath, contextLabel) {
+  const cleanupPaths = [];
+  if (!isRawPreviewFile(sourcePath)) {
+    return { inputPath: sourcePath, cleanupPaths };
+  }
+
+  try {
+    const extractedPreview = await extractEmbeddedRawPreviewBuffer(sourcePath);
+    const tempRawPreview = path.join(
+      os.tmpdir(),
+      `raw-preview-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`
+    );
+    await fs.promises.writeFile(tempRawPreview, extractedPreview);
+    cleanupPaths.push(tempRawPreview);
+    console.info(
+      `[worker] Extracted embedded RAW preview for ${path.basename(sourcePath)} (${contextLabel}) via exiftool-vendored.`
+    );
+    return { inputPath: tempRawPreview, cleanupPaths };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[worker] RAW preview extraction failed for ${path.basename(sourcePath)} (${contextLabel}); skipping file.`,
+      message
+    );
+    throw new Error(message);
+  }
 }
 
 async function getPreviewSharpInput(sourcePath, contextLabel) {
@@ -322,6 +352,30 @@ function safePreviewStem(localFolderName, firstFilename, chunkIndex) {
   return stem.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+function buildPreviewStoragePath(localFolderName, firstFilename, chunkIndex) {
+  return sanitizeStoragePath(
+    `${localFolderName}/${safePreviewStem(localFolderName, firstFilename, chunkIndex)}.jpg`
+  );
+}
+
+function getPreviewPublicUrl(supabase, storagePath) {
+  const { data } = supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).getPublicUrl(storagePath);
+  return data?.publicUrl ?? "";
+}
+
+async function previewObjectExistsInStorage(supabase, storagePath) {
+  const lastSlash = storagePath.lastIndexOf("/");
+  const folder = lastSlash >= 0 ? storagePath.slice(0, lastSlash) : "";
+  const fileName = lastSlash >= 0 ? storagePath.slice(lastSlash + 1) : storagePath;
+  const { data, error } = await supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).list(folder, {
+    limit: 1000,
+  });
+  if (error) {
+    return false;
+  }
+  return (data ?? []).some((entry) => entry.name === fileName);
+}
+
 function readNaturallySortedImageFiles(dir) {
   if (!fs.existsSync(dir)) {
     return [];
@@ -369,6 +423,13 @@ function parsePreviewItems(raw) {
     .filter(Boolean);
 }
 
+function galleryPreviewsNeedsDbSync(raw) {
+  if (raw == null) {
+    return true;
+  }
+  return parsePreviewItems(raw).length === 0;
+}
+
 /**
  * Clean Kanban cover: resize only, then same ImageMagick exposure pass as watermarked previews (no watermark).
  */
@@ -405,69 +466,32 @@ async function buildCoverThumbnailBuffer(sourcePath) {
 }
 
 async function buildPreviewBuffer(sourcePath) {
-  if (!fs.existsSync(WATERMARK_PATH)) {
-    throw new Error(`Watermark file not found at "${WATERMARK_PATH}".`);
-  }
+  await assertReadableWatermark(WATERMARK_PATH);
 
-  const sourceInput = await getPreviewSharpInput(sourcePath, "gallery-preview");
-  const resizedBuffer = await sharp(sourceInput)
-    .resize({ width: PREVIEW_WIDTH, fit: "inside", withoutEnlargement: true })
-    .gamma(1.8)
-    .clahe({ width: 200, height: 200, maxSlope: 3 })
-    .modulate({ brightness: 1.05, saturation: 1.05 })
-    .toBuffer();
-  const metadata = await sharp(resizedBuffer).metadata();
-  if (!metadata.width || !metadata.height) {
-    throw new Error(`Could not read resized image dimensions for "${sourcePath}".`);
-  }
+  const { inputPath, cleanupPaths } = await resolvePreviewSourcePath(sourcePath, "gallery-preview");
+  const tempOutput = path.join(
+    os.tmpdir(),
+    `gallery-preview-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`
+  );
+  cleanupPaths.push(tempOutput);
 
-  const watermarkBuffer = await sharp(WATERMARK_PATH, { failOn: "none" })
-    .resize({
-      width: metadata.width,
-      height: metadata.height,
-      fit: "fill",
-    })
-    .ensureAlpha(0.2)
-    .png()
-    .toBuffer();
-
-  const watermarked = await sharp(resizedBuffer)
-    .composite([{ input: watermarkBuffer, blend: "soft-light" }])
-    .jpeg({ quality: PREVIEW_QUALITY, mozjpeg: true, chromaSubsampling: "4:2:0" })
-    .toBuffer();
-
-  const tmpBase = path.join(os.tmpdir(), `preview-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  const tempInput = `${tmpBase}-in.jpg`;
-  const tempOutput = `${tmpBase}-out.jpg`;
   try {
-    await fs.promises.writeFile(tempInput, watermarked);
-    await execFileAsync(
-      "magick",
-      [
-        tempInput,
-        "-auto-level",
-        "-modulate",
-        "102,112,100",
-        "-contrast-stretch",
-        "0.3%x0.3%",
-        tempOutput,
-      ],
-      { windowsHide: true }
-    );
+    await buildWatermarkedPreviewFile({
+      sourceFilePath: inputPath,
+      watermarkPath: WATERMARK_PATH,
+      previewOutputPath: tempOutput,
+    });
     return await fs.promises.readFile(tempOutput);
   } finally {
-    await fs.promises.unlink(tempInput).catch(() => {});
-    await fs.promises.unlink(tempOutput).catch(() => {});
+    await Promise.all(cleanupPaths.map((filePath) => fs.promises.unlink(filePath).catch(() => {})));
   }
 }
 
 async function uploadPreviewBuffer(supabase, params) {
-  const storagePath = sanitizeStoragePath(
-    `${params.localFolderName}/${safePreviewStem(
-      params.localFolderName,
-      params.firstFilename,
-      params.chunkIndex
-    )}.jpg`
+  const storagePath = buildPreviewStoragePath(
+    params.localFolderName,
+    params.firstFilename,
+    params.chunkIndex
   );
   await withPreviewRetry(`upload preview ${storagePath}`, async () => {
     const { error } = await supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).upload(storagePath, params.buffer, {
@@ -479,8 +503,28 @@ async function uploadPreviewBuffer(supabase, params) {
       throw new Error(error.message);
     }
   });
-  const { data } = supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).getPublicUrl(storagePath);
-  return { storagePath, previewUrl: data?.publicUrl ?? "" };
+  return { storagePath, previewUrl: getPreviewPublicUrl(supabase, storagePath) };
+}
+
+async function persistGalleryPreviews(supabase, taskId, chunks, nextItems) {
+  await withPreviewRetry(`persist gallery_previews for task ${taskId}`, async () => {
+    const { error } = await supabase
+      .from("tasks")
+      .update({
+        gallery_previews: {
+          updated_at: new Date().toISOString(),
+          bracket_size: chunks[0]?.length ?? null,
+          items: nextItems,
+        },
+      })
+      .eq("id", taskId);
+    if (error) {
+      throw new Error(error.message);
+    }
+  });
+  console.info(
+    `[worker] Persisted gallery_previews for task ${taskId}: ${nextItems.length} item(s).`
+  );
 }
 
 async function ensureCoverImageOnce(supabase, taskRow, rawDir, chunks) {
@@ -491,45 +535,57 @@ async function ensureCoverImageOnce(supabase, taskRow, rawDir, chunks) {
   if (!chunks.length) {
     return;
   }
+
   const previewPreference = normalizePreviewPreference(taskRow.preview_preference);
-  const firstChunk = chunks[0];
-  const firstFilename = resolvePreviewSourceFilename(firstChunk, previewPreference);
-  if (!firstFilename) {
-    return;
-  }
-  const sourcePath = path.join(rawDir, firstFilename);
-  if (!fs.existsSync(sourcePath)) {
-    return;
-  }
-
   const taskId = String(taskRow.id);
-  const buffer = await withPreviewRetry(`cover thumbnail ${taskId}`, async () =>
-    buildCoverThumbnailBuffer(sourcePath)
-  );
-  const storagePath = sanitizeStoragePath(`cover_${taskId}.jpg`);
-  await withPreviewRetry(`upload cover ${storagePath}`, async () => {
-    const { error } = await supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).upload(storagePath, buffer, {
-      upsert: true,
-      contentType: "image/jpeg",
-      cacheControl: "3600",
-    });
-    if (error) {
-      throw new Error(error.message);
+
+  for (const chunk of chunks) {
+    const firstFilename = resolvePreviewSourceFilename(chunk, previewPreference);
+    if (!firstFilename) {
+      continue;
     }
-  });
-  const { data } = supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).getPublicUrl(storagePath);
-  const publicUrl = data?.publicUrl ?? "";
-  if (!publicUrl) {
-    return;
+    const sourcePath = path.join(rawDir, firstFilename);
+    if (!fs.existsSync(sourcePath)) {
+      continue;
+    }
+
+    try {
+      const buffer = await withPreviewRetry(`cover thumbnail ${taskId}`, async () =>
+        buildCoverThumbnailBuffer(sourcePath)
+      );
+      const storagePath = sanitizeStoragePath(`cover_${taskId}.jpg`);
+      await withPreviewRetry(`upload cover ${storagePath}`, async () => {
+        const { error } = await supabase.storage.from(SUPABASE_PREVIEWS_BUCKET).upload(storagePath, buffer, {
+          upsert: true,
+          contentType: "image/jpeg",
+          cacheControl: "3600",
+        });
+        if (error) {
+          throw new Error(error.message);
+        }
+      });
+      const publicUrl = getPreviewPublicUrl(supabase, storagePath);
+      if (!publicUrl) {
+        throw new Error(`Missing public URL for cover ${storagePath}`);
+      }
+
+      await withPreviewRetry(`set cover_image_url for task ${taskId}`, async () => {
+        const { error } = await supabase.from("tasks").update({ cover_image_url: publicUrl }).eq("id", taskId);
+        if (error) {
+          throw new Error(error.message);
+        }
+      });
+      console.info(`[worker] Cover image set for task ${taskId} from ${firstFilename}`);
+      return;
+    } catch (err) {
+      console.warn(
+        `[worker] Cover candidate skipped for task ${taskId} (${firstFilename}):`,
+        err instanceof Error ? err.message : err
+      );
+    }
   }
 
-  await withPreviewRetry(`set cover_image_url for task ${taskId}`, async () => {
-    const { error } = await supabase.from("tasks").update({ cover_image_url: publicUrl }).eq("id", taskId);
-    if (error) {
-      throw new Error(error.message);
-    }
-  });
-  console.info(`[worker] Cover image set for task ${taskId}`);
+  console.warn(`[worker] Could not set cover image for task ${taskId}: no usable source file in 1_Raw.`);
 }
 
 async function syncTaskPreviews(supabase, taskRow) {
@@ -546,12 +602,12 @@ async function syncTaskPreviews(supabase, taskRow) {
 
   const chunks = await buildTimestampBracketsFromDir(rawDir);
   const previewPreference = normalizePreviewPreference(taskRow.preview_preference);
-  const existingItems = parsePreviewItems(taskRow.gallery_previews);
-  const existingByChunk = new Map(existingItems.map((item) => [item.chunkIndex, item]));
+  const forceGalleryPreviewDbSync = galleryPreviewsNeedsDbSync(taskRow.gallery_previews);
   const nextItems = [];
   let processedCount = 0;
   let skippedCount = 0;
   let failedCount = 0;
+  let reusedFromStorageCount = 0;
 
   await ensureCoverImageOnce(supabase, taskRow, rawDir, chunks).catch((err) => {
     console.warn(
@@ -570,14 +626,47 @@ async function syncTaskPreviews(supabase, taskRow) {
       skippedCount += 1;
       continue;
     }
-    const existing = existingByChunk.get(chunkIndex);
-    if (existing && existing.firstFilename === firstFilename && existing.previewUrl) {
-      nextItems.push(existing);
-      processedCount += 1;
-      continue;
-    }
+
+    const storagePath = buildPreviewStoragePath(localFolderName, firstFilename, chunkIndex);
 
     try {
+      if (!forceGalleryPreviewDbSync) {
+        const existingItems = parsePreviewItems(taskRow.gallery_previews);
+        const existing = existingItems.find((item) => item.chunkIndex === chunkIndex);
+        if (
+          existing &&
+          existing.firstFilename === firstFilename &&
+          existing.storagePath === storagePath &&
+          existing.previewUrl
+        ) {
+          const previewUrl = getPreviewPublicUrl(supabase, storagePath) || existing.previewUrl;
+          nextItems.push({
+            chunkIndex,
+            firstFilename,
+            previewUrl,
+            storagePath,
+          });
+          processedCount += 1;
+          continue;
+        }
+      }
+
+      const previewAlreadyInStorage = await previewObjectExistsInStorage(supabase, storagePath);
+      if (previewAlreadyInStorage) {
+        const previewUrl = getPreviewPublicUrl(supabase, storagePath);
+        if (previewUrl) {
+          nextItems.push({
+            chunkIndex,
+            firstFilename,
+            previewUrl,
+            storagePath,
+          });
+          processedCount += 1;
+          reusedFromStorageCount += 1;
+          continue;
+        }
+      }
+
       const sourcePath = path.join(rawDir, firstFilename);
       const previewBuffer = await withPreviewRetry(`render preview ${localFolderName}/${firstFilename}`, async () =>
         buildPreviewBuffer(sourcePath)
@@ -588,6 +677,9 @@ async function syncTaskPreviews(supabase, taskRow) {
         firstFilename,
         buffer: previewBuffer,
       });
+      if (!uploaded.previewUrl) {
+        throw new Error(`Missing public URL for uploaded preview ${uploaded.storagePath}`);
+      }
       nextItems.push({
         chunkIndex,
         firstFilename,
@@ -605,57 +697,66 @@ async function syncTaskPreviews(supabase, taskRow) {
     }
   }
 
-  await withPreviewRetry(`persist gallery_previews for task ${taskRow.id}`, async () => {
-    const { error } = await supabase
-      .from("tasks")
-      .update({
-        gallery_previews: {
-          updated_at: new Date().toISOString(),
-          bracket_size: chunks[0]?.length ?? null,
-          items: nextItems,
-        },
-      })
-      .eq("id", taskRow.id);
-    if (error) {
-      throw new Error(error.message);
-    }
-  });
+  nextItems.sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+  const rawImageCount = readNaturallySortedImageFiles(rawDir).length;
+  if (nextItems.length === 0 && rawImageCount > 0 && chunks.length === 0) {
+    console.warn(
+      `[worker] Skipping gallery_previews persist for task ${taskRow.id}: ${rawImageCount} image(s) in 1_Raw but bracket grouping returned 0 chunks.`
+    );
+    return;
+  }
+
+  await persistGalleryPreviews(supabase, taskRow.id, chunks, nextItems);
   console.info(
-    `[worker] Folder [${localFolderName}] complete. Processed: ${processedCount} | Skipped: ${skippedCount} | Failed: ${failedCount}`
+    `[worker] Folder [${localFolderName}] complete. Processed: ${processedCount} | Skipped: ${skippedCount} | Failed: ${failedCount} | ReusedFromStorage: ${reusedFromStorageCount} | DbItems: ${nextItems.length}`
   );
 }
 
 async function syncPreviewsForLocalFolder(localFolderName) {
-  const supabase = getSupabaseClient();
-  const { data, error } = await supabase
-    .from("tasks")
-    .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference")
-    .eq("local_folder_name", localFolderName)
-    .order("id", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error) {
-    console.error(`[worker] Failed to find task for folder ${localFolderName}:`, error.message);
+  if (previewSyncInFlight.has(localFolderName)) {
+    previewSyncPending.add(localFolderName);
     return;
   }
-  if (!data) {
-    return;
+
+  previewSyncInFlight.add(localFolderName);
+  try {
+    do {
+      previewSyncPending.delete(localFolderName);
+
+      const supabase = getSupabaseClient();
+      const { data, error } = await supabase
+        .from("tasks")
+        .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference")
+        .eq("local_folder_name", localFolderName)
+        .order("id", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) {
+        console.error(`[worker] Failed to find task for folder ${localFolderName}:`, error.message);
+        return;
+      }
+      if (!data) {
+        return;
+      }
+      await syncTaskPreviews(supabase, data);
+    } while (previewSyncPending.has(localFolderName));
+  } finally {
+    previewSyncInFlight.delete(localFolderName);
   }
-  await syncTaskPreviews(supabase, data);
 }
 
 async function processInitialPreviewSync(supabase) {
   console.info("[worker] Starting initial full preview sync...");
   let offset = 0;
   const pageSize = 200;
-  let processed = 0;
+  const folderNames = new Set();
   let skipped = 0;
-  let failed = 0;
 
   while (true) {
     const { data, error } = await supabase
       .from("tasks")
-      .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference")
+      .select("local_folder_name")
       .not("local_folder_name", "is", null)
       .order("id", { ascending: true })
       .range(offset, offset + pageSize - 1);
@@ -678,16 +779,7 @@ async function processInitialPreviewSync(supabase) {
         skipped += 1;
         continue;
       }
-      try {
-        await syncTaskPreviews(supabase, row);
-        processed += 1;
-      } catch (error) {
-        failed += 1;
-        console.error(
-          `[worker] Initial preview sync failed for task ${row.id} (${localFolderName}):`,
-          error instanceof Error ? error.message : error
-        );
-      }
+      folderNames.add(localFolderName);
     }
 
     offset += rows.length;
@@ -696,8 +788,23 @@ async function processInitialPreviewSync(supabase) {
     }
   }
 
+  let processed = 0;
+  let failed = 0;
+  for (const localFolderName of folderNames) {
+    try {
+      await syncPreviewsForLocalFolder(localFolderName);
+      processed += 1;
+    } catch (error) {
+      failed += 1;
+      console.error(
+        `[worker] Initial preview sync failed for folder ${localFolderName}:`,
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+
   console.info(
-    `[worker] Initial full preview sync finished. processed=${processed}, skipped=${skipped}, failed=${failed}`
+    `[worker] Initial full preview sync finished. folders=${folderNames.size}, processed=${processed}, skipped=${skipped}, failed=${failed}`
   );
 }
 

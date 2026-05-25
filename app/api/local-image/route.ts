@@ -18,6 +18,14 @@ const EXT_TO_CONTENT_TYPE: Record<string, string> = {
   ".gif": "image/gif",
 };
 
+const COMFY_DEFAULT_ROOT = process.env.COMFYUI_PATH?.trim() || "C:/ComfyUI_windows_portable/ComfyUI";
+const COMFY_OUTPUT_DIR = process.env.COMFYUI_OUTPUT_DIR?.trim() || path.join(COMFY_DEFAULT_ROOT, "output");
+
+function isPathUnderRoot(resolvedPath: string, rootPath: string): boolean {
+  const normalizedRoot = path.resolve(rootPath);
+  return resolvedPath.toLowerCase().startsWith(normalizedRoot.toLowerCase() + path.sep);
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const rawPath = searchParams.get("path")?.trim() ?? searchParams.get("filepath")?.trim() ?? "";
@@ -26,8 +34,8 @@ export async function GET(request: Request) {
   }
 
   const absolutePath = path.resolve(rawPath);
-  const rootResolved = path.resolve(PHOTOS_ROOT);
-  if (!absolutePath.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
+  const allowedRoots = [path.resolve(PHOTOS_ROOT), path.resolve(COMFY_OUTPUT_DIR)];
+  if (!allowedRoots.some((root) => isPathUnderRoot(absolutePath, root))) {
     return NextResponse.json({ error: "Access denied." }, { status: 403 });
   }
 

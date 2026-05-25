@@ -12,6 +12,7 @@ import { PHOTOS_ROOT } from "@/lib/photosPaths";
 const execAsync = promisify(exec);
 
 const SNS_HDR_PATH = '"C:\\Program Files\\SNS-HDR Pro 2\\SNS-HDR.exe"';
+const SNS_HDR_PRESET = "Hero_Interior";
 const COMFY_TRIGGER_TOKENS = (process.env.COMFYUI_TRIGGER_TOKENS ?? "_sqi")
   .split(",")
   .map((token) => token.trim().toLowerCase())
@@ -52,6 +53,24 @@ function isImageFile(fileName: string): boolean {
 
 function quoteArg(p: string): string {
   return `"${p.replace(/"/g, '\\"')}"`;
+}
+
+let exiftoolPathPromise: Promise<string> | null = null;
+
+async function getExiftoolPath(): Promise<string> {
+  if (!exiftoolPathPromise) {
+    exiftoolPathPromise = import("exiftool-vendored").then(async (module) => {
+      const resolved = module.exiftoolPath ?? module.default?.exiftoolPath;
+      if (typeof resolved === "function") {
+        return resolved();
+      }
+      if (typeof resolved === "string" && resolved.trim()) {
+        return resolved;
+      }
+      throw new Error("exiftool-vendored did not expose exiftoolPath.");
+    });
+  }
+  return exiftoolPathPromise;
 }
 
 function createSupabase(): SupabaseClient | null {
@@ -345,9 +364,29 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
       const outBaseName = mergedOutputFileName(firstName, bracketIndex, totalBrackets);
       const outFile = path.join(mergedDir, outBaseName);
 
-      const parts = [SNS_HDR_PATH, "-interior", ...inputs.map(quoteArg), "-o", quoteArg(outFile)];
+      const parts = [
+        SNS_HDR_PATH,
+        ...inputs.map(quoteArg),
+        "-preset",
+        quoteArg(SNS_HDR_PRESET),
+        "-o",
+        quoteArg(outFile),
+      ];
       const cmd = parts.join(" ");
       await execAsync(cmd, { windowsHide: true });
+
+      const exiftoolPath = await getExiftoolPath();
+      const restoreExifCmd = [
+        quoteArg(exiftoolPath),
+        "-TagsFromFile",
+        quoteArg(inputs[0]!),
+        "-all:all",
+        "-overwrite_original",
+        quoteArg(outFile),
+      ].join(" ");
+      await execAsync(restoreExifCmd, { windowsHide: true });
+      console.log("[processingEngine] Restored EXIF data from original bracket");
+
       mergedOutputs.push(outFile);
       mergedMeta.push({ outBaseName, firstName, bracketIndex });
       try {

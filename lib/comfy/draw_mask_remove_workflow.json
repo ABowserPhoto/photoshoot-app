@@ -1,0 +1,53 @@
+{
+  "1": {
+    "inputs": {
+      "image": ""
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "2": {
+    "inputs": {
+      "image": "",
+      "channel": "red"
+    },
+    "class_type": "LoadImageMask",
+    "_meta": {
+      "title": "Load Image (as Mask)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "mask_threshold": 250,
+      "gaussblur_radius": 8,
+      "invert_mask": false,
+      "images": [
+        "1",
+        0
+      ],
+      "masks": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "LamaRemover",
+    "_meta": {
+      "title": "Big lama Remover"
+    }
+  },
+  "4": {
+    "inputs": {
+      "filename_prefix": "wf",
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

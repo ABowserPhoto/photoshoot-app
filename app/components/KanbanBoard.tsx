@@ -499,6 +499,8 @@ export default function KanbanBoard({
   const [mergePromptProcessing, setMergePromptProcessing] = useState(false);
   const [mergePromptError, setMergePromptError] = useState<string | null>(null);
   const [reviewMergedTask, setReviewMergedTask] = useState<BoardTask | null>(null);
+  const [regeneratingPreviewTaskId, setRegeneratingPreviewTaskId] = useState<string | null>(null);
+  const [previewRegenToast, setPreviewRegenToast] = useState<string | null>(null);
   const boardRef = useRef(board);
   const archivedTasksRef = useRef(archivedTasks);
   useEffect(() => {
@@ -519,6 +521,18 @@ export default function KanbanBoard({
       window.clearTimeout(timer);
     };
   }, [celebrationToast]);
+
+  useEffect(() => {
+    if (!previewRegenToast) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setPreviewRegenToast(null);
+    }, 4000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [previewRegenToast]);
 
   const dailyCompletionCount = useMemo(
     () => countTodayCompletions(board, archivedTasks),
@@ -1055,9 +1069,46 @@ export default function KanbanBoard({
     setStatusMessage(null);
   };
 
+  const handleRegeneratePreviews = async (task: BoardTask) => {
+    if (!task.id.trim()) {
+      return;
+    }
+    setRegeneratingPreviewTaskId(task.id);
+    setPreviewRegenToast(null);
+    try {
+      const res = await fetch("/api/gallery/regenerate-previews", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId: task.id }),
+      });
+      const data = (await res.json().catch(() => null)) as { error?: unknown; success?: boolean } | null;
+      if (!res.ok) {
+        setStatusMessage(toErrorString(data?.error, "Failed to queue preview regeneration."));
+        return;
+      }
+      setPreviewRegenToast("Previews queued for regeneration");
+      setStatusMessage(null);
+    } catch {
+      setStatusMessage("Network error while queueing preview regeneration.");
+    } finally {
+      setRegeneratingPreviewTaskId(null);
+    }
+  };
+
   return (
     <div className="relative w-full">
       {!showArchived ? <DailyStreakBadge count={dailyCompletionCount} /> : null}
+      {previewRegenToast ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed left-1/2 top-6 z-[100] w-full max-w-md -translate-x-1/2 px-4"
+        >
+          <p className="rounded-xl border border-blue-400/50 bg-blue-100/95 px-5 py-3 text-center text-sm font-semibold text-blue-900 shadow-2xl dark:border-blue-500/40 dark:bg-blue-950/95 dark:text-blue-100">
+            {previewRegenToast}
+          </p>
+        </div>
+      ) : null}
       {celebrationToast ? (
         <div
           role="status"
@@ -1177,6 +1228,29 @@ export default function KanbanBoard({
                             <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
                               Total Edit Time: {formatDuration(task.totalEditingSeconds)}
                             </p>
+                          ) : null}
+                          {task.localFolderName?.trim() ? (
+                            <button
+                              type="button"
+                              disabled={regeneratingPreviewTaskId === task.id}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleRegeneratePreviews(task);
+                              }}
+                              className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-xs font-medium text-zinc-600 hover:border-zinc-300 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
+                            >
+                              {regeneratingPreviewTaskId === task.id ? (
+                                <>
+                                  <span
+                                    className="inline-block size-3 animate-spin rounded-full border-2 border-zinc-500 border-t-transparent dark:border-zinc-300 dark:border-t-transparent"
+                                    aria-hidden
+                                  />
+                                  Regenerating…
+                                </>
+                              ) : (
+                                "Regenerate Previews"
+                              )}
+                            </button>
                           ) : null}
                           {column.id === "completed" ? (
                             <button

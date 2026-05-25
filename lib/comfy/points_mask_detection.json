@@ -1,0 +1,99 @@
+{
+  "1": {
+    "inputs": {
+      "image": ""
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "3": {
+    "inputs": {
+      "filename_prefix": "wfMask",
+      "images": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "4": {
+    "inputs": {
+      "confidence_threshold": 0.8,
+      "pipeline_mode": "points_only",
+      "detect_all": true,
+      "max_detections": 50,
+      "instances": false,
+      "crop_factor": 1.5,
+      "min_size": 100,
+      "fill_holes": true,
+      "text_prompt": "",
+      "sam3_model": [
+        "5",
+        0
+      ],
+      "image": [
+        "1",
+        0
+      ],
+      "sam3_selectors_pipe": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "TBGSam3Segmentation",
+    "_meta": {
+      "title": "TBG SAM3 Segmentation"
+    }
+  },
+  "5": {
+    "inputs": {
+      "device": "cuda"
+    },
+    "class_type": "TBGLoadSAM3Model",
+    "_meta": {
+      "title": "TBG SAM3 Model Loader"
+    }
+  },
+  "6": {
+    "inputs": {
+      "positive_points": "[]",
+      "negative_points": "[]",
+      "positive_boxes": "[]",
+      "negative_boxes": "[]",
+      "canvas": ""
+    },
+    "class_type": "TBGSAM3PromptCollector",
+    "_meta": {
+      "title": "TBG SAM3 Selector"
+    }
+  },
+  "7": {
+    "inputs": {
+      "mask": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "InvertMask",
+    "_meta": {
+      "title": "InvertMask"
+    }
+  },
+  "9": {
+    "inputs": {
+      "mask": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "MaskToImage",
+    "_meta": {
+      "title": "Convert Mask to Image"
+    }
+  }
+}

@@ -4,12 +4,11 @@ type StudioTaskPauseRow = {
   id: string;
   elapsed_seconds: number | null;
   started_at: string | null;
-  file_path: string | null;
 };
 
 /**
  * Pause a studio task when the planner page is not mounted (global widget).
- * Mirrors planner page pause behavior (prompt for path, persist elapsed).
+ * Persists elapsed time; pause reason is left null when the modal cannot be shown.
  */
 export async function pauseStudioTaskFromRemote(taskId: string): Promise<void> {
   if (!supabase || taskId.startsWith("temp-")) {
@@ -17,7 +16,7 @@ export async function pauseStudioTaskFromRemote(taskId: string): Promise<void> {
   }
   const { data: row, error: fetchError } = await supabase
     .from("studio_tasks")
-    .select("id, elapsed_seconds, started_at, file_path, status")
+    .select("id, elapsed_seconds, started_at, status")
     .eq("id", taskId)
     .maybeSingle();
 
@@ -37,16 +36,12 @@ export async function pauseStudioTaskFromRemote(taskId: string): Promise<void> {
   const elapsed =
     startedAtSec !== null ? baseElapsed + Math.max(0, nowSec - startedAtSec) : baseElapsed;
 
-  const pathInput = typeof window !== "undefined"
-    ? window.prompt("Paste local file path for current working files:")?.trim() ?? ""
-    : "";
-
   const { error: updateError } = await supabase
     .from("studio_tasks")
     .update({
       started_at: null,
       elapsed_seconds: elapsed,
-      file_path: pathInput || r.file_path || null,
+      pause_reason: "Paused from timer widget",
     })
     .eq("id", taskId);
 

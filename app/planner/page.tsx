@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { Pause, Play } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, Suspense } from "react";
+import { useEffect, useMemo, useRef, useState, Suspense, useCallback } from "react";
 import PlannerStats from "@/app/components/PlannerStats";
 import GlobalNavButtons from "@/app/components/GlobalNavButtons";
 import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
@@ -34,6 +34,15 @@ import PlannerTaskModal, {
   type PlannerTaskLabel,
   type PlannerTemplateOption,
 } from "./components/PlannerTaskModal";
+import PlannerCompletionPathModal from "./components/PlannerCompletionPathModal";
+import PlannerPauseTaskModal from "./components/PlannerPauseTaskModal";
+
+type MoveTaskOptions = {
+  startNowFromMaster?: boolean;
+  subtasks?: PlannerSubTask[];
+  assignedUsers?: PlannerAssignee[];
+  filePath?: string;
+};
 
 type PlannerStatusKey = "master" | "planning" | "processing" | "completed";
 type PlannerColumnKey = Exclude<PlannerStatusKey, "master">;
@@ -54,6 +63,7 @@ type PlannerTask = {
   startedAtSec: number | null;
   elapsedSeconds: number;
   isPaused: boolean;
+  pauseNotes: string;
   filePath: string;
   totalTimeLabel: string;
   completedAt: string | null;
@@ -75,6 +85,7 @@ type StudioTaskRow = {
   description: string | null;
   status: string | null;
   file_path: string | null;
+  pause_reason: string | null;
   elapsed_seconds: number | null;
   started_at: string | null;
   total_time_label: string | null;
@@ -285,6 +296,7 @@ function mapRowToTask(row: StudioTaskRow): PlannerTask {
     startedAtSec,
     elapsedSeconds,
     isPaused,
+    pauseNotes: row.pause_reason?.trim() ?? "",
     filePath: row.file_path ?? "",
     totalTimeLabel: row.total_time_label ?? "",
     completedAt: row.completed_at ?? null,
@@ -311,6 +323,16 @@ export default function PlannerPage() {
   const [loadingTasks, setLoadingTasks] = useState(true);
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
   const [completionMessage, setCompletionMessage] = useState<string | null>(null);
+  const [pathModalTaskId, setPathModalTaskId] = useState<string | null>(null);
+  const [pendingCompletionOptions, setPendingCompletionOptions] = useState<
+    Omit<MoveTaskOptions, "filePath"> | undefined
+  >(undefined);
+  const [filePathInputValue, setFilePathInputValue] = useState("");
+  const [isSavingCompletionPath, setIsSavingCompletionPath] = useState(false);
+  const [pausingTaskId, setPausingTaskId] = useState<string | null>(null);
+  const [pauseNotes, setPauseNotes] = useState("");
+  const [pauseFilePath, setPauseFilePath] = useState("");
+  const [isSavingPause, setIsSavingPause] = useState(false);
   const [plannerUserId, setPlannerUserId] = useState<string | null>(null);
   const [profileAssignees, setProfileAssignees] = useState<PlannerAssignee[]>([]);
   const [masterListSubtaskDraft, setMasterListSubtaskDraft] = useState<Record<string, string>>({});
@@ -536,6 +558,7 @@ export default function PlannerPage() {
       description: string;
       status: PlannerStatusKey;
       file_path: string | null;
+      pause_reason: string | null;
       elapsed_seconds: number;
       started_at: string | null;
       total_time_label: string | null;
@@ -600,16 +623,16 @@ export default function PlannerPage() {
   const moveTaskToStatus = (
     taskId: string,
     destinationStatus: PlannerStatusKey,
-    options?: { startNowFromMaster?: boolean; subtasks?: PlannerSubTask[]; assignedUsers?: PlannerAssignee[] }
-  ) => {
+    options?: MoveTaskOptions
+  ): Promise<void> => {
     const nowSec = clockSec;
     const location = taskLookup.get(taskId);
     if (!location) {
-      return;
+      return Promise.resolve();
     }
     const sourceStatus = location.column;
     if (sourceStatus === destinationStatus) {
-      return;
+      return Promise.resolve();
     }
 
     let nextTask: PlannerTask = { ...location.task, status: destinationStatus };
@@ -650,14 +673,14 @@ export default function PlannerPage() {
     }
 
     if (destinationStatus === "completed") {
-      const pathInput = window.prompt("Paste final file path for this completed task:")?.trim() ?? "";
       const finalElapsed = getElapsedAt(nextTask, nowSec);
+      const resolvedPath = (options?.filePath ?? nextTask.filePath).trim();
       nextTask = {
         ...nextTask,
         elapsedSeconds: finalElapsed,
         startedAtSec: null,
         isPaused: false,
-        filePath: pathInput || nextTask.filePath,
+        filePath: resolvedPath || nextTask.filePath,
         totalTimeLabel: formatDuration(finalElapsed),
         completedAt: new Date().toISOString(),
       };
@@ -695,7 +718,7 @@ export default function PlannerPage() {
       return nextBoard;
     });
 
-    void (async () => {
+    return (async () => {
       try {
         const statusPayload: Parameters<typeof updateTaskInDb>[1] = {
           status: nextTask.status,
@@ -754,8 +777,46 @@ export default function PlannerPage() {
         }
         setCompletionMessage(null);
         setPersistenceError(error instanceof Error ? error.message : "Could not update planner task.");
+        throw error;
       }
     })();
+  };
+
+  const closeCompletionPathModal = () => {
+    setPathModalTaskId(null);
+    setPendingCompletionOptions(undefined);
+    setFilePathInputValue("");
+    setIsSavingCompletionPath(false);
+  };
+
+  const requestTaskCompletion = (taskId: string, options?: Omit<MoveTaskOptions, "filePath">) => {
+    const location = taskLookup.get(taskId);
+    if (!location || location.column === "completed") {
+      return;
+    }
+    setPathModalTaskId(taskId);
+    setPendingCompletionOptions(options);
+    setFilePathInputValue(location.task.filePath ?? "");
+  };
+
+  const handleSaveCompletionPath = async () => {
+    if (!pathModalTaskId || isSavingCompletionPath) {
+      return;
+    }
+
+    const taskId = pathModalTaskId;
+    const saveOptions: MoveTaskOptions = {
+      ...pendingCompletionOptions,
+      filePath: filePathInputValue.trim(),
+    };
+
+    setIsSavingCompletionPath(true);
+    try {
+      await moveTaskToStatus(taskId, "completed", saveOptions);
+      closeCompletionPathModal();
+    } catch {
+      setIsSavingCompletionPath(false);
+    }
   };
 
   const clearDragState = () => {
@@ -793,6 +854,15 @@ export default function PlannerPage() {
       subtasksPatch = loc.task.subtasks.map((s) => ({ ...s, isCompleted: true }));
     }
 
+    if (destinationColumn === "completed") {
+      requestTaskCompletion(
+        draggingTaskId,
+        subtasksPatch ? { subtasks: subtasksPatch } : undefined
+      );
+      clearDragState();
+      return;
+    }
+
     moveTaskToStatus(
       draggingTaskId,
       destinationColumn,
@@ -823,6 +893,7 @@ export default function PlannerPage() {
       startedAtSec: null,
       elapsedSeconds: 0,
       isPaused: false,
+      pauseNotes: "",
       filePath: payload.filePath.trim(),
       totalTimeLabel: "",
       completedAt: null,
@@ -1244,7 +1315,7 @@ export default function PlannerPage() {
       if (task.status === "completed") {
         return;
       }
-      moveTaskToStatus(task.id, "completed");
+      requestTaskCompletion(task.id);
       return;
     }
     if (!checked) {
@@ -1257,7 +1328,7 @@ export default function PlannerPage() {
       persistTaskSubtasks(task.id, next);
       return;
     }
-    moveTaskToStatus(task.id, "completed", { subtasks: next });
+    requestTaskCompletion(task.id, { subtasks: next });
   };
 
   const onMasterListSubtaskToggle = (task: PlannerTask, subtask: PlannerSubTask, checked: boolean) => {
@@ -1377,14 +1448,42 @@ export default function PlannerPage() {
     beginProcessingWithPrepareChecked(task.id);
   };
 
-  const pauseTask = (taskId: string) => {
+  const requestPauseTask = useCallback(
+    (taskId: string) => {
+      const latestTask = taskLookup.get(taskId)?.task;
+      if (!latestTask || latestTask.status !== "processing" || latestTask.isPaused) {
+        return;
+      }
+      setPausingTaskId(taskId);
+      setPauseNotes(latestTask.pauseNotes ?? "");
+      setPauseFilePath(latestTask.filePath ?? "");
+    },
+    [taskLookup]
+  );
+
+  const closePauseModal = () => {
+    setPausingTaskId(null);
+    setPauseNotes("");
+    setPauseFilePath("");
+    setIsSavingPause(false);
+  };
+
+  const handleConfirmPause = async () => {
+    if (!pausingTaskId || isSavingPause) {
+      return;
+    }
+
+    const taskId = pausingTaskId;
     const nowSec = Math.floor(Date.now() / 1000);
     const priorBoard = board;
     const latestTask = taskLookup.get(taskId)?.task;
     if (!latestTask || latestTask.status !== "processing" || latestTask.isPaused) {
+      closePauseModal();
       return;
     }
-    const pathInput = window.prompt("Paste local file path for current working files:")?.trim() ?? "";
+
+    const trimmedNotes = pauseNotes.trim();
+    const trimmedFilePath = pauseFilePath.trim();
     const elapsed = getElapsedAt(latestTask, nowSec);
 
     updateSingleTask(taskId, (task) => ({
@@ -1392,22 +1491,25 @@ export default function PlannerPage() {
       elapsedSeconds: elapsed,
       startedAtSec: null,
       isPaused: true,
-      filePath: pathInput || task.filePath,
+      pauseNotes: trimmedNotes,
+      filePath: trimmedFilePath || task.filePath,
     }));
 
-    void (async () => {
-      try {
-        await updateTaskInDb(taskId, {
-          started_at: null,
-          elapsed_seconds: elapsed,
-          file_path: pathInput || latestTask.filePath || null,
-        });
-        setPersistenceError(null);
-      } catch (error) {
-        setBoard(priorBoard);
-        setPersistenceError(error instanceof Error ? error.message : "Could not pause planner task.");
-      }
-    })();
+    setIsSavingPause(true);
+    try {
+      await updateTaskInDb(taskId, {
+        started_at: null,
+        elapsed_seconds: elapsed,
+        pause_reason: trimmedNotes || null,
+        file_path: trimmedFilePath || latestTask.filePath || null,
+      });
+      setPersistenceError(null);
+      closePauseModal();
+    } catch (error) {
+      setBoard(priorBoard);
+      setPersistenceError(error instanceof Error ? error.message : "Could not pause planner task.");
+      setIsSavingPause(false);
+    }
   };
 
   const resumeTask = (taskId: string) => {
@@ -1454,11 +1556,11 @@ export default function PlannerPage() {
     if (!globalPauseHandlerRef) {
       return;
     }
-    globalPauseHandlerRef.current = pauseTask;
+    globalPauseHandlerRef.current = requestPauseTask;
     return () => {
       globalPauseHandlerRef.current = null;
     };
-  }, [globalPauseHandlerRef, pauseTask]);
+  }, [globalPauseHandlerRef, requestPauseTask]);
 
   useEffect(() => {
     if (!setGlobalActiveTimer) {
@@ -1769,7 +1871,7 @@ export default function PlannerPage() {
                         type="button"
                         onClick={(event) => {
                           event.stopPropagation();
-                          pauseTask(task.id);
+                          requestPauseTask(task.id);
                         }}
                         className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-amber-200/90 px-3 text-xs font-semibold text-amber-900 opacity-0 transition group-hover:opacity-100 hover:border-amber-400 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-100 dark:hover:border-amber-600 dark:hover:bg-amber-950/40"
                         aria-label="Pause time tracking"
@@ -1898,9 +2000,19 @@ export default function PlannerPage() {
                               </div>
                               <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{task.description}</p>
                               {column.id === "processing" && task.isPaused ? (
-                                <span className="mt-2 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-200">
-                                  Paused
-                                </span>
+                                <div className="mt-2 space-y-1">
+                                  <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-200">
+                                    Paused
+                                  </span>
+                                  {task.pauseNotes ? (
+                                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{task.pauseNotes}</p>
+                                  ) : null}
+                                  {task.filePath ? (
+                                    <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                                      Link: {task.filePath}
+                                    </p>
+                                  ) : null}
+                                </div>
                               ) : null}
                               {column.id === "processing" || column.id === "completed" ? (
                                 <p className="mt-2 text-[11px] font-medium text-zinc-600 dark:text-zinc-300">
@@ -1949,6 +2061,24 @@ export default function PlannerPage() {
           </div>
         </div>
       </main>
+      <PlannerPauseTaskModal
+        isOpen={pausingTaskId !== null}
+        pauseNotes={pauseNotes}
+        pauseFilePath={pauseFilePath}
+        isSaving={isSavingPause}
+        onPauseNotesChange={setPauseNotes}
+        onPauseFilePathChange={setPauseFilePath}
+        onConfirmPause={() => void handleConfirmPause()}
+        onCancel={closePauseModal}
+      />
+      <PlannerCompletionPathModal
+        isOpen={pathModalTaskId !== null}
+        filePath={filePathInputValue}
+        isSaving={isSavingCompletionPath}
+        onFilePathChange={setFilePathInputValue}
+        onSavePath={() => void handleSaveCompletionPath()}
+        onCancel={closeCompletionPathModal}
+      />
       <PlannerTaskModal
         key={modalKey}
         task={modalTaskPayload}
@@ -1961,7 +2091,7 @@ export default function PlannerPage() {
         onCreate={handleCreateTask}
         onSaveAsTemplate={handleSaveAsTemplate}
         onDelete={deleteTask}
-        onPauseTask={pauseTask}
+        onPauseTask={requestPauseTask}
         onResumeTask={resumeTask}
       />
     </div>
