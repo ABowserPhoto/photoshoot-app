@@ -4,7 +4,7 @@
  * prefer NEXT_PUBLIC_APP_URL or X-Forwarded-* when present.
  */
 export function resolvePublicOrigin(request: Request): string {
-  const fromEnv = process.env.NEXT_PUBLIC_APP_URL?.trim();
+  const fromEnv = process.env.NEXT_PUBLIC_BASE_URL?.trim() || process.env.NEXT_PUBLIC_APP_URL?.trim();
   if (fromEnv) {
     return fromEnv.replace(/\/$/, "");
   }

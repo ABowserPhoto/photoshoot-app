@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { resolveSourceImagePath } from "@/lib/comfy/resolveSourceImagePath";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,14 +67,18 @@ export async function POST(request: Request) {
     promptNode.inputs.text = prompt;
     samplerNode.inputs.seed = random15DigitInteger();
 
-    const response = await fetch(`${COMFY_BASE_URL.replace(/\/$/, "")}/prompt`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: workflow,
-        client_id: randomUUID(),
-      }),
-    });
+    const response = await fetchWithTimeout(
+      `${COMFY_BASE_URL.replace(/\/$/, "")}/prompt`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: workflow,
+          client_id: randomUUID(),
+        }),
+      },
+      15_000
+    );
     const payload = (await response.json().catch(() => null)) as
       | {
           prompt_id?: string;

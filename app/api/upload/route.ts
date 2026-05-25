@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
+import { fetchWithTimeout, toFetchErrorMessage } from "@/lib/server/fetchWithTimeout";
 
 export const runtime = "nodejs";
 
@@ -389,12 +390,23 @@ export async function POST(request: Request) {
     };
 
     console.log("ZAPIER PAYLOAD:", zapierPayload);
-
-    const webhookResponse = await fetch("https://hooks.zapier.com/hooks/catch/13609476/uv3pu5f/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(zapierPayload),
-    });
+    let webhookResponse: Response;
+    try {
+      webhookResponse = await fetchWithTimeout(
+        "https://hooks.zapier.com/hooks/catch/13609476/uv3pu5f/",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(zapierPayload),
+        },
+        10_000
+      );
+    } catch (error) {
+      return Response.json(
+        { error: toFetchErrorMessage(error, "Webhook request failed") },
+        { status: 502 }
+      );
+    }
 
     if (!webhookResponse.ok) {
       const webhookText = await webhookResponse.text();

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,7 +49,11 @@ export async function GET(request: Request) {
     }
 
     const historyUrl = `${COMFY_BASE_URL.replace(/\/$/, "")}/history/${encodeURIComponent(promptId)}`;
-    const historyResponse = await fetch(historyUrl, { cache: "no-store" });
+    const historyResponse = await fetchWithTimeout(
+      historyUrl,
+      { cache: "no-store" },
+      15_000
+    );
     if (!historyResponse.ok) {
       if (historyResponse.status === 404) {
         return NextResponse.json({ status: "processing" });

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -189,14 +190,18 @@ export async function POST(request: Request) {
       `[generate-mask] task_id=${taskId || "(none)"} source=${sourceImagePath} input=${comfyInputFilename} points=${targetCoords.length} pipeline_mode=${segmentationNode.inputs.pipeline_mode} text_prompt=${samTextPrompt ? `"${samTextPrompt}"` : "(none)"}`
     );
 
-    const response = await fetch(`${COMFY_BASE_URL.replace(/\/$/, "")}/prompt`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: workflow,
-        client_id: randomUUID(),
-      }),
-    });
+    const response = await fetchWithTimeout(
+      `${COMFY_BASE_URL.replace(/\/$/, "")}/prompt`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: workflow,
+          client_id: randomUUID(),
+        }),
+      },
+      20_000
+    );
 
     const responseText = await response.text();
 

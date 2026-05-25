@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import { resolvePublicOrigin } from "@/lib/publicOrigin";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -179,14 +180,18 @@ export async function POST(request: Request) {
       if (hasSqi) {
         sqiAutoTriggerAttempts += 1;
         try {
-          const aiRes = await fetch(`${origin}/api/ai-edit`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              local_folder_name: localFolderName,
-              filename: path.basename(outFile),
-            }),
-          });
+          const aiRes = await fetchWithTimeout(
+            `${origin}/api/ai-edit`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                local_folder_name: localFolderName,
+                filename: path.basename(outFile),
+              }),
+            },
+            20_000
+          );
           const aiPayload = (await aiRes.json().catch(() => null)) as { error?: string } | null;
           if (!aiRes.ok) {
             console.error("[auto-merge] /api/ai-edit failed:", aiRes.status, aiPayload?.error ?? aiPayload);

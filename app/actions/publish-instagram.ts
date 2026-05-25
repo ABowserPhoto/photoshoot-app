@@ -1,7 +1,10 @@
 "use server";
 
+import { fetchWithTimeout, toFetchErrorMessage } from "@/lib/server/fetchWithTimeout";
+
 const GRAPH_VERSION = "v19.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
+const META_FETCH_TIMEOUT_MS = Number(process.env.META_FETCH_TIMEOUT_MS ?? "15000");
 
 type GraphErrorBody = {
   error?: {
@@ -44,17 +47,21 @@ export async function publishToInstagram(
 
   let createRes: Response;
   try {
-    createRes = await fetch(`${GRAPH_BASE}/${igId}/media`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: createParams.toString(),
-      cache: "no-store",
-    });
+    createRes = await fetchWithTimeout(
+      `${GRAPH_BASE}/${igId}/media`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: createParams.toString(),
+        cache: "no-store",
+      },
+      META_FETCH_TIMEOUT_MS
+    );
   } catch (e) {
     console.error("[publish-instagram] create container fetch failed:", e);
     return {
       ok: false,
-      error: "Network error while creating media container.",
+      error: toFetchErrorMessage(e, "Network error while creating media container"),
       step: "create_container",
     };
   }
@@ -96,17 +103,21 @@ export async function publishToInstagram(
 
   let publishRes: Response;
   try {
-    publishRes = await fetch(`${GRAPH_BASE}/${igId}/media_publish`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: publishParams.toString(),
-      cache: "no-store",
-    });
+    publishRes = await fetchWithTimeout(
+      `${GRAPH_BASE}/${igId}/media_publish`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: publishParams.toString(),
+        cache: "no-store",
+      },
+      META_FETCH_TIMEOUT_MS
+    );
   } catch (e) {
     console.error("[publish-instagram] publish fetch failed:", e);
     return {
       ok: false,
-      error: "Network error while publishing media.",
+      error: toFetchErrorMessage(e, "Network error while publishing media"),
       step: "publish",
       details: { creationId },
     };

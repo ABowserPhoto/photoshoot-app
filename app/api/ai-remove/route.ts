@@ -7,6 +7,7 @@ import sharp from "sharp";
 
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import { sanitizeStoragePath } from "@/lib/sanitizeStoragePath.mjs";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -613,14 +614,18 @@ export async function POST(request: Request) {
     const clientId = randomUUID();
     const promptUrl = `${comfyBase.replace(/\/$/, "")}/prompt`;
 
-    const comfyResponse = await fetch(promptUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: workflow,
-        client_id: clientId,
-      }),
-    });
+    const comfyResponse = await fetchWithTimeout(
+      promptUrl,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: workflow,
+          client_id: clientId,
+        }),
+      },
+      20_000
+    );
 
     const comfyPayload = (await comfyResponse.json().catch(() => null)) as
       | {

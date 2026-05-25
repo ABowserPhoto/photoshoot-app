@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { createClient } from "@supabase/supabase-js";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const dynamic = "force-dynamic";
 
 const TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/";
 const PKCE_COOKIE = "tiktok_pkce_verifier";
+const TIKTOK_FETCH_TIMEOUT_MS = Number(process.env.TIKTOK_FETCH_TIMEOUT_MS ?? "30000");
 
 type TokenSuccess = {
   access_token?: string;
@@ -17,7 +19,9 @@ type TokenSuccess = {
 };
 
 function getPublicAppOrigin(request: NextRequest): string {
-  const fromEnv = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "");
+  const fromEnv =
+    process.env.NEXT_PUBLIC_BASE_URL?.trim().replace(/\/$/, "") ||
+    process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "");
   if (fromEnv) {
     return fromEnv;
   }
@@ -127,15 +131,19 @@ export async function GET(request: NextRequest) {
 
   let tokenRes: Response;
   try {
-    tokenRes = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Cache-Control": "no-cache",
+    tokenRes = await fetchWithTimeout(
+      TOKEN_URL,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Cache-Control": "no-cache",
+        },
+        body: body.toString(),
+        cache: "no-store",
       },
-      body: body.toString(),
-      cache: "no-store",
-    });
+      TIKTOK_FETCH_TIMEOUT_MS
+    );
   } catch (e) {
     console.error("[tiktok/oauth] token exchange failed:", e);
     return finish(request, { tiktok_error: "token_exchange_network" });

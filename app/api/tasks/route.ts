@@ -2,17 +2,13 @@ import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 import { redactTaskRowForRole } from "@/lib/tasksRedact";
 import type { TaskRow } from "@/lib/tasksRedact";
 
 export const dynamic = "force-dynamic";
 const TASKS_FETCH_TIMEOUT_MS = Number(process.env.TASKS_FETCH_TIMEOUT_MS ?? "8000");
 let cachedRows: TaskRow[] = [];
-
-function withTimeoutFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const signal = init?.signal ?? AbortSignal.timeout(TASKS_FETCH_TIMEOUT_MS);
-  return fetch(input, { ...init, signal });
-}
 
 export async function GET() {
   const auth = await getAuthRole();
@@ -35,7 +31,7 @@ export async function GET() {
 
   const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     global: {
-      fetch: withTimeoutFetch,
+      fetch: (input, init) => fetchWithTimeout(input, init, TASKS_FETCH_TIMEOUT_MS),
     },
   });
 

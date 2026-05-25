@@ -3,8 +3,10 @@
 import { createClient } from "@supabase/supabase-js";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
+import { fetchWithTimeout, toFetchErrorMessage } from "@/lib/server/fetchWithTimeout";
 
 const INIT_URL = "https://open.tiktokapis.com/v2/post/publish/video/init/";
+const TIKTOK_FETCH_TIMEOUT_MS = Number(process.env.TIKTOK_FETCH_TIMEOUT_MS ?? "30000");
 
 export type PublishToTikTokResult = { ok: true } | { ok: false; error: string; step?: string };
 
@@ -69,10 +71,16 @@ export async function publishToTikTok(
 
   let videoRes: Response;
   try {
-    videoRes = await fetch(url, { cache: "no-store" });
+    videoRes = await fetchWithTimeout(
+      url,
+      {
+        cache: "no-store",
+      },
+      TIKTOK_FETCH_TIMEOUT_MS
+    );
   } catch (e) {
     console.error("[publish-tiktok] fetch video", e);
-    return { ok: false, error: "Could not download video from URL.", step: "fetch_video" };
+    return { ok: false, error: toFetchErrorMessage(e, "Could not download video from URL"), step: "fetch_video" };
   }
 
   if (!videoRes.ok) {
@@ -105,18 +113,22 @@ export async function publishToTikTok(
 
   let initRes: Response;
   try {
-    initRes = await fetch(INIT_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json; charset=UTF-8",
+    initRes = await fetchWithTimeout(
+      INIT_URL,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json; charset=UTF-8",
+        },
+        body: JSON.stringify(initBody),
+        cache: "no-store",
       },
-      body: JSON.stringify(initBody),
-      cache: "no-store",
-    });
+      TIKTOK_FETCH_TIMEOUT_MS
+    );
   } catch (e) {
     console.error("[publish-tiktok] init", e);
-    return { ok: false, error: "Network error during TikTok init.", step: "init" };
+    return { ok: false, error: toFetchErrorMessage(e, "Network error during TikTok init"), step: "init" };
   }
 
   let initJson: InitResponse;
@@ -138,19 +150,27 @@ export async function publishToTikTok(
 
   let putRes: Response;
   try {
-    putRes = await fetch(uploadUrl, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "video/mp4",
-        "Content-Range": `bytes 0-${lastByte}/${size}`,
-        "Content-Length": String(size),
+    putRes = await fetchWithTimeout(
+      uploadUrl,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "video/mp4",
+          "Content-Range": `bytes 0-${lastByte}/${size}`,
+          "Content-Length": String(size),
+        },
+        body: buffer,
+        cache: "no-store",
       },
-      body: buffer,
-      cache: "no-store",
-    });
+      TIKTOK_FETCH_TIMEOUT_MS
+    );
   } catch (e) {
     console.error("[publish-tiktok] upload", e);
-    return { ok: false, error: "Network error during video upload to TikTok.", step: "upload" };
+    return {
+      ok: false,
+      error: toFetchErrorMessage(e, "Network error during video upload to TikTok"),
+      step: "upload",
+    };
   }
 
   if (!putRes.ok) {

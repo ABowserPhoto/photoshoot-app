@@ -9,6 +9,7 @@ import chokidar from "chokidar";
 import sharp from "sharp";
 
 import { buildWatermarkedPreviewFile, assertReadableWatermark } from "../app/api/gallery/previewMagick.mjs";
+import { fetchWithTimeout, toFetchErrorMessage } from "../lib/server/fetchWithTimeout.mjs";
 
 import { buildLocalFolderNameFromTask } from "./localFolderName.mjs";
 import { buildTimestampBracketsFromDir } from "../lib/bracketGrouping.mjs";
@@ -929,18 +930,21 @@ async function processTaskLocally(task) {
   );
 
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-worker-secret": workerSecret,
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-worker-secret": workerSecret,
+        },
+        body: JSON.stringify({
+          taskId: String(task.id),
+          local_folder_name: task.local_folder_name,
+        }),
       },
-      body: JSON.stringify({
-        taskId: String(task.id),
-        local_folder_name: task.local_folder_name,
-      }),
-      signal: AbortSignal.timeout(LOCAL_PROCESS_TIMEOUT_MS),
-    });
+      LOCAL_PROCESS_TIMEOUT_MS
+    );
 
     const payload = await response.json().catch(() => null);
     if (!response.ok || !payload?.success) {
@@ -954,23 +958,9 @@ async function processTaskLocally(task) {
       comfyErrors: Array.isArray(payload?.comfyErrors) ? payload.comfyErrors.map((v) => String(v)) : [],
     };
   } catch (err) {
-    const errMessage = err instanceof Error ? err.message : String(err);
-    const isTimeout =
-      errMessage.includes("UND_ERR_HEADERS_TIMEOUT") ||
-      errMessage.includes("HeadersTimeoutError") ||
-      errMessage.includes("The operation was aborted") ||
-      errMessage.includes("aborted");
-    if (isTimeout) {
-      console.error(
-        `[worker] process-task request timed out after ${LOCAL_PROCESS_TIMEOUT_MS}ms for task ${task.id}:`,
-        err
-      );
-      throw new Error(
-        `Local processing timed out after ${LOCAL_PROCESS_TIMEOUT_MS}ms for task ${task.id}.`
-      );
-    }
-    console.error(`[worker] process-task request failed for task ${task.id}:`, err);
-    throw err instanceof Error ? err : new Error(errMessage);
+    const message = toFetchErrorMessage(err, `[worker] process-task request failed for task ${task.id}`);
+    console.error(message, err);
+    throw err instanceof Error ? err : new Error(message);
   }
 }
 

@@ -2,11 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
+import { RotateCcw, RotateCw } from "lucide-react";
 
 type GalleryItem = {
   chunkIndex: number;
   firstFilename: string;
   previewUrl: string;
+  storagePath: string;
 };
 
 type GalleryResponse = {
@@ -27,6 +29,8 @@ type ProcessResponse = {
   gallerySelectionSaved?: boolean;
   dbWarning?: string | null;
 };
+
+type RotateDirection = "cw" | "ccw";
 
 export default function GalleryPage() {
   const searchParams = useSearchParams();
@@ -49,6 +53,7 @@ export default function GalleryPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [rotatingByChunk, setRotatingByChunk] = useState<Record<number, RotateDirection | undefined>>({});
 
   const selectedCount = selectedChunks.size;
   const selectedIndices = useMemo(
@@ -248,6 +253,54 @@ export default function GalleryPage() {
     }
   }
 
+  async function rotatePreview(item: GalleryItem, direction: RotateDirection) {
+    if (!shootId.trim()) {
+      setErrorMessage("Could not rotate image: missing shootId.");
+      return;
+    }
+    setRotatingByChunk((prev) => ({ ...prev, [item.chunkIndex]: direction }));
+    setErrorMessage(null);
+    try {
+      const response = await fetch("/api/gallery/rotate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          shootId: shootId.trim(),
+          chunkIndex: item.chunkIndex,
+          direction,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { success?: boolean; previewUrl?: string; error?: string }
+        | null;
+      if (!response.ok || !payload?.success) {
+        setErrorMessage(payload?.error ?? `Rotation failed (${response.status}).`);
+        return;
+      }
+      const refreshedUrl =
+        payload.previewUrl?.trim() ||
+        `${item.previewUrl}${item.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      setGallery((prev) =>
+        prev.map((entry) =>
+          entry.chunkIndex === item.chunkIndex
+            ? {
+                ...entry,
+                previewUrl: refreshedUrl,
+              }
+            : entry
+        )
+      );
+    } catch {
+      setErrorMessage("Network error while rotating image.");
+    } finally {
+      setRotatingByChunk((prev) => {
+        const next = { ...prev };
+        delete next[item.chunkIndex];
+        return next;
+      });
+    }
+  }
+
   function StarsRow({
     chunkIndex,
     size = "text-base",
@@ -376,6 +429,8 @@ export default function GalleryPage() {
           <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
             {gridItems.map((item) => {
               const selected = selectedChunks.has(item.chunkIndex);
+              const activeRotateDirection = rotatingByChunk[item.chunkIndex];
+              const isRotatingThisItem = Boolean(activeRotateDirection);
               return (
                 <article
                   key={item.chunkIndex}
@@ -398,23 +453,55 @@ export default function GalleryPage() {
                     <div className="truncate text-[11px] text-zinc-400">{displayFilename(item.firstFilename)}</div>
                     <div className="mt-1 flex items-center justify-between gap-2">
                       <StarsRow chunkIndex={item.chunkIndex} disabled={isSuccess} />
-                      <button
-                        type="button"
-                        disabled={isSuccess}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          toggleChunk(item.chunkIndex);
-                        }}
-                        aria-label={`Szene ${item.chunkIndex + 1} ${selected ? "abwählen" : "auswählen"}`}
-                        aria-disabled={isSuccess}
-                        className={`inline-flex h-5 w-5 items-center justify-center rounded-sm border text-[11px] font-bold disabled:cursor-not-allowed disabled:opacity-60 ${
-                          selected
-                            ? "border-green-400 bg-green-500 text-white"
-                            : "border-zinc-500 bg-zinc-900 text-zinc-300"
-                        }`}
-                      >
-                        {selected ? "✓" : ""}
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={isSuccess || isRotatingThisItem}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void rotatePreview(item, "ccw");
+                          }}
+                          title="Nach links drehen (90°)"
+                          aria-label={`Rotate scene ${item.chunkIndex + 1} left by 90 degrees`}
+                          className="inline-flex h-5 w-5 items-center justify-center rounded-sm border border-zinc-500 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <RotateCcw
+                            className={`h-3 w-3 ${activeRotateDirection === "ccw" ? "animate-spin" : ""}`}
+                          />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isSuccess || isRotatingThisItem}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void rotatePreview(item, "cw");
+                          }}
+                          title="Nach rechts drehen (90°)"
+                          aria-label={`Rotate scene ${item.chunkIndex + 1} right by 90 degrees`}
+                          className="inline-flex h-5 w-5 items-center justify-center rounded-sm border border-zinc-500 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <RotateCw
+                            className={`h-3 w-3 ${activeRotateDirection === "cw" ? "animate-spin" : ""}`}
+                          />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isSuccess}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleChunk(item.chunkIndex);
+                          }}
+                          aria-label={`Szene ${item.chunkIndex + 1} ${selected ? "abwählen" : "auswählen"}`}
+                          aria-disabled={isSuccess}
+                          className={`inline-flex h-5 w-5 items-center justify-center rounded-sm border text-[11px] font-bold disabled:cursor-not-allowed disabled:opacity-60 ${
+                            selected
+                              ? "border-green-400 bg-green-500 text-white"
+                              : "border-zinc-500 bg-zinc-900 text-zinc-300"
+                          }`}
+                        >
+                          {selected ? "✓" : ""}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </article>

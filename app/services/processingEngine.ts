@@ -8,6 +8,7 @@ import sharp from "sharp";
 
 import { buildTimestampBracketsFromDir } from "@/lib/bracketGrouping.mjs";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 const execAsync = promisify(exec);
 
@@ -83,7 +84,11 @@ function createSupabase(): SupabaseClient | null {
 }
 
 function resolveInternalAppOrigin(): string {
-  return process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ?? "http://127.0.0.1:3000";
+  return (
+    process.env.NEXT_PUBLIC_BASE_URL?.trim().replace(/\/$/, "") ??
+    process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ??
+    "http://127.0.0.1:3000"
+  );
 }
 
 function normalizeErrorMessage(value: unknown, fallback: string): string {
@@ -161,11 +166,15 @@ async function triggerComfyLocally(localFolderName: string, mergedFilename: stri
     prompt: workflow,
     client_id: randomUUID(),
   };
-  const comfyResponse = await fetch(COMFY_PROMPT_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(comfyRequestPayload),
-  });
+  const comfyResponse = await fetchWithTimeout(
+    COMFY_PROMPT_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(comfyRequestPayload),
+    },
+    15_000
+  );
   const comfyPayload = (await comfyResponse.json().catch(() => null)) as
     | {
         prompt_id?: string;
@@ -403,24 +412,35 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
 
       const removalTarget = extractRemovalTargetFromFilename(outBaseName);
       if (removalTarget) {
-        const removeRes = await fetch(`${origin}/api/ai-remove`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            imagePath: outFile,
-            removalTarget,
-          }),
-        });
-        const removePayload = (await removeRes.json().catch(() => null)) as { error?: string } | null;
-        if (!removeRes.ok) {
-          console.error(
-            "[processingEngine] /api/ai-remove failed:",
-            removeRes.status,
-            removePayload?.error ?? removePayload
+        try {
+          const removeRes = await fetchWithTimeout(
+            `${origin}/api/ai-remove`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                imagePath: outFile,
+                removalTarget,
+              }),
+            },
+            15_000
           );
-        } else {
-          console.info(
-            `[processingEngine] Queued object removal for ${outBaseName} with target "${removalTarget}".`
+          const removePayload = (await removeRes.json().catch(() => null)) as { error?: string } | null;
+          if (!removeRes.ok) {
+            console.error(
+              "[processingEngine] /api/ai-remove failed:",
+              removeRes.status,
+              removePayload?.error ?? removePayload
+            );
+          } else {
+            console.info(
+              `[processingEngine] Queued object removal for ${outBaseName} with target "${removalTarget}".`
+            );
+          }
+        } catch (error) {
+          console.error(
+            `[processingEngine] /api/ai-remove request failed for ${outBaseName}:`,
+            error instanceof Error ? error.message : error
           );
         }
       }

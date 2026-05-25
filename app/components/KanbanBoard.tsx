@@ -274,6 +274,38 @@ function sortTasksByShootDateAsc(tasks: BoardTask[]): BoardTask[] {
   });
 }
 
+function dedupeTasksById(tasks: BoardTask[]): BoardTask[] {
+  const seen = new Set<string>();
+  const deduped: BoardTask[] = [];
+  for (const task of tasks) {
+    const id = String(task.id);
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    deduped.push(task);
+  }
+  return deduped;
+}
+
+function sanitizeBoardState(board: BoardState): BoardState {
+  const seen = new Set<string>();
+  const next = createEmptyBoard();
+  for (const column of COLUMN_CONFIG) {
+    const filtered: BoardTask[] = [];
+    for (const task of board[column.id]) {
+      const id = String(task.id);
+      if (!id || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      filtered.push(task);
+    }
+    next[column.id] = sortTasksByShootDateAsc(filtered);
+  }
+  return next;
+}
+
 function formatDuration(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds));
   const hours = Math.floor(safe / 3600);
@@ -580,7 +612,7 @@ export default function KanbanBoard({
           for (const task of FALLBACK_TASKS) {
             fallbackBoard[task.status].push(task);
           }
-          setBoard(fallbackBoard);
+          setBoard(sanitizeBoardState(fallbackBoard));
           setArchivedTasks([]);
           setStatusMessage("No tasks found in Supabase. Showing local dummy tasks.");
           setStaleDataBanner(json.meta?.stale ? (json.warning ?? "Showing cached task data.") : null);
@@ -589,13 +621,27 @@ export default function KanbanBoard({
 
         const grouped = createEmptyBoard();
         const archived: BoardTask[] = [];
+        const seenBoardTaskIds = new Set<string>();
+        const seenArchivedTaskIds = new Set<string>();
         for (const row of data as DbTask[]) {
           const normalizedStatus = normalizeStatus(row.status);
           const mappedTask = mapDbTaskToBoardTask(row);
+          const mappedTaskId = String(mappedTask.id);
+          if (!mappedTaskId) {
+            continue;
+          }
 
           if (mappedTask.isArchived) {
+            if (seenArchivedTaskIds.has(mappedTaskId)) {
+              continue;
+            }
+            seenArchivedTaskIds.add(mappedTaskId);
             archived.push(mappedTask);
           } else {
+            if (seenBoardTaskIds.has(mappedTaskId)) {
+              continue;
+            }
+            seenBoardTaskIds.add(mappedTaskId);
             grouped[normalizedStatus].push(mappedTask);
           }
         }
@@ -604,8 +650,8 @@ export default function KanbanBoard({
         grouped[column.id] = sortTasksByShootDateAsc(grouped[column.id]);
       }
 
-        setBoard(grouped);
-        setArchivedTasks(archived);
+        setBoard(sanitizeBoardState(grouped));
+        setArchivedTasks(dedupeTasksById(archived));
         setStaleDataBanner(json.meta?.stale ? (json.warning ?? "Showing cached task data.") : null);
       } catch {
         if (isMounted) {
@@ -663,14 +709,17 @@ export default function KanbanBoard({
       let nextArchived = currentArchived.filter((task) => task.id !== taskId);
 
       if (mappedTask.isArchived) {
-        nextArchived = [mappedTask, ...nextArchived];
+        nextArchived = dedupeTasksById([mappedTask, ...nextArchived]);
       } else {
-        nextBoard[mappedTask.status] = sortTasksByShootDateAsc([...nextBoard[mappedTask.status], mappedTask]);
+        nextBoard[mappedTask.status] = sortTasksByShootDateAsc(
+          dedupeTasksById([...nextBoard[mappedTask.status], mappedTask])
+        );
       }
 
-      boardRef.current = nextBoard;
+      const sanitizedBoard = sanitizeBoardState(nextBoard);
+      boardRef.current = sanitizedBoard;
       archivedTasksRef.current = nextArchived;
-      setBoard(nextBoard);
+      setBoard(sanitizedBoard);
       setArchivedTasks(nextArchived);
     };
 
@@ -762,12 +811,14 @@ export default function KanbanBoard({
 
       setBoard((prev) => {
         const updatedSource = prev[from].filter((row) => row.id !== task.id);
-        const updatedTarget = sortTasksByShootDateAsc([...prev["selection-available"], movedTask]);
-        return {
+        const updatedTarget = sortTasksByShootDateAsc(
+          dedupeTasksById([...prev["selection-available"], movedTask])
+        );
+        return sanitizeBoardState({
           ...prev,
           [from]: updatedSource,
           "selection-available": updatedTarget,
-        };
+        });
       });
       setMergePrompt(null);
       setStatusMessage(null);
@@ -844,12 +895,14 @@ export default function KanbanBoard({
 
       setBoard((prev) => {
         const updatedSource = prev[from].filter((row) => row.id !== task.id);
-        const updatedTarget = sortTasksByShootDateAsc([...prev["selection-available"], movedTask]);
-        return {
+        const updatedTarget = sortTasksByShootDateAsc(
+          dedupeTasksById([...prev["selection-available"], movedTask])
+        );
+        return sanitizeBoardState({
           ...prev,
           [from]: updatedSource,
           "selection-available": updatedTarget,
-        };
+        });
       });
       setMergePrompt(null);
       setStatusMessage(null);
@@ -925,9 +978,11 @@ export default function KanbanBoard({
     const nextBoard: BoardState = {
       ...board,
       [sourceColumn]: board[sourceColumn].filter((task) => task.id !== draggingTaskId),
-      [targetColumn]: sortTasksByShootDateAsc([...board[targetColumn], movedTask]),
+      [targetColumn]: sortTasksByShootDateAsc(
+        dedupeTasksById([...board[targetColumn].filter((task) => task.id !== movedTask.id), movedTask])
+      ),
     };
-    setBoard(nextBoard);
+    setBoard(sanitizeBoardState(nextBoard));
     clearDragState();
 
     if (!supabase) {
@@ -1042,10 +1097,16 @@ export default function KanbanBoard({
     const previousArchived = archivedTasks;
 
     setArchivedTasks((prev) => prev.filter((row) => row.id !== task.id));
-    setBoard((prev) => ({
-      ...prev,
-      "selection-available": [...prev["selection-available"], { ...task, status: "selection-available", isArchived: false }],
-    }));
+    setBoard((prev) => {
+      const sanitizedPrev = sanitizeBoardState(prev);
+      return sanitizeBoardState({
+        ...sanitizedPrev,
+        "selection-available": [
+          ...sanitizedPrev["selection-available"],
+          { ...task, status: "selection-available", isArchived: false },
+        ],
+      });
+    });
 
     if (!supabase) {
       setStatusMessage("Could not restore task: Supabase is not configured.");
@@ -1204,9 +1265,9 @@ export default function KanbanBoard({
                 </div>
 
                 {!isCollapsed ? <div className="flex min-h-[65vh] flex-col gap-2">
-                  {board[column.id].map((task) => (
+                  {board[column.id].map((task, index) => (
                     <article
-                      key={task.id}
+                      key={`${task.id}-${index}`}
                       draggable
                       onDragStart={() => handleDragStart(task.id, column.id)}
                       onClick={() => onTaskClick?.(task)}

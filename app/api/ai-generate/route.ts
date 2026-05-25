@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 
 import { resolveSourceImagePath } from "@/lib/comfy/resolveSourceImagePath";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -123,10 +124,14 @@ async function uploadImageToComfy(buffer: Buffer, filename: string): Promise<str
   formData.append("type", "input");
 
   const uploadUrl = `${COMFY_BASE_URL.replace(/\/$/, "")}/upload/image`;
-  const response = await fetch(uploadUrl, {
-    method: "POST",
-    body: formData,
-  });
+  const response = await fetchWithTimeout(
+    uploadUrl,
+    {
+      method: "POST",
+      body: formData,
+    },
+    20_000
+  );
   const responseText = await response.text();
   let payload: ComfyUploadResponse | null = null;
   try {
@@ -149,14 +154,18 @@ async function uploadImageToComfy(buffer: Buffer, filename: string): Promise<str
 }
 
 async function submitComfyPrompt(workflow: Record<string, WorkflowNode>): Promise<string> {
-  const response = await fetch(`${COMFY_BASE_URL.replace(/\/$/, "")}/prompt`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt: workflow,
-      client_id: randomUUID(),
-    }),
-  });
+  const response = await fetchWithTimeout(
+    `${COMFY_BASE_URL.replace(/\/$/, "")}/prompt`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: workflow,
+        client_id: randomUUID(),
+      }),
+    },
+    20_000
+  );
 
   const responseText = await response.text();
   let payload: {
@@ -251,7 +260,11 @@ async function fetchComfyViewBuffer(output: ComfyOutputImage): Promise<Buffer> {
     type: (output.type ?? "output").trim() || "output",
   });
   const viewUrl = `${COMFY_BASE_URL.replace(/\/$/, "")}/view?${viewParams.toString()}`;
-  const viewResponse = await fetch(viewUrl, { cache: "no-store" });
+  const viewResponse = await fetchWithTimeout(
+    viewUrl,
+    { cache: "no-store" },
+    30_000
+  );
   if (viewResponse.ok) {
     return Buffer.from(await viewResponse.arrayBuffer());
   }
@@ -272,7 +285,11 @@ async function waitForComfyImageOutput(promptId: string): Promise<ComfyOutputIma
   const deadline = Date.now() + IMAGE_POLL_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
-    const historyResponse = await fetch(historyUrl, { cache: "no-store" });
+    const historyResponse = await fetchWithTimeout(
+      historyUrl,
+      { cache: "no-store" },
+      20_000
+    );
     if (historyResponse.ok) {
       const historyPayload = (await historyResponse.json().catch(() => null)) as
         | Record<string, ComfyHistoryEntry>
@@ -299,7 +316,11 @@ async function waitForComfyVideoOutput(
   const deadline = Date.now() + VIDEO_POLL_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
-    const historyResponse = await fetch(historyUrl, { cache: "no-store" });
+    const historyResponse = await fetchWithTimeout(
+      historyUrl,
+      { cache: "no-store" },
+      20_000
+    );
     if (historyResponse.ok) {
       const historyPayload = (await historyResponse.json().catch(() => null)) as
         | Record<string, ComfyHistoryEntry>

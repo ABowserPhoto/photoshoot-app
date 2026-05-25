@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 const COMFY_BASE_URL = process.env.COMFYUI_BASE_URL?.trim() || "http://127.0.0.1:8188";
 const COMFY_DEFAULT_ROOT = process.env.COMFYUI_PATH?.trim() || "C:/ComfyUI_windows_portable/ComfyUI";
@@ -69,14 +70,18 @@ export async function triggerTextToPhotoWorkflow(
   promptNode.inputs.text = prompt;
   samplerNode.inputs.seed = random15DigitInteger();
 
-  const response = await fetch(`${COMFY_BASE_URL.replace(/\/$/, "")}/prompt`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt: workflow,
-      client_id: randomUUID(),
-    }),
-  });
+  const response = await fetchWithTimeout(
+    `${COMFY_BASE_URL.replace(/\/$/, "")}/prompt`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: workflow,
+        client_id: randomUUID(),
+      }),
+    },
+    20_000
+  );
   const payload = (await response.json().catch(() => null)) as
     | {
         prompt_id?: string;
@@ -109,7 +114,11 @@ async function resolveComfyPreviewUrl(promptId: string): Promise<
   | { status: "error"; error: string }
 > {
   const historyUrl = `${COMFY_BASE_URL.replace(/\/$/, "")}/history/${encodeURIComponent(promptId)}`;
-  const historyResponse = await fetch(historyUrl, { cache: "no-store" });
+  const historyResponse = await fetchWithTimeout(
+    historyUrl,
+    { cache: "no-store" },
+    20_000
+  );
   if (!historyResponse.ok) {
     if (historyResponse.status === 404) {
       return { status: "processing" };

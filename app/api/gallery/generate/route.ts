@@ -10,6 +10,7 @@ type GalleryItem = {
   chunkIndex: number;
   firstFilename: string;
   previewUrl: string;
+  storagePath: string;
 };
 
 function getSupabaseServerClient() {
@@ -49,6 +50,7 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
         firstFilename?: unknown;
         middleFilename?: unknown;
         previewUrl?: unknown;
+        storagePath?: unknown;
       };
       const chunkIndex = Number(row.chunkIndex);
       const firstFilename =
@@ -58,10 +60,11 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
             ? row.middleFilename
             : "";
       const previewUrl = typeof row.previewUrl === "string" ? row.previewUrl : "";
-      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !firstFilename || !previewUrl) {
+      const storagePath = typeof row.storagePath === "string" ? row.storagePath : "";
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !firstFilename || !previewUrl || !storagePath) {
         return null;
       }
-      return { chunkIndex, firstFilename, previewUrl };
+      return { chunkIndex, firstFilename, previewUrl, storagePath };
     })
     .filter((value): value is GalleryItem => value !== null)
     .sort((a, b) => a.chunkIndex - b.chunkIndex);

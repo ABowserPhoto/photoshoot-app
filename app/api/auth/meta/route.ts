@@ -1,11 +1,13 @@
 import { Buffer } from "node:buffer";
 
 import { NextRequest, NextResponse } from "next/server";
+import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const dynamic = "force-dynamic";
 
 const GRAPH_VERSION = "v19.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
+const META_FETCH_TIMEOUT_MS = Number(process.env.META_FETCH_TIMEOUT_MS ?? "15000");
 
 type TokenResponse = {
   access_token?: string;
@@ -39,7 +41,13 @@ async function fetchAllManagedPages(accessToken: string): Promise<PageRow[]> {
   let nextUrl: string | null = first.toString();
 
   while (nextUrl) {
-    const pagesRes = await fetch(nextUrl, { cache: "no-store" });
+    const pagesRes = await fetchWithTimeout(
+      nextUrl,
+      {
+        cache: "no-store",
+      },
+      META_FETCH_TIMEOUT_MS
+    );
     const pagesJson = (await pagesRes.json()) as PagesResponse;
 
     if (!pagesRes.ok || pagesJson.error) {
@@ -57,7 +65,9 @@ async function fetchAllManagedPages(accessToken: string): Promise<PageRow[]> {
 }
 
 function getPublicAppOrigin(request: NextRequest): string {
-  const fromEnv = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "");
+  const fromEnv =
+    process.env.NEXT_PUBLIC_BASE_URL?.trim().replace(/\/$/, "") ||
+    process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "");
   if (fromEnv) {
     return fromEnv;
   }
@@ -128,9 +138,13 @@ export async function GET(request: NextRequest) {
 
   let shortRes: Response;
   try {
-    shortRes = await fetch(`${GRAPH_BASE}/oauth/access_token?${shortTokenParams.toString()}`, {
-      cache: "no-store",
-    });
+    shortRes = await fetchWithTimeout(
+      `${GRAPH_BASE}/oauth/access_token?${shortTokenParams.toString()}`,
+      {
+        cache: "no-store",
+      },
+      META_FETCH_TIMEOUT_MS
+    );
   } catch (e) {
     console.error("[meta/oauth] short-lived token fetch failed:", e);
     return redirectScheduler(request, { meta_error: "token_exchange_network" });
@@ -155,9 +169,13 @@ export async function GET(request: NextRequest) {
 
   let longRes: Response;
   try {
-    longRes = await fetch(`${GRAPH_BASE}/oauth/access_token?${longTokenParams.toString()}`, {
-      cache: "no-store",
-    });
+    longRes = await fetchWithTimeout(
+      `${GRAPH_BASE}/oauth/access_token?${longTokenParams.toString()}`,
+      {
+        cache: "no-store",
+      },
+      META_FETCH_TIMEOUT_MS
+    );
   } catch (e) {
     console.error("[meta/oauth] long-lived token fetch failed:", e);
     return redirectScheduler(request, { meta_error: "long_lived_network" });
