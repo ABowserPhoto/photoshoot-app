@@ -9,7 +9,7 @@ const DEFAULT_PORT = Number(process.env.PORT) || 3000;
 
 let mainWindow = null;
 let nextServerProcess = null;
-let serverUrl = `http://127.0.0.1:${DEFAULT_PORT}`;
+let serverUrl = `http://localhost:${DEFAULT_PORT}`;
 let serverReadyPromise = null;
 
 function resolveStandaloneServerPath() {
@@ -98,7 +98,7 @@ function startProductionServer() {
         return;
       }
       resolved = true;
-      serverUrl = `http://127.0.0.1:${nextPort}`;
+      serverUrl = `http://localhost:${nextPort}`;
       try {
         await waitForServer(serverUrl);
         resolve(serverUrl);
@@ -187,6 +187,7 @@ function createWindow(loadUrl = serverUrl) {
   });
 
   mainWindow.loadURL(loadUrl);
+  mainWindow.webContents.openDevTools();
 
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -195,7 +196,7 @@ function createWindow(loadUrl = serverUrl) {
 
 async function bootstrap() {
   if (isDev) {
-    serverUrl = `http://127.0.0.1:${DEFAULT_PORT}`;
+    serverUrl = `http://localhost:${DEFAULT_PORT}`;
     await waitForServer(serverUrl);
   } else {
     serverUrl = await startProductionServer();

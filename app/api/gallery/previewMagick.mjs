@@ -31,6 +31,7 @@ export async function buildWatermarkedPreviewFile({
     "magick",
     [
       sourceFilePath,
+      "-auto-orient",
       "-resize",
       "1200x1200",
       "(",

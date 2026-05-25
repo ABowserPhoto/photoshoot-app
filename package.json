@@ -2,7 +2,7 @@
   "name": "photoshoot-app",
   "version": "0.1.0",
   "private": true,
-  "main": "electron/main.js",
+  "main": "main.js",
   "scripts": {
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
@@ -10,6 +10,7 @@
     "lint": "eslint",
     "worker": "node ./scripts/processing-worker.mjs",
     "dev:electron": "wait-on http://localhost:3000 && electron .",
+    "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
     "dev:desktop": "concurrently \"npm run dev\" \"npm run dev:electron\"",
     "build:desktop": "next build && node scripts/prepare-electron-standalone.mjs && electron-builder"
   },
@@ -60,6 +61,7 @@
       "output": "dist-desktop"
     },
     "files": [
+      "main.js",
       "electron/**/*",
       "package.json"
     ],
