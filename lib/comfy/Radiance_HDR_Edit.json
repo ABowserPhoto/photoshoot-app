@@ -1,0 +1,76 @@
+{
+  "2": {
+    "inputs": {
+      "normalize": false,
+      "source_gamma": 1,
+      "image": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "ImageToFloat32",
+    "_meta": {
+      "title": "◎ Radiance Image To Float32"
+    }
+  },
+  "3": {
+    "inputs": {
+      "shadow_amount": 0.5,
+      "highlight_amount": 0.5,
+      "shadow_tone": 0.25,
+      "highlight_tone": 0.75,
+      "color_correction": 0.5,
+      "local_contrast": 0,
+      "image": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "HDRShadowHighlightRecovery",
+    "_meta": {
+      "title": "◎ Radiance HDR Shadow/Highlight Recovery"
+    }
+  },
+  "4": {
+    "inputs": {
+      "input_colorspace": "ACEScg",
+      "output_transform": "ACES 2.0 SDR (sRGB/Rec.709)",
+      "peak_luminance": 100,
+      "surround": "Average",
+      "creative_white_scale": 1,
+      "exposure_adjust": 0,
+      "gamut_compress": 1,
+      "image": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "ACES2OutputTransform",
+    "_meta": {
+      "title": "◎ Radiance ACES 2.0 Output Transform"
+    }
+  },
+  "5": {
+    "inputs": {
+      "image": "1777573173388_merged_1.jpg",
+      "◎ Radiance Mask": "edit"
+    },
+    "class_type": "RadianceLoadImageMask",
+    "_meta": {
+      "title": "◎ Radiance Load Image"
+    }
+  },
+  "6": {
+    "inputs": {
+      "filename_prefix": "wf",
+      "images": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

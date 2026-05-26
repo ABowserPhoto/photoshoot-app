@@ -4,6 +4,10 @@ import Image from "next/image";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import MaskingCanvas, { type MaskingCanvasHandle } from "@/components/MaskingCanvas";
+import RadianceHDRPanel, {
+  DEFAULT_RADIANCE_HDR_SETTINGS,
+  type RadianceHdrSettings,
+} from "@/app/components/RadianceHDRPanel";
 import { getAllMoodboards, sendImageToMoodboard } from "@/app/actions/moodboard";
 
 type ToolKey =
@@ -11,6 +15,7 @@ type ToolKey =
   | "object-swap"
   | "object-removal"
   | "relight"
+  | "radiance-hdr"
   | "image-to-video"
   | "text-to-photo"
   | "text-to-video";
@@ -20,6 +25,7 @@ const EDIT_TOOLS: Array<{ key: ToolKey; label: string }> = [
   { key: "object-swap", label: "Object Swap" },
   { key: "object-removal", label: "Object Removal" },
   { key: "relight", label: "Relight" },
+  { key: "radiance-hdr", label: "Radiance HDR" },
 ];
 
 const GENERATION_TOOLS: Array<{ key: ToolKey; label: string }> = [
@@ -34,6 +40,7 @@ const EMPTY_PROMPTS: Record<ToolKey, string> = {
   "object-swap": "",
   "object-removal": "",
   relight: "",
+  "radiance-hdr": "",
   "image-to-video": "",
   "text-to-photo": "",
   "text-to-video": "",
@@ -137,6 +144,7 @@ const TOOL_PRESETS: Record<ToolKey, string[]> = {
     "Warm up interior lighting for a welcoming evening mood",
     "Balance mixed indoor and daylight color temperature",
   ],
+  "radiance-hdr": [],
   "image-to-video": [
     "Create a slow cinematic push-in camera move through the living room",
     "Generate a smooth left-to-right parallax reveal of the space",
@@ -208,6 +216,9 @@ function AiStudioPageContent() {
   const [selectedBoardId, setSelectedBoardId] = useState<string>("");
   const [isSendingToBoard, setIsSendingToBoard] = useState(false);
   const [sendToBoardSuccess, setSendToBoardSuccess] = useState(false);
+  const [radianceHdrSettings, setRadianceHdrSettings] = useState<RadianceHdrSettings>(
+    DEFAULT_RADIANCE_HDR_SETTINGS
+  );
 
   useEffect(() => {
     try {
@@ -276,6 +287,7 @@ function AiStudioPageContent() {
   const isMediaGenerationTool = isTextToPhotoTool || isTextToVideoTool || isImageToVideoTool;
   const isObjectSwapTool = activeTool === "object-swap";
   const isObjectRemovalTool = activeTool === "object-removal";
+  const isRadianceHdrTool = activeTool === "radiance-hdr";
   const shouldShowMaskingCanvas =
     isObjectSwapTool && Boolean(effectivePhotoUrl) && !showingPreview && !isGenerating && !isRemovingObject;
   const shouldShowDrawMaskCanvas =
@@ -285,7 +297,7 @@ function AiStudioPageContent() {
     isTextToPhotoTool || isTextToVideoTool
       ? "Describe what you want to generate..."
       : "Describe the edit you want to apply...";
-  const showPromptField = !isImageToVideoTool;
+  const showPromptField = !isImageToVideoTool && !isRadianceHdrTool;
   const generationButtonLabel = isGenerating
     ? isTextToPhotoTool
       ? "Generating Photo..."
@@ -294,6 +306,8 @@ function AiStudioPageContent() {
         : "Generating..."
     : isMediaGenerationTool
       ? "Generate"
+      : isRadianceHdrTool
+        ? "Process Image"
       : "Generate Preview";
   const referenceImagePreviews = useMemo(
     () =>
@@ -394,6 +408,8 @@ function AiStudioPageContent() {
       setGenHeight(DEFAULT_IMAGE2VIDEO_HEIGHT);
       setGenLength(DEFAULT_VIDEO_LENGTH);
       setGenBatchSize(DEFAULT_BATCH_SIZE);
+    } else if (tool === "radiance-hdr") {
+      setRadianceHdrSettings(DEFAULT_RADIANCE_HDR_SETTINGS);
     }
   };
 
@@ -615,11 +631,12 @@ function AiStudioPageContent() {
     if (
       activeTool !== "material-replacement" &&
       activeTool !== "relight" &&
+      activeTool !== "radiance-hdr" &&
       activeTool !== "object-swap" &&
       !isMediaGenerationTool
     ) {
       setGenerationError(
-        "Preview generation is currently wired for Material Replacement, Relight, Object Swap, and the Media Generation tools."
+        "Preview generation is currently wired for Material Replacement, Relight, Radiance HDR, Object Swap, and the Media Generation tools."
       );
       setGenerationMessage(null);
       return;
@@ -714,7 +731,8 @@ function AiStudioPageContent() {
 
     const requiresSourceImage = true;
     const filenameForRequest = effectiveFilename.trim();
-    if (requiresSourceImage && !filenameForRequest) {
+    const sourceImagePathForRequest = absoluteLocalPathFromQuery.trim();
+    if (requiresSourceImage && !filenameForRequest && !sourceImagePathForRequest) {
       setGenerationError(`Please select or upload an image before generating a ${activeToolLabel} preview.`);
       setGenerationMessage(null);
       return;
@@ -745,6 +763,18 @@ function AiStudioPageContent() {
         formPayload.append("maskFile", maskBlob, `mask_${Date.now()}.png`);
       }
       formPayload.append("prompt", promptByTool[activeTool].trim());
+      if (isRadianceHdrTool) {
+        formPayload.append("sourceImagePath", sourceImagePathForRequest);
+        formPayload.append("shadow_amount", String(radianceHdrSettings.shadow_amount));
+        formPayload.append("highlight_amount", String(radianceHdrSettings.highlight_amount));
+        formPayload.append("shadow_tone", String(radianceHdrSettings.shadow_tone));
+        formPayload.append("highlight_tone", String(radianceHdrSettings.highlight_tone));
+        formPayload.append("color_correction", String(radianceHdrSettings.color_correction));
+        formPayload.append("local_contrast", String(radianceHdrSettings.local_contrast));
+        formPayload.append("creative_white_scale", String(radianceHdrSettings.creative_white_scale));
+        formPayload.append("exposure_adjust", String(radianceHdrSettings.exposure_adjust));
+        formPayload.append("gamut_compress", String(radianceHdrSettings.gamut_compress));
+      }
       if (taskIdForRequest) {
         formPayload.append("taskId", taskIdForRequest);
         formPayload.append("task_id", taskIdForRequest);
@@ -1284,6 +1314,9 @@ function AiStudioPageContent() {
                   ) : null}
                 </div>
               ) : null}
+              {isRadianceHdrTool ? (
+                <RadianceHDRPanel settings={radianceHdrSettings} onChange={setRadianceHdrSettings} />
+              ) : null}
               {showPromptField && activePresets.length > 0 ? (
                 <div className="mt-2">
                   <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -1354,6 +1387,8 @@ function AiStudioPageContent() {
                   ? isTextToPhotoTool
                     ? "Generates a Flux photo preview in the viewer."
                     : "Generates a Wan 2.1 video preview. Video jobs may take 5–10 minutes."
+                  : isRadianceHdrTool
+                    ? "Applies Radiance HDR shadow/highlight recovery and ACES output transform."
                   : '(Generates a preview below. "Confirm & Save" creates the final _wf file)'}
               </p>
               {generationMessage ? (

@@ -76,9 +76,9 @@ export async function triggerPreviewEmail(taskId: string): Promise<TriggerPrevie
     const shootLocation = typeof row.shoot_location === "string" ? row.shoot_location.trim() : "";
     const shootDate = typeof row.photoshoot_date === "string" ? row.photoshoot_date.trim() : "";
 
-    const base =
-      (process.env.NEXT_PUBLIC_APP_URL ?? process.env.NEXT_PUBLIC_BASE_URL ?? "https://workflow.abowserphoto.com").replace(/\/$/, "");
-    const previewLink = `${base}/gallery/${String(row.id)}`;
+    const shootId = String(row.id);
+    const baseUrl = (process.env.NEXT_PUBLIC_BASE_URL || "https://workflow.abowserphoto.com").replace(/\/$/, "");
+    const previewLink = `${baseUrl}/gallery/${shootId}`;
     console.log("SENDING TO ZAPIER:", { email: clientEmail, link: previewLink, shootLocation, shootDate });
 
     let response: Response;
@@ -94,7 +94,7 @@ export async function triggerPreviewEmail(taskId: string): Promise<TriggerPrevie
           previewLink,
           shootLocation,
           shootDate,
-          taskId: String(row.id),
+          taskId: shootId,
         }),
         },
         10_000
