@@ -50,30 +50,18 @@ function looksLikeAbsolutePath(value: string): boolean {
 
 function resolveSnsHdrPresetArg(
   rawPreset: string
-): { presetArg: string; existsOnDisk: boolean; resolution: "absolute-path" | "preset-dir" } {
+): { presetArg: string; existsOnDisk: boolean; resolution: "absolute-path" | "raw-name" } {
   const trimmed = rawPreset.trim();
   if (!trimmed) {
-    throw new Error("SNSHDR_PRESET is empty. Configure a valid preset name or .sfs path.");
+    return { presetArg: "Hero_Interior", existsOnDisk: false, resolution: "raw-name" };
   }
 
   if (looksLikeAbsolutePath(trimmed)) {
     const withExt = path.extname(trimmed) ? trimmed : `${trimmed}.sfs`;
-    const exists = fs.existsSync(withExt);
-    if (!exists) {
-      throw new Error(`snsHDR preset file not found: ${withExt}`);
-    }
-    return { presetArg: withExt, existsOnDisk: true, resolution: "absolute-path" };
+    return { presetArg: withExt, existsOnDisk: fs.existsSync(withExt), resolution: "absolute-path" };
   }
-
-  const filename = path.extname(trimmed) ? trimmed : `${trimmed}.sfs`;
-  const fullPresetPath = path.join(SNS_HDR_PRESET_DIR, filename);
-  const exists = fs.existsSync(fullPresetPath);
-  if (!exists) {
-    throw new Error(
-      `snsHDR preset "${trimmed}" could not be resolved. Expected preset file at ${fullPresetPath}`
-    );
-  }
-  return { presetArg: fullPresetPath, existsOnDisk: true, resolution: "preset-dir" };
+  // Pass preset names (e.g. Hero_Interior) directly and let SNS-HDR resolve internally.
+  return { presetArg: trimmed, existsOnDisk: false, resolution: "raw-name" };
 }
 
 async function runCommandWithDiagnostics(
