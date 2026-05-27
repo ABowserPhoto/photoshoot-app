@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import { NextResponse } from "next/server";
 
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
@@ -11,9 +10,13 @@ import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const execAsync = promisify(exec);
-
-const ENFUSE_PATH = "F:\\Enfuse\\bin\\enfuse.exe";
+const SNS_HDR_PATH =
+  process.env.SNSHDR_PATH?.trim() || "C:\\Program Files\\SNS-HDR Pro 2\\SNS-HDR.exe";
+const SNS_HDR_PRESET = process.env.SNSHDR_PRESET?.trim() || "Hero_Interior";
+const SNS_HDR_PRESET_DIR =
+  process.env.SNSHDR_PRESET_DIR?.trim() || "C:\\Program Files\\SNS-HDR Pro 2\\Presets";
+const SNSHDR_TEMPLATE_PATH =
+  process.env.SNSHDR_TEMPLATE_PATH?.trim() || path.join(process.cwd(), "lib", "comfy", "workflow_api.json");
 
 const IMAGE_EXT = new Set([
   ".jpg",
@@ -34,6 +37,107 @@ function isImageFile(fileName: string): boolean {
 
 function quoteArg(p: string): string {
   return `"${p.replace(/"/g, '\\"')}"`;
+}
+
+type CommandRunResult = {
+  stdout: string;
+  stderr: string;
+};
+
+function looksLikeAbsolutePath(value: string): boolean {
+  return /^[a-zA-Z]:\\/.test(value) || value.startsWith("\\\\");
+}
+
+function resolveSnsHdrPresetArg(
+  rawPreset: string
+): { presetArg: string; existsOnDisk: boolean; resolution: "absolute-path" | "preset-dir" } {
+  const trimmed = rawPreset.trim();
+  if (!trimmed) {
+    throw new Error("SNSHDR_PRESET is empty. Configure a valid preset name or .sfs path.");
+  }
+
+  if (looksLikeAbsolutePath(trimmed)) {
+    const withExt = path.extname(trimmed) ? trimmed : `${trimmed}.sfs`;
+    const exists = fs.existsSync(withExt);
+    if (!exists) {
+      throw new Error(`snsHDR preset file not found: ${withExt}`);
+    }
+    return { presetArg: withExt, existsOnDisk: true, resolution: "absolute-path" };
+  }
+
+  const filename = path.extname(trimmed) ? trimmed : `${trimmed}.sfs`;
+  const fullPresetPath = path.join(SNS_HDR_PRESET_DIR, filename);
+  const exists = fs.existsSync(fullPresetPath);
+  if (!exists) {
+    throw new Error(
+      `snsHDR preset "${trimmed}" could not be resolved. Expected preset file at ${fullPresetPath}`
+    );
+  }
+  return { presetArg: fullPresetPath, existsOnDisk: true, resolution: "preset-dir" };
+}
+
+async function runCommandWithDiagnostics(
+  command: string,
+  args: string[],
+  context: Record<string, unknown>
+): Promise<CommandRunResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      console.error("[auto-merge] merge command process error", {
+        ...context,
+        command,
+        args,
+        error: error.message,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+      });
+      reject(
+        new Error(
+          `Merge process failed to start: ${error.message}${
+            stderr.trim() ? ` | stderr=${stderr.trim()}` : ""
+          }`
+        )
+      );
+    });
+
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      console.error("[auto-merge] merge command non-zero exit", {
+        ...context,
+        command,
+        args,
+        exitCode: code,
+        signal,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+      });
+      reject(
+        new Error(
+          `Merge command failed (exit=${code ?? "null"}${signal ? `, signal=${signal}` : ""})${
+            stderr.trim() ? ` | stderr=${stderr.trim()}` : ""
+          }`
+        )
+      );
+    });
+  });
 }
 
 function chunkHasSqiInName(filenames: string[]): boolean {
@@ -157,61 +261,171 @@ export async function POST(request: Request) {
 
     const outputs: string[] = [];
     const origin = resolvePublicOrigin(request);
+    const snsPreset = resolveSnsHdrPresetArg(SNS_HDR_PRESET);
+    const templateExists = fs.existsSync(SNSHDR_TEMPLATE_PATH);
+    console.info("[auto-merge] snsHDR template diagnostics", {
+      templatePath: SNSHDR_TEMPLATE_PATH,
+      templateExists,
+      snsHdrPath: SNS_HDR_PATH,
+      snsHdrExists: fs.existsSync(SNS_HDR_PATH),
+      snsHdrPresetRaw: SNS_HDR_PRESET,
+      snsHdrPresetArg: snsPreset.presetArg,
+      snsHdrPresetExists: snsPreset.existsOnDisk,
+      snsHdrPresetDir: SNS_HDR_PRESET_DIR,
+      localFolderName,
+      bracketSize,
+    });
+
     let bracketIndex = 1;
     let sqiAutoTriggerAttempts = 0;
     for (const group of groups) {
       if (group.length !== bracketSize) {
         continue;
       }
-      const inputs = group.map((name) => path.join(selectsDir, name));
-      const baseName = getBaseNameForChunk(group[0]);
-      const hasSqi = chunkHasSqiInName(group);
-      const outBaseName = `${baseName}_${bracketIndex}${hasSqi ? "_sqi" : ""}.jpg`;
-      const outFile = path.join(mergedDir, outBaseName);
-      const parts = [
-        quoteArg(ENFUSE_PATH),
-        "-o",
-        quoteArg(outFile),
-        ...inputs.map(quoteArg),
-      ];
-      const cmd = parts.join(" ");
-      await execAsync(cmd, { windowsHide: true });
-      outputs.push(outFile);
-      if (hasSqi) {
-        sqiAutoTriggerAttempts += 1;
-        try {
-          const aiRes = await fetchWithTimeout(
-            `${origin}/api/ai-edit`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                local_folder_name: localFolderName,
-                filename: path.basename(outFile),
-              }),
-            },
-            20_000
-          );
-          const aiPayload = (await aiRes.json().catch(() => null)) as { error?: string } | null;
-          if (!aiRes.ok) {
-            console.error("[auto-merge] /api/ai-edit failed:", aiRes.status, aiPayload?.error ?? aiPayload);
-          } else {
-            try {
-              await cleanupComfyFinalFilename({
-                localFolderName,
-                mergedFilename: path.basename(outFile),
-                baseName,
-                bracketIndex,
-              });
-            } catch (renameErr) {
-              console.error("[auto-merge] Comfy output rename skipped:", renameErr);
-            }
+      try {
+        const inputs = group.map((name) => path.join(selectsDir, name));
+        const baseName = getBaseNameForChunk(group[0]);
+        const hasSqi = chunkHasSqiInName(group);
+        const outBaseName = `${baseName}_${bracketIndex}${hasSqi ? "_sqi" : ""}.jpg`;
+        const outFile = path.join(mergedDir, outBaseName);
+        const tempOutFile = path.join(
+          mergedDir,
+          `${baseName}_${bracketIndex}${hasSqi ? "_sqi" : ""}.__tmp_${Date.now()}_${Math.random()
+            .toString(16)
+            .slice(2)}.jpg`
+        );
+        const snsArgs = [...inputs, "-preset", snsPreset.presetArg, "-o", tempOutFile];
+        const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
+        console.log("Executing snsHDR command:", constructedCommandString);
+        await runCommandWithDiagnostics(
+          SNS_HDR_PATH,
+          snsArgs,
+          {
+            bracketIndex,
+            localFolderName,
+            outFile,
+            tempOutFile,
+            inputs,
+            snsPreset: snsPreset.presetArg,
+            commandPreview: constructedCommandString,
           }
-        } catch (err) {
-          console.error("[auto-merge] /api/ai-edit request error:", err);
+        );
+        if (fs.existsSync(outFile)) {
+          await fs.promises.unlink(outFile);
         }
+        await fs.promises.rename(tempOutFile, outFile);
+        outputs.push(outFile);
+        if (hasSqi) {
+          sqiAutoTriggerAttempts += 1;
+          if (!templateExists) {
+            const errorMessage = `snsHDR template not found at ${SNSHDR_TEMPLATE_PATH}`;
+            console.error("[auto-merge] missing snsHDR template", {
+              bracketIndex,
+              localFolderName,
+              outFile,
+              templatePath: SNSHDR_TEMPLATE_PATH,
+            });
+            return NextResponse.json(
+              {
+                error: errorMessage,
+                stage: "snshdr-template-check",
+                bracketIndex,
+                mergedFile: path.basename(outFile),
+                outputPaths: outputs,
+              },
+              { status: 500 }
+            );
+          }
+          try {
+            const aiRes = await fetchWithTimeout(
+              `${origin}/api/ai-edit`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  local_folder_name: localFolderName,
+                  filename: path.basename(outFile),
+                  snshdr_template_path: SNSHDR_TEMPLATE_PATH,
+                }),
+              },
+              20_000
+            );
+            const aiPayload = (await aiRes.json().catch(() => null)) as { error?: string } | null;
+            if (!aiRes.ok) {
+              const aiError = aiPayload?.error ?? `HTTP ${aiRes.status}`;
+              console.error("[auto-merge] /api/ai-edit failed", {
+                bracketIndex,
+                localFolderName,
+                mergedFile: path.basename(outFile),
+                status: aiRes.status,
+                error: aiError,
+                templatePath: SNSHDR_TEMPLATE_PATH,
+              });
+              return NextResponse.json(
+                {
+                  error: `snsHDR/ai-edit failed for ${path.basename(outFile)}: ${aiError}`,
+                  stage: "ai-edit",
+                  bracketIndex,
+                  mergedFile: path.basename(outFile),
+                  status: aiRes.status,
+                  outputPaths: outputs,
+                },
+                { status: 502 }
+              );
+            } else {
+              try {
+                await cleanupComfyFinalFilename({
+                  localFolderName,
+                  mergedFilename: path.basename(outFile),
+                  baseName,
+                  bracketIndex,
+                });
+              } catch (renameErr) {
+                console.error("[auto-merge] Comfy output rename skipped:", renameErr);
+              }
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "Unknown request error";
+            console.error("[auto-merge] /api/ai-edit request error", {
+              bracketIndex,
+              localFolderName,
+              mergedFile: path.basename(outFile),
+              error: message,
+              templatePath: SNSHDR_TEMPLATE_PATH,
+            });
+            return NextResponse.json(
+              {
+                error: `snsHDR/ai-edit request failed for ${path.basename(outFile)}: ${message}`,
+                stage: "ai-edit-request",
+                bracketIndex,
+                mergedFile: path.basename(outFile),
+                outputPaths: outputs,
+              },
+              { status: 502 }
+            );
+          }
+        }
+      } catch (loopError) {
+        const loopMessage = loopError instanceof Error ? loopError.message : "Unknown merge loop error";
+        console.error("[auto-merge] bracket loop failed", {
+          bracketIndex,
+          localFolderName,
+          group,
+          error: loopMessage,
+        });
+        return NextResponse.json(
+          {
+            error: `Merge failed on bracket ${bracketIndex}: ${loopMessage}`,
+            stage: "merge-loop",
+            bracketIndex,
+            outputPaths: outputs,
+            keepCurrentStatus: true,
+          },
+          { status: 500 }
+        );
+      } finally {
+        bracketIndex += 1;
       }
-      bracketIndex += 1;
     }
 
     return NextResponse.json({

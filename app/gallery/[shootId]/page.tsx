@@ -53,6 +53,7 @@ export default function GalleryPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [rotatingByChunk, setRotatingByChunk] = useState<Record<number, RotateDirection | undefined>>({});
 
   const selectedCount = selectedChunks.size;
@@ -136,6 +137,7 @@ export default function GalleryPage() {
   async function loadGallery(targetShootId: string) {
     setIsLoading(true);
     setErrorMessage(null);
+    setSuccessMessage(null);
     setIsSuccess(false);
     setRatingsByChunk({});
     setActiveChunkIndex(null);
@@ -215,6 +217,7 @@ export default function GalleryPage() {
     }
     setIsSubmitting(true);
     setErrorMessage(null);
+    setSuccessMessage(null);
     try {
       const response = await fetch("/api/gallery/process", {
         method: "POST",
@@ -246,6 +249,7 @@ export default function GalleryPage() {
         window.localStorage.removeItem(selectionStorageKey);
       }
       setIsSuccess(true);
+      setSuccessMessage("Auswahl erfolgreich gesendet. Vielen Dank!");
     } catch {
       setErrorMessage("Netzwerkfehler beim Absenden der Auswahl.");
     } finally {
@@ -416,6 +420,11 @@ export default function GalleryPage() {
         {errorMessage ? (
           <p className="mb-4 rounded-md border border-red-700 bg-red-950/60 px-3 py-2 text-sm text-red-100">
             {errorMessage}
+          </p>
+        ) : null}
+        {successMessage ? (
+          <p className="mb-4 rounded-md border border-emerald-700 bg-emerald-950/60 px-3 py-2 text-sm text-emerald-100">
+            {successMessage}
           </p>
         ) : null}
 

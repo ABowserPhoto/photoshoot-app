@@ -1,21 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
+import sharp from "sharp";
 
 import { resolveTaskDir } from "@/app/api/gallery/_shared";
-import { buildWatermarkedPreviewFile, assertReadableWatermark } from "@/app/api/gallery/previewMagick.mjs";
 import { sanitizeStoragePath } from "@/lib/sanitizeStoragePath.mjs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const execFileAsync = promisify(execFile);
 const SUPABASE_PREVIEWS_BUCKET = process.env.SUPABASE_PREVIEWS_BUCKET?.trim() || "previews";
-const WATERMARK_PATH = path.join(process.cwd(), "public", "watermark.png");
 const ROTATABLE_LOCAL_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"]);
 
 type GalleryPreviewItem = {
@@ -39,26 +34,18 @@ function getSupabaseServerClient() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-async function rotateImageToOutput(inputPath: string, outputPath: string, direction: RotateDirection): Promise<void> {
-  const rotateDegrees = direction === "ccw" ? "-90" : "90";
-  await execFileAsync(
-    "magick",
-    [inputPath, "-rotate", rotateDegrees, outputPath],
-    { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }
-  );
+function rotateDegrees(direction: RotateDirection): number {
+  return direction === "ccw" ? -90 : 90;
 }
 
-async function rotateImageInPlace(filePath: string, direction: RotateDirection): Promise<void> {
-  const tempOutput = path.join(
-    os.tmpdir(),
-    `gallery-rotate-${Date.now()}-${Math.random().toString(16).slice(2)}${path.extname(filePath) || ".jpg"}`
-  );
-  try {
-    await rotateImageToOutput(filePath, tempOutput, direction);
-    await fs.promises.copyFile(tempOutput, filePath);
-  } finally {
-    await fs.promises.unlink(tempOutput).catch(() => {});
-  }
+async function rotateBufferWithSharp(input: Buffer, direction: RotateDirection): Promise<Buffer> {
+  return sharp(input).rotate(rotateDegrees(direction)).toBuffer();
+}
+
+async function rotateImageInPlaceWithSharp(filePath: string, direction: RotateDirection): Promise<void> {
+  const inputBuffer = await fs.promises.readFile(filePath);
+  const rotatedBuffer = await rotateBufferWithSharp(inputBuffer, direction);
+  await fs.promises.writeFile(filePath, rotatedBuffer);
 }
 
 function getPreviewItemByChunk(itemsRaw: unknown, chunkIndex: number): {
@@ -146,52 +133,22 @@ export async function POST(request: Request) {
     let rotatedLocalSource = false;
 
     if (fs.existsSync(sourcePath) && fs.statSync(sourcePath).isFile() && ROTATABLE_LOCAL_EXTENSIONS.has(sourceExt)) {
-      await rotateImageInPlace(sourcePath, direction);
+      await rotateImageInPlaceWithSharp(sourcePath, direction);
       rotatedLocalSource = true;
-
-      await assertReadableWatermark(WATERMARK_PATH);
-      const tempPreviewOutput = path.join(
-        os.tmpdir(),
-        `gallery-rotate-preview-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`
-      );
-      try {
-        await buildWatermarkedPreviewFile({
-          sourceFilePath: sourcePath,
-          watermarkPath: WATERMARK_PATH,
-          previewOutputPath: tempPreviewOutput,
-        });
-        rotatedPreviewBuffer = await fs.promises.readFile(tempPreviewOutput);
-      } finally {
-        await fs.promises.unlink(tempPreviewOutput).catch(() => {});
-      }
-    } else {
-      const { data: existingPreview, error: downloadError } = await supabase.storage
-        .from(SUPABASE_PREVIEWS_BUCKET)
-        .download(storagePath);
-      if (downloadError || !existingPreview) {
-        return NextResponse.json(
-          { error: `Failed to download preview object for rotation: ${downloadError?.message ?? "not found"}` },
-          { status: 502 }
-        );
-      }
-
-      const inputPath = path.join(
-        os.tmpdir(),
-        `gallery-rotate-input-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`
-      );
-      const outputPath = path.join(
-        os.tmpdir(),
-        `gallery-rotate-output-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`
-      );
-      try {
-        await fs.promises.writeFile(inputPath, Buffer.from(await existingPreview.arrayBuffer()));
-        await rotateImageToOutput(inputPath, outputPath, direction);
-        rotatedPreviewBuffer = await fs.promises.readFile(outputPath);
-      } finally {
-        await fs.promises.unlink(inputPath).catch(() => {});
-        await fs.promises.unlink(outputPath).catch(() => {});
-      }
     }
+
+    const { data: existingPreview, error: downloadError } = await supabase.storage
+      .from(SUPABASE_PREVIEWS_BUCKET)
+      .download(storagePath);
+    if (downloadError || !existingPreview) {
+      return NextResponse.json(
+        { error: `Failed to download preview object for rotation: ${downloadError?.message ?? "not found"}` },
+        { status: 502 }
+      );
+    }
+
+    const existingPreviewBuffer = Buffer.from(await existingPreview.arrayBuffer());
+    rotatedPreviewBuffer = await rotateBufferWithSharp(existingPreviewBuffer, direction);
 
     const { error: uploadError } = await supabase.storage
       .from(SUPABASE_PREVIEWS_BUCKET)

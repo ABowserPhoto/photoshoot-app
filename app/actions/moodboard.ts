@@ -614,18 +614,35 @@ export async function updateElementPosition(input: {
     return { ok: false, error: "Missing element id." };
   }
 
+  const x = Math.round(Number(input.x));
+  const y = Math.round(Number(input.y));
+  const width = Math.max(1, Math.round(Number(input.width)));
+  const height = Math.max(1, Math.round(Number(input.height)));
+  if (![x, y, width, height].every((value) => Number.isFinite(value))) {
+    return { ok: false, error: "Invalid x/y/width/height payload." };
+  }
+
   const { error } = await sb
     .from("moodboard_elements")
     .update({
-      x: input.x,
-      y: input.y,
-      width: input.width,
-      height: input.height,
+      x,
+      y,
+      width,
+      height,
     })
     .eq("id", id);
 
   if (error) {
-    console.warn("[updateElementPosition]", error.message);
+    console.error("[updateElementPosition]", {
+      elementId: id,
+      payload: {
+        x,
+        y,
+        width,
+        height,
+      },
+      error: error.message,
+    });
     return { ok: false, error: error.message };
   }
 
@@ -665,6 +682,11 @@ export async function updateElementContent(input: {
   const { error } = await sb.from("moodboard_elements").update({ content: sanitized }).eq("id", id);
 
   if (error) {
+    console.error("[updateElementContent]", {
+      elementId: id,
+      payload: sanitized,
+      error: error.message,
+    });
     return { ok: false, error: error.message };
   }
 

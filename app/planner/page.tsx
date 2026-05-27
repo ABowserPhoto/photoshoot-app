@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { Pause, Play } from "lucide-react";
+import { Pause, Play, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, Suspense, useCallback } from "react";
 import PlannerStats from "@/app/components/PlannerStats";
 import GlobalNavButtons from "@/app/components/GlobalNavButtons";
@@ -11,6 +11,7 @@ import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { usePlannerGlobalSafe } from "@/app/contexts/PlannerGlobalContext";
 import { supabase } from "@/lib/supabaseClient";
 import { syncPlannerAutoTaskToKanban } from "@/app/actions/agency-sync";
+import { deletePlannerPost } from "@/app/actions/planner";
 import { updateStudioTaskStatus } from "@/app/actions/studio-tasks";
 import {
   appendCurrentUserIfMissing,
@@ -1228,12 +1229,9 @@ export default function PlannerPage() {
     void (async () => {
       try {
         if (!taskId.startsWith("temp-")) {
-          if (!supabase) {
-            throw new Error("Supabase is not configured.");
-          }
-          const { error } = await supabase.from("studio_tasks").delete().eq("id", taskId);
-          if (error) {
-            throw new Error(error.message);
+          const result = await deletePlannerPost(taskId);
+          if (!result.ok) {
+            throw new Error(result.error);
           }
         }
         if (optimisticBoard) {
@@ -1241,12 +1239,20 @@ export default function PlannerPage() {
         }
         setPersistenceError(null);
       } catch (error) {
+        console.error("[planner deleteTask]", { taskId, error });
         if (previousBoard) {
           setBoard(previousBoard);
         }
         setPersistenceError(error instanceof Error ? error.message : "Could not delete planner task.");
       }
     })();
+  };
+
+  const handleDeletePost = (taskId: string) => {
+    if (!window.confirm("Are you sure you want to delete this post?")) {
+      return;
+    }
+    deleteTask(taskId);
   };
 
   const persistTaskSubtasks = (taskId: string, nextSubtasks: PlannerSubTask[]) => {
@@ -1713,6 +1719,18 @@ export default function PlannerPage() {
                         </h3>
                       </div>
                       <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeletePost(task.id);
+                          }}
+                          className="rounded-md p-1 text-zinc-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-300"
+                          aria-label="Delete post"
+                          title="Delete post"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                        </button>
                         <TaskAssigneeAvatars assignees={task.assignedUsers} />
                         {task.label ? (
                           <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{task.label}</span>
@@ -1983,7 +2001,7 @@ export default function PlannerPage() {
                                 setIsCreateModalOpen(false);
                                 setActiveTaskId(task.id);
                               }}
-                              className="cursor-grab rounded-lg border border-zinc-300 bg-white p-3 shadow-sm active:cursor-grabbing dark:border-zinc-700 dark:bg-zinc-900"
+                              className="group cursor-grab rounded-lg border border-zinc-300 bg-white p-3 shadow-sm active:cursor-grabbing dark:border-zinc-700 dark:bg-zinc-900"
                             >
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0 flex-1">
@@ -1996,7 +2014,21 @@ export default function PlannerPage() {
                                     </span>
                                   ) : null}
                                 </div>
-                                <TaskAssigneeAvatars assignees={task.assignedUsers} />
+                                <div className="flex shrink-0 items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      handleDeletePost(task.id);
+                                    }}
+                                    className="rounded-md p-1 text-zinc-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-300"
+                                    aria-label="Delete post"
+                                    title="Delete post"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                                  </button>
+                                  <TaskAssigneeAvatars assignees={task.assignedUsers} />
+                                </div>
                               </div>
                               <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{task.description}</p>
                               {column.id === "processing" && task.isPaused ? (

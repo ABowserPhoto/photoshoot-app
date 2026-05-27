@@ -867,9 +867,26 @@ export default function KanbanBoard({
           bracket_size: bracketSize,
         }),
       });
-      const mergePayload = (await mergeResponse.json().catch(() => ({}))) as { error?: unknown };
+      const mergePayload = (await mergeResponse.json().catch(() => ({}))) as {
+        error?: unknown;
+        keepCurrentStatus?: boolean;
+        stage?: string;
+      };
       if (!mergeResponse.ok) {
-        throw new Error(toErrorString(mergePayload.error, `Merge failed (${mergeResponse.status}).`));
+        const backendError = toErrorString(mergePayload.error, `Merge failed (${mergeResponse.status}).`);
+        if (mergePayload.keepCurrentStatus === true) {
+          console.error("[KanbanBoard] auto-merge failed, keeping current status", {
+            taskId: task.id,
+            fromColumn: from,
+            stage: mergePayload.stage,
+            status: mergeResponse.status,
+            error: backendError,
+          });
+          setMergePromptError(backendError);
+          setStatusMessage(backendError);
+          return;
+        }
+        throw new Error(backendError);
       }
 
       const movedTask: BoardTask = {
@@ -908,7 +925,9 @@ export default function KanbanBoard({
       setStatusMessage(null);
       onTaskMoved?.(movedTask, from, "selection-available");
     } catch (err) {
-      setMergePromptError(err instanceof Error ? err.message : "Merge or update failed.");
+      const message = err instanceof Error ? err.message : "Merge or update failed.";
+      setMergePromptError(message);
+      setStatusMessage(message);
     } finally {
       setMergePromptProcessing(false);
     }

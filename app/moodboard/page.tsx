@@ -1089,6 +1089,8 @@ function MoodboardPageContent() {
   const boardIdParam = searchParams.get("boardId");
   const { authenticated, isLoading: authLoading } = useAuthRole();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
+  const elementsRef = useRef<MoodboardElementRecord[]>([]);
+  const skipNextImageUrlBlurSaveRef = useRef<Record<string, boolean>>({});
   const titleSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const noteSaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
@@ -1104,6 +1106,10 @@ function MoodboardPageContent() {
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiGeneratedUrl, setAiGeneratedUrl] = useState<string | null>(null);
   const [aiGenerating, setAiGenerating] = useState(false);
+
+  useEffect(() => {
+    elementsRef.current = elements;
+  }, [elements]);
 
   const loadMoodboard = useCallback(async (preferredBoardId?: string | null) => {
     setLoading(true);
@@ -1193,19 +1199,18 @@ function MoodboardPageContent() {
   }, []);
 
   const handleBringToFront = useCallback((elementId: string) => {
-    setElements((prev) => {
-      const row = prev.find((e) => e.id === elementId);
-      if (!row) {
-        return prev;
+    const currentElements = elementsRef.current;
+    const row = currentElements.find((e) => e.id === elementId);
+    if (!row) {
+      return;
+    }
+    const maxZ = currentElements.reduce((acc, e) => Math.max(acc, e.z_index ?? 0), 0);
+    const nextZ = maxZ + 1;
+    setElements((prev) => prev.map((e) => (e.id === elementId ? { ...e, z_index: nextZ } : e)));
+    void updateElementZIndex({ elementId, zIndex: nextZ }).then((res) => {
+      if (!res.ok) {
+        console.warn("[moodboard z-index]", res.error);
       }
-      const maxZ = prev.reduce((acc, e) => Math.max(acc, e.z_index ?? 0), 0);
-      const nextZ = maxZ + 1;
-      void updateElementZIndex({ elementId, zIndex: nextZ }).then((res) => {
-        if (!res.ok) {
-          console.warn("[moodboard z-index]", res.error);
-        }
-      });
-      return prev.map((e) => (e.id === elementId ? { ...e, z_index: nextZ } : e));
     });
   }, []);
 
@@ -1228,6 +1233,23 @@ function MoodboardPageContent() {
         }
       });
     }, 450);
+  }, []);
+
+  const commitImageUrlForElement = useCallback((elementId: string, rawUrl: string) => {
+    const row = elementsRef.current.find((item) => item.id === elementId);
+    if (!row) {
+      return;
+    }
+    const url = rawUrl.trim();
+    const nextContent = { ...row.content, url };
+    setElements((prev) =>
+      prev.map((item) => (item.id === elementId ? { ...item, content: nextContent } : item))
+    );
+    void updateElementContent({ elementId, content: nextContent }).then((res) => {
+      if (!res.ok) {
+        console.warn("[moodboard image url]", res.error);
+      }
+    });
   }, []);
 
   const calculateVisibleCenterCoord = useCallback(() => {
@@ -1589,18 +1611,18 @@ function MoodboardPageContent() {
                   activateElement(el.id);
                 }}
                 onDragStop={(e, d) => {
-                  const x = d.x;
-                  const y = d.y;
+                  const x = Math.round(d.x);
+                  const y = Math.round(d.y);
                   setElements((prev) =>
                     prev.map((item) => (item.id === el.id ? { ...item, x, y } : item))
                   );
                   persistPosition(el, x, y, el.width, el.height);
                 }}
                 onResizeStop={(e, _dir, ref, _delta, position) => {
-                  const w = ref.offsetWidth;
-                  const h = ref.offsetHeight;
-                  const x = position.x;
-                  const y = position.y;
+                  const w = Math.max(1, Math.round(ref.offsetWidth));
+                  const h = Math.max(1, Math.round(ref.offsetHeight));
+                  const x = Math.round(position.x);
+                  const y = Math.round(position.y);
                   setElements((prev) =>
                     prev.map((item) =>
                       item.id === el.id ? { ...item, x, y, width: w, height: h } : item
@@ -1734,19 +1756,20 @@ function MoodboardPageContent() {
                               );
                             }}
                             onBlur={(e) => {
-                              const url = e.target.value.trim();
-                              setElements((prev) => {
-                                const next = prev.map((item) =>
-                                  item.id === el.id
-                                    ? { ...item, content: { ...item.content, url } }
-                                    : item
-                                );
-                                const row = next.find((x) => x.id === el.id);
-                                if (row) {
-                                  void updateElementContent({ elementId: el.id, content: row.content });
-                                }
-                                return next;
-                              });
+                              if (skipNextImageUrlBlurSaveRef.current[el.id]) {
+                                skipNextImageUrlBlurSaveRef.current[el.id] = false;
+                                return;
+                              }
+                              commitImageUrlForElement(el.id, e.currentTarget.value);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key !== "Enter") {
+                                return;
+                              }
+                              e.preventDefault();
+                              skipNextImageUrlBlurSaveRef.current[el.id] = true;
+                              commitImageUrlForElement(el.id, e.currentTarget.value);
+                              (e.currentTarget as HTMLInputElement).blur();
                             }}
                             placeholder="https://…"
                             className="w-full shrink-0 rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:ring-1 focus:ring-zinc-500"

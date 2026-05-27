@@ -7,6 +7,7 @@ import {
   deleteClientProfile,
   type MetaIgAccountOption,
 } from "@/app/actions/social-profiles";
+import { deleteSchedulerPost } from "@/app/actions/scheduler";
 import { generateHashtagsAction } from "@/app/actions/generate-hashtags";
 import { publishToInstagram } from "@/app/actions/publish-instagram";
 import { publishToTikTok } from "@/app/actions/publish-tiktok";
@@ -1157,6 +1158,58 @@ export default function SchedulerPage() {
     })();
   };
 
+  const handleDeleteScheduledPost = (absoluteIndex: number) => {
+    if (!activeProfileId) {
+      return;
+    }
+    const target = slots[absoluteIndex];
+    if (!target) {
+      return;
+    }
+    if (!window.confirm("Are you sure you want to delete this post?")) {
+      return;
+    }
+
+    const previousSlots = [...slots];
+    const wasEditing = editingSlotIndex === absoluteIndex;
+    updateActiveData((data) => {
+      if (absoluteIndex < 0 || absoluteIndex >= data.slots.length) {
+        return data;
+      }
+      const nextSlots = [...data.slots];
+      nextSlots[absoluteIndex] = null;
+      return { ...data, slots: nextSlots };
+    });
+    if (wasEditing) {
+      setEditingSlotIndex(null);
+      setCaptionDraft("");
+      setIsGeneratingTags(false);
+    }
+
+    if (target.fileUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(target.fileUrl);
+      objectUrlsRef.current.delete(target.fileUrl);
+    }
+
+    void (async () => {
+      try {
+        const result = await deleteSchedulerPost(target.id);
+        if (!result.ok) {
+          throw new Error(result.error);
+        }
+        setPersistenceError(null);
+      } catch (error) {
+        console.error("[scheduler delete post]", {
+          postId: target.id,
+          absoluteIndex,
+          error,
+        });
+        setPersistenceError(error instanceof Error ? error.message : "Could not delete post.");
+        updateActiveData((data) => ({ ...data, slots: previousSlots }));
+      }
+    })();
+  };
+
   const handleAddProfile = () => {
     if (!activeClientId) {
       return;
@@ -1581,6 +1634,18 @@ export default function SchedulerPage() {
                           alt={`Scheduled slot ${absoluteIndex + 1}`}
                           className="h-full w-full object-cover"
                         />
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeleteScheduledPost(absoluteIndex);
+                          }}
+                          className="absolute right-2 top-2 z-10 rounded-md bg-black/70 p-1 text-zinc-200 opacity-0 transition hover:bg-red-600/90 hover:text-white group-hover:opacity-100"
+                          title="Delete post"
+                          aria-label={`Delete post in slot ${absoluteIndex + 1}`}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                        </button>
                         <span className="absolute bottom-2 left-2 rounded bg-black/70 px-2 py-0.5 text-[10px] font-medium text-zinc-100">
                           {slot.scheduledAt ? badgeFormatter.format(slot.scheduledAt) : "Pending"}
                         </span>
