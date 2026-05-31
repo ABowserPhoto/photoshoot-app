@@ -9,7 +9,6 @@ import KanbanBoard, { type BoardTask } from "./components/KanbanBoard";
 import StatsSidebar from "./components/StatsSidebar";
 import GlobalNavButtons from "@/app/components/GlobalNavButtons";
 import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
-import WorkflowArchiveLink from "@/app/components/WorkflowArchiveLink";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
@@ -876,9 +875,11 @@ function HomeContent() {
     await loadReferenceData();
   };
 
-  if (initialClientsLoad.current === null) {
-    initialClientsLoad.current = loadReferenceData();
-  }
+  useEffect(() => {
+    if (initialClientsLoad.current === null) {
+      initialClientsLoad.current = loadReferenceData();
+    }
+  }, []);
 
   const handleUploadSubmit = async () => {
     if (!uploadTask) return;
@@ -984,7 +985,6 @@ function HomeContent() {
               <Suspense fallback={null}>
                 <GlobalNavButtons
                   className="flex flex-wrap items-center justify-end gap-2"
-                  insertAfterPlanner={<WorkflowArchiveLink />}
                 >
                   <GlobalLogoutControl />
                 </GlobalNavButtons>

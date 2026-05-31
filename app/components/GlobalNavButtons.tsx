@@ -8,9 +8,7 @@ import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 
 export type GlobalNavButtonsProps = {
   className?: string;
-  /** Rendered after Planner (e.g. booking-only View Archive). */
-  insertAfterPlanner?: ReactNode;
-  /** Rendered after Booking (e.g. logout). */
+  /** Rendered after View Archive (e.g. logout). */
   children?: ReactNode;
 };
 
@@ -20,7 +18,7 @@ const btnBase =
 const idle = "border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800 dark:border-zinc-600";
 const active = "border-zinc-100 bg-zinc-100 text-zinc-900 shadow-sm dark:border-zinc-100";
 
-export default function GlobalNavButtons({ className, insertAfterPlanner, children }: GlobalNavButtonsProps) {
+export default function GlobalNavButtons({ className, children }: GlobalNavButtonsProps) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { isLoading, isAdmin } = useAuthRole();
@@ -44,7 +42,6 @@ export default function GlobalNavButtons({ className, insertAfterPlanner, childr
       <Link href="/planner" className={`${btnBase} ${plannerActive ? active : idle}`} prefetch>
         Planner
       </Link>
-      {insertAfterPlanner}
       <Link href="/kanban" className={`${btnBase} ${workflowActive ? active : idle}`} prefetch>
         Workflow
       </Link>
@@ -76,18 +73,18 @@ export default function GlobalNavButtons({ className, insertAfterPlanner, childr
       ) : isAdmin ? (
         <>
           <Link
-            href="/admin/statistics"
-            className={`${btnBase} ${statisticsActive ? active : idle}`}
-            prefetch
-          >
-            Statistics
-          </Link>
-          <Link
             href="/?booking=1"
             className={`${btnBase} ${bookingActive ? active : idle}`}
             scroll={false}
           >
             Booking
+          </Link>
+          <Link
+            href="/admin/statistics"
+            className={`${btnBase} ${statisticsActive ? active : idle}`}
+            prefetch
+          >
+            Statistics
           </Link>
         </>
       ) : (
@@ -95,6 +92,9 @@ export default function GlobalNavButtons({ className, insertAfterPlanner, childr
           Booking
         </Link>
       )}
+      <Link href={archive ? "/" : "/?archive=1"} className={`${btnBase} ${archive ? active : idle}`} scroll={false}>
+        {archive ? "View Active Board" : "View Archive"}
+      </Link>
       {children}
     </nav>
   );

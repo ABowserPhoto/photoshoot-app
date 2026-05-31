@@ -1,11 +1,10 @@
 "use client";
 
+import { createBrowserClient } from "@supabase/ssr";
 import { ExternalLink, Pause, Play, Plus, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type MutableRefObject } from "react";
 
-import { updateStudioTaskStatus } from "@/app/actions/studio-tasks";
 import { formatPlannerDuration, getPlannerElapsedSeconds } from "@/lib/plannerTimerUtils";
-import { supabase } from "@/lib/supabaseClient";
 
 type WidgetTaskStatus = "master" | "planning" | "processing" | "completed";
 
@@ -24,6 +23,7 @@ type StudioTaskRow = {
   status: string | null;
   started_at: string | null;
   elapsed_seconds: number | null;
+  assigned_to?: string | null;
 };
 
 const IPC_CHANNELS = {
@@ -85,14 +85,18 @@ function getPrimaryAction(status: WidgetTaskStatus): { label: string; nextStatus
   return null;
 }
 
-function statusLabel(status: WidgetTaskStatus): string {
-  if (status === "master") return "Backlog";
-  if (status === "planning") return "Planning";
-  if (status === "processing") return "Editing";
-  return "Completed";
-}
-
 export default function DesktopWidgetPage() {
+  const widgetSupabase = useMemo(() => {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+    if (!supabaseUrl || !supabaseAnonKey) {
+      return null;
+    }
+    return createBrowserClient(supabaseUrl, supabaseAnonKey);
+  }, []);
+  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authMode, setAuthMode] = useState<"supabase" | "gatekeeper" | null>(null);
   const [activeTask, setActiveTask] = useState<WidgetTask | null>(null);
   const [topTasks, setTopTasks] = useState<WidgetTask[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
@@ -106,57 +110,122 @@ export default function DesktopWidgetPage() {
     ipc?.send(IPC_CHANNELS.REFRESH_MAIN);
   }, []);
 
-  const loadWidgetState = useCallback(async () => {
-    if (!supabase) {
-      setError("Supabase client is not configured.");
-      setLoading(false);
-      return;
-    }
+  useEffect(() => {
+    console.log("[Widget Auth] Context User ID:", null);
+  }, []);
 
-    setLoading(true);
-    setError(null);
+  useEffect(() => {
+    let cancelled = false;
+    const authSubscriptionRef: MutableRefObject<{ unsubscribe: () => void } | null> = { current: null };
 
-    try {
-      const { data: authData } = await supabase.auth.getUser();
-      const uid = authData.user?.id ?? null;
-      if (!uid) {
-        setUserId(null);
-        setActiveTask(null);
-        setTopTasks([]);
-        setError("Not signed in.");
-        setLoading(false);
+    const initializeAndListen = async () => {
+      if (!widgetSupabase) {
+        console.log("[Widget Auth] Browser client unavailable (missing env vars).");
+        if (!cancelled) {
+          setAuthReady(true);
+        }
         return;
       }
 
-      const [activeRes, listRes] = await Promise.all([
-        supabase
-          .from("studio_tasks")
-          .select("id, title, status, started_at, elapsed_seconds")
-          .eq("assigned_to", uid)
-          .eq("status", "processing")
-          .order("updated_at", { ascending: false })
-          .limit(1),
-        supabase
-          .from("studio_tasks")
-          .select("id, title, status, started_at, elapsed_seconds")
-          .eq("assigned_to", uid)
-          .not("status", "in", '("completed","template")')
-          .order("order_index", { ascending: true })
-          .limit(3),
-      ]);
-
-      if (activeRes.error) {
-        throw new Error(activeRes.error.message);
-      }
-      if (listRes.error) {
-        throw new Error(listRes.error.message);
+      try {
+        const { data } = await widgetSupabase.auth.getSession();
+        console.log("[Widget Auth] Initial session:", data.session);
+        if (!cancelled) {
+          const nextUserId = data.session?.user?.id ?? null;
+          setSessionUserId(nextUserId);
+          setAuthMode(nextUserId ? "supabase" : null);
+          setAuthReady(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setSessionUserId(null);
+          setAuthReady(true);
+        }
       }
 
-      setUserId(uid);
-      const activeRows = (activeRes.data ?? []) as StudioTaskRow[];
-      const nextActive = activeRows.length > 0 ? mapRowToTask(activeRows[0]) : null;
+      if (cancelled) {
+        return;
+      }
+
+      const {
+        data: { subscription },
+      } = widgetSupabase.auth.onAuthStateChange((event, session) => {
+        console.log("[Widget Auth] Auth state changed:", event, session?.user?.id);
+        if (cancelled) {
+          return;
+        }
+        const nextUserId = session?.user?.id ?? null;
+        setSessionUserId(nextUserId);
+        setAuthMode(nextUserId ? "supabase" : null);
+        setAuthReady(true);
+      });
+      authSubscriptionRef.current = subscription;
+    };
+
+    void initializeAndListen();
+    return () => {
+      cancelled = true;
+      authSubscriptionRef.current?.unsubscribe();
+    };
+  }, [widgetSupabase]);
+
+  const resolveCurrentUserId = useCallback(async (): Promise<string | null> => {
+    if (sessionUserId) {
+      console.log("[Widget Auth] User source: session-state", sessionUserId);
+      return sessionUserId;
+    }
+
+    if (!widgetSupabase) {
+      console.log("[Widget Auth] User source: none (client unavailable)");
+      return null;
+    }
+
+    const { data: sessionData } = await widgetSupabase.auth.getSession();
+    const fromSession = sessionData.session?.user?.id ?? null;
+    if (fromSession) {
+      console.log("[Widget Auth] User source: getSession", fromSession);
+      return fromSession;
+    }
+
+    const { data: userData } = await widgetSupabase.auth.getUser();
+    const fromGetUser = userData.user?.id ?? null;
+    console.log("[Widget Auth] User source: getUser", fromGetUser);
+    return fromGetUser;
+  }, [sessionUserId, widgetSupabase]);
+  const loadWidgetState = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/studio-widget/tasks?limit=3", {
+        cache: "no-store",
+        credentials: "include",
+      });
+      const json = (await response.json().catch(() => null)) as
+        | {
+            ok?: boolean;
+            error?: string;
+            mode?: "supabase" | "gatekeeper";
+            userId?: string | null;
+            activeTask?: StudioTaskRow | null;
+            tasks?: StudioTaskRow[];
+          }
+        | null;
+
+      if (!response.ok || !json?.ok) {
+        throw new Error(json?.error ?? `Failed to load widget tasks (${response.status}).`);
+      }
+
+      const nextMode = json.mode ?? null;
+      const nextUserId = json.userId ?? null;
+      setAuthMode(nextMode);
+      setUserId(nextUserId);
+      const nextActive = json.activeTask ? mapRowToTask(json.activeTask) : null;
       setActiveTask(nextActive);
-      setTopTasks(((listRes.data ?? []) as StudioTaskRow[]).map(mapRowToTask));
+      setTopTasks((json.tasks ?? []).map(mapRowToTask));
+
+      if (nextMode === "gatekeeper") {
+        console.log("[Widget Auth] User source: gatekeeper-api", nextUserId);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load widget tasks.");
     } finally {
@@ -164,19 +233,103 @@ export default function DesktopWidgetPage() {
     }
   }, []);
 
+  const updateWidgetTaskStatus = useCallback(
+    async (taskId: string, status: WidgetTaskStatus, extra?: Record<string, unknown>) => {
+      const response = await fetch("/api/studio-widget/tasks", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "update-status",
+          taskId,
+          status,
+          extra: extra ?? {},
+        }),
+      });
+      const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!response.ok || !json?.ok) {
+        return { ok: false as const, error: json?.error ?? `Update failed (${response.status}).` };
+      }
+      return { ok: true as const };
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!widgetSupabase) {
+      return;
+    }
+
+    const handleFocus = () => {
+      void widgetSupabase.auth.getSession().then(({ data }) => {
+        const nextUserId = data.session?.user?.id ?? null;
+        console.log("[Widget Auth] Focus session sync:", nextUserId);
+        setSessionUserId(nextUserId);
+        setAuthReady(true);
+      });
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (!event.key || !event.key.includes("auth-token")) {
+        return;
+      }
+      void widgetSupabase.auth.getSession().then(({ data }) => {
+        const nextUserId = data.session?.user?.id ?? null;
+        console.log("[Widget Auth] Storage session sync:", nextUserId);
+        setSessionUserId(nextUserId);
+        setAuthReady(true);
+      });
+    };
+
+    window.addEventListener("focus", handleFocus);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [widgetSupabase]);
+
   useEffect(() => {
     const tick = window.setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
     return () => window.clearInterval(tick);
   }, []);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void loadWidgetState();
-    }, 0);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [loadWidgetState]);
+    if (!authReady) {
+      return;
+    }
+
+    void (async () => {
+      await Promise.resolve();
+      const sessionUid = await resolveCurrentUserId();
+      if (sessionUid) {
+        setSessionUserId(sessionUid);
+      }
+
+      const sessionExists = Boolean(sessionUid || sessionUserId);
+      if (!sessionExists) {
+        const authRes = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" }).catch(
+          () => null
+        );
+        if (authRes?.ok) {
+          setAuthMode("gatekeeper");
+          await loadWidgetState();
+          return;
+        }
+      }
+
+      if (!sessionExists && authMode !== "gatekeeper") {
+        setUserId(null);
+        setActiveTask(null);
+        setTopTasks([]);
+        setLoading(false);
+        setError("Not signed in.");
+        return;
+      }
+
+      await loadWidgetState();
+    })();
+  }, [authReady, sessionUserId, authMode, resolveCurrentUserId, loadWidgetState]);
 
   useEffect(() => {
     const ipc = getIpcRenderer();
@@ -185,13 +338,16 @@ export default function DesktopWidgetPage() {
     }
 
     const listener = () => {
+      if (!authReady) {
+        return;
+      }
       void loadWidgetState();
     };
     ipc.on(IPC_CHANNELS.REFRESH_EVENT, listener);
     return () => {
       ipc.removeListener(IPC_CHANNELS.REFRESH_EVENT, listener);
     };
-  }, [loadWidgetState]);
+  }, [authReady, loadWidgetState]);
 
   const activeElapsed = useMemo(() => {
     if (!activeTask) {
@@ -212,7 +368,7 @@ export default function DesktopWidgetPage() {
     if (activeTask.isPaused) {
       const optimistic = { ...activeTask, isPaused: false, startedAtSec: currentNowSec };
       setActiveTask(optimistic);
-      const res = await updateStudioTaskStatus(activeTask.id, "processing", {
+      const res = await updateWidgetTaskStatus(activeTask.id, "processing", {
         started_at: new Date(currentNowSec * 1000).toISOString(),
       });
       if (!res.ok) {
@@ -225,7 +381,7 @@ export default function DesktopWidgetPage() {
       const elapsed = getPlannerElapsedSeconds(activeTask.elapsedSeconds, activeTask.startedAtSec, currentNowSec);
       const optimistic = { ...activeTask, isPaused: true, startedAtSec: null, elapsedSeconds: elapsed };
       setActiveTask(optimistic);
-      const res = await updateStudioTaskStatus(activeTask.id, "processing", {
+      const res = await updateWidgetTaskStatus(activeTask.id, "processing", {
         started_at: null,
         elapsed_seconds: elapsed,
       });
@@ -280,7 +436,7 @@ export default function DesktopWidgetPage() {
       setActiveTask(optimisticTask.status === "completed" ? null : optimisticTask);
     }
 
-    const res = await updateStudioTaskStatus(task.id, action.nextStatus, extra);
+    const res = await updateWidgetTaskStatus(task.id, action.nextStatus, extra);
     if (!res.ok) {
       setTopTasks(previousTop);
       setActiveTask(previousActive);
@@ -294,7 +450,7 @@ export default function DesktopWidgetPage() {
   };
 
   const handleAddTask = async () => {
-    if (!supabase || !userId || busyTaskId) {
+    if (busyTaskId) {
       return;
     }
     const title = window.prompt("Task title");
@@ -305,20 +461,20 @@ export default function DesktopWidgetPage() {
     setBusyTaskId("new");
     setError(null);
 
-    const { error: insertError } = await supabase.from("studio_tasks").insert({
-      title: title.trim(),
-      description: "",
-      status: "master",
-      elapsed_seconds: 0,
-      started_at: null,
-      subtasks: [],
-      assigned_users: [],
-      assigned_to: userId,
-      order_index: 999999,
+    const createRes = await fetch("/api/studio-widget/tasks", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "create",
+        title: title.trim(),
+        assignedTo: userId,
+      }),
     });
+    const createJson = (await createRes.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
 
-    if (insertError) {
-      setError(insertError.message);
+    if (!createRes.ok || !createJson?.ok) {
+      setError(createJson?.error ?? `Could not create task (${createRes.status}).`);
       setBusyTaskId(null);
       return;
     }
@@ -337,6 +493,17 @@ export default function DesktopWidgetPage() {
     const ipc = getIpcRenderer();
     ipc?.send(IPC_CHANNELS.FOCUS_MAIN);
   };
+
+  if (!authReady) {
+    return (
+      <main className="min-h-screen bg-transparent p-2 text-zinc-100">
+        <section className="flex h-[434px] flex-col rounded-2xl border border-white/20 bg-zinc-950/85 px-3 py-3 shadow-2xl backdrop-blur-lg">
+          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Studio Widget</p>
+          <p className="mt-2 text-sm text-zinc-200">Loading Auth...</p>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-transparent p-2 text-zinc-100">
@@ -421,12 +588,7 @@ export default function DesktopWidgetPage() {
                 const action = getPrimaryAction(task.status);
                 return (
                   <article key={task.id} className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="line-clamp-2 text-xs font-semibold text-zinc-100">{task.title}</p>
-                      <span className="shrink-0 rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-300">
-                        {statusLabel(task.status)}
-                      </span>
-                    </div>
+                    <p className="line-clamp-2 text-xs font-semibold text-zinc-100">{task.title}</p>
                     {action ? (
                       <button
                         type="button"

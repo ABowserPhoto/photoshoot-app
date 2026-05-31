@@ -86,7 +86,22 @@ export async function updateStudioTaskStatus(
     }
   }
 
-  const { error } = await sb.from("studio_tasks").update(payload).eq("id", id);
+  const isMissingFileLocationsColumnError = (error: { message?: string | null; code?: string | null } | null) => {
+    if (!error) {
+      return false;
+    }
+    const message = String(error.message ?? "").toLowerCase();
+    const code = String(error.code ?? "").toLowerCase();
+    return message.includes("file_locations") && (message.includes("column") || code === "pgrst204");
+  };
+
+  let { error } = await sb.from("studio_tasks").update(payload).eq("id", id);
+  if (error && "file_locations" in payload && isMissingFileLocationsColumnError(error)) {
+    const fallbackPayload = { ...payload };
+    delete fallbackPayload.file_locations;
+    const fallbackResult = await sb.from("studio_tasks").update(fallbackPayload).eq("id", id);
+    error = fallbackResult.error;
+  }
   if (error) {
     console.error("[updateStudioTaskStatus]", error);
     return { ok: false, error: error.message };

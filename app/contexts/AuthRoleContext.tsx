@@ -134,3 +134,7 @@ export function useAuthRole(): AuthRoleState {
   }
   return ctx;
 }
+
+export function useAuthRoleSafe(): AuthRoleState | null {
+  return useContext(AuthRoleContext);
+}

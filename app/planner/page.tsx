@@ -42,7 +42,7 @@ type MoveTaskOptions = {
   startNowFromMaster?: boolean;
   subtasks?: PlannerSubTask[];
   assignedUsers?: PlannerAssignee[];
-  filePath?: string;
+  fileLocations?: string[];
 };
 
 type PlannerStatusKey = "master" | "planning" | "processing" | "completed";
@@ -65,6 +65,7 @@ type PlannerTask = {
   elapsedSeconds: number;
   isPaused: boolean;
   pauseNotes: string;
+  fileLocations: string[];
   filePath: string;
   totalTimeLabel: string;
   completedAt: string | null;
@@ -86,6 +87,7 @@ type StudioTaskRow = {
   description: string | null;
   status: string | null;
   file_path: string | null;
+  file_locations?: unknown;
   pause_reason: string | null;
   elapsed_seconds: number | null;
   started_at: string | null;
@@ -148,6 +150,78 @@ function normalizePlannerStatus(value: string | null | undefined): PlannerStatus
 function normalizeRecurringType(value: string | null | undefined): RecurringType {
   const normalized = (value ?? "").trim().toLowerCase();
   return normalized === "daily" || normalized === "weekly" || normalized === "monthly" ? normalized : "none";
+}
+
+function normalizeFileLocationsValue(value: unknown, fallback: string | null | undefined): string[] {
+  const candidateList: unknown[] = [];
+  if (Array.isArray(value)) {
+    candidateList.push(...value);
+  } else if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          candidateList.push(...parsed);
+        }
+      } catch {
+        candidateList.push(trimmed);
+      }
+    } else if (trimmed) {
+      candidateList.push(trimmed);
+    }
+  }
+  if (typeof fallback === "string" && fallback.trim()) {
+    candidateList.push(fallback.trim());
+  }
+
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const candidate of candidateList) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const trimmed = candidate.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+function normalizeFileLocationsInput(values: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+function primaryFilePathFromLocations(fileLocations: string[]): string {
+  return fileLocations[0] ?? "";
+}
+
+function isMissingFileLocationsColumnError(error: { message?: string | null; code?: string | null } | null): boolean {
+  if (!error) {
+    return false;
+  }
+  const message = String(error.message ?? "").toLowerCase();
+  const code = String(error.code ?? "").toLowerCase();
+  return message.includes("file_locations") && (message.includes("column") || code === "pgrst204");
+}
+
+function withoutFileLocationsField<T extends Record<string, unknown>>(payload: T): Record<string, unknown> {
+  const next = { ...payload } as Record<string, unknown>;
+  delete next.file_locations;
+  return next;
 }
 
 function parseSubtasks(value: unknown, taskId: string): PlannerSubTask[] {
@@ -282,6 +356,7 @@ function mapRowToTask(row: StudioTaskRow): PlannerTask {
   const status = normalizePlannerStatus(row.status);
   const elapsedSeconds = Math.max(0, row.elapsed_seconds ?? 0);
   const isPaused = status === "processing" && startedAtSec === null && elapsedSeconds > 0;
+  const fileLocations = normalizeFileLocationsValue(row.file_locations, row.file_path);
 
   const baseTask: PlannerTask = {
     id: String(row.id),
@@ -298,7 +373,8 @@ function mapRowToTask(row: StudioTaskRow): PlannerTask {
     elapsedSeconds,
     isPaused,
     pauseNotes: row.pause_reason?.trim() ?? "",
-    filePath: row.file_path ?? "",
+    fileLocations,
+    filePath: primaryFilePathFromLocations(fileLocations),
     totalTimeLabel: row.total_time_label ?? "",
     completedAt: row.completed_at ?? null,
     dueDate: row.due_date ?? null,
@@ -326,9 +402,9 @@ export default function PlannerPage() {
   const [completionMessage, setCompletionMessage] = useState<string | null>(null);
   const [pathModalTaskId, setPathModalTaskId] = useState<string | null>(null);
   const [pendingCompletionOptions, setPendingCompletionOptions] = useState<
-    Omit<MoveTaskOptions, "filePath"> | undefined
+    Omit<MoveTaskOptions, "fileLocations"> | undefined
   >(undefined);
-  const [filePathInputValue, setFilePathInputValue] = useState("");
+  const [completionFileLocationsInputValue, setCompletionFileLocationsInputValue] = useState<string[]>([]);
   const [isSavingCompletionPath, setIsSavingCompletionPath] = useState(false);
   const [pausingTaskId, setPausingTaskId] = useState<string | null>(null);
   const [pauseNotes, setPauseNotes] = useState("");
@@ -365,6 +441,9 @@ export default function PlannerPage() {
     let isMounted = true;
 
     const loadTasks = async () => {
+      if (authLoading) {
+        return;
+      }
       if (!supabase) {
         if (isMounted) {
           setPersistenceError("Supabase is not configured. Planner changes will not persist.");
@@ -378,13 +457,47 @@ export default function PlannerPage() {
 
       const { data: authData } = await supabase.auth.getUser();
       const uid = authData.user?.id ?? null;
+      const sessionUserLabel = authData.user?.user_metadata?.full_name ?? authData.user?.email ?? "You";
+      const gatekeeperMode = authenticated && !uid;
       if (isMounted) {
         setPlannerUserId(uid);
       }
 
       const [tasksResult, profilesResult] = await Promise.all([
-        supabase.from("studio_tasks").select("*").order("order_index", { ascending: true }),
-        supabase.from("profiles").select("id, email, full_name"),
+        gatekeeperMode
+          ? fetch("/api/planner/tasks", { cache: "no-store", credentials: "include" })
+              .then(async (res) => {
+                const json = (await res.json().catch(() => null)) as {
+                  data?: StudioTaskRow[];
+                  error?: string;
+                } | null;
+                if (!res.ok) {
+                  return { data: null, error: { message: json?.error ?? `HTTP ${res.status}` } };
+                }
+                return { data: (json?.data ?? []) as StudioTaskRow[], error: null };
+              })
+              .catch((error: unknown) => ({
+                data: null,
+                error: { message: error instanceof Error ? error.message : "Network error loading tasks." },
+              }))
+          : supabase.from("studio_tasks").select("*").order("order_index", { ascending: true }),
+        gatekeeperMode
+          ? fetch("/api/planner/assignees", { cache: "no-store", credentials: "include" })
+              .then(async (res) => {
+                const json = (await res.json().catch(() => null)) as {
+                  data?: ProfileRow[];
+                  error?: string;
+                } | null;
+                if (!res.ok) {
+                  return { data: null, error: { message: json?.error ?? `HTTP ${res.status}` } };
+                }
+                return { data: (json?.data ?? []) as ProfileRow[], error: null };
+              })
+              .catch((error: unknown) => ({
+                data: null,
+                error: { message: error instanceof Error ? error.message : "Network error loading assignees." },
+              }))
+          : supabase.from("profiles").select("id, email, full_name"),
       ]);
 
       if (!isMounted) {
@@ -402,6 +515,9 @@ export default function PlannerPage() {
         const assignees = [...profileRows]
           .map(profileRowToAssignee)
           .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+        if (uid && !assignees.some((assignee) => assignee.id === uid)) {
+          assignees.push({ id: uid, name: String(sessionUserLabel).trim() || "You" });
+        }
         if (isMounted) {
           setProfileAssignees(assignees);
         }
@@ -422,10 +538,10 @@ export default function PlannerPage() {
         if (assigned == null || String(assigned).trim() === "") {
           return true;
         }
-        if (!uid) {
+        if (!uid && !gatekeeperMode) {
           return false;
         }
-        return String(assigned) === uid;
+        return gatekeeperMode ? true : String(assigned) === uid;
       });
 
       const nextBoard: PlannerBoardState = { master: [], planning: [], processing: [], completed: [] };
@@ -461,7 +577,7 @@ export default function PlannerPage() {
       isMounted = false;
       loadTasksRef.current = null;
     };
-  }, []);
+  }, [authLoading, authenticated]);
 
   useEffect(() => {
     const handleWidgetRefresh = () => {
@@ -588,6 +704,7 @@ export default function PlannerPage() {
       assigned_users: PlannerAssignee[];
       label: PlannerTaskLabel;
       assigned_to: string | null;
+      file_locations: string[] | null;
     }>
   ) => {
     if (!supabase) {
@@ -606,7 +723,12 @@ export default function PlannerPage() {
       return;
     }
 
-    const { error } = await supabase.from("studio_tasks").update(updates).eq("id", taskId);
+    let { error } = await supabase.from("studio_tasks").update(updates).eq("id", taskId);
+    if (error && "file_locations" in updates && isMissingFileLocationsColumnError(error)) {
+      const fallbackPayload = withoutFileLocationsField(updates as Record<string, unknown>);
+      const fallbackResult = await supabase.from("studio_tasks").update(fallbackPayload).eq("id", taskId);
+      error = fallbackResult.error;
+    }
     if (error) {
       throw new Error(error.message);
     }
@@ -692,12 +814,17 @@ export default function PlannerPage() {
 
     if (destinationStatus === "completed") {
       const finalElapsed = getElapsedAt(nextTask, nowSec);
-      const resolvedPath = (options?.filePath ?? nextTask.filePath).trim();
+      const resolvedLocations = normalizeFileLocationsInput(
+        options?.fileLocations ??
+          (nextTask.fileLocations.length > 0 ? nextTask.fileLocations : nextTask.filePath ? [nextTask.filePath] : [])
+      );
+      const resolvedPath = primaryFilePathFromLocations(resolvedLocations);
       nextTask = {
         ...nextTask,
         elapsedSeconds: finalElapsed,
         startedAtSec: null,
         isPaused: false,
+        fileLocations: resolvedLocations,
         filePath: resolvedPath || nextTask.filePath,
         totalTimeLabel: formatDuration(finalElapsed),
         completedAt: new Date().toISOString(),
@@ -742,6 +869,7 @@ export default function PlannerPage() {
           status: nextTask.status,
           started_at: toDbTimestamp(nextTask.startedAtSec),
           elapsed_seconds: nextTask.elapsedSeconds,
+          file_locations: nextTask.fileLocations.length > 0 ? nextTask.fileLocations : null,
           file_path: nextTask.filePath || null,
           total_time_label: nextTask.totalTimeLabel || null,
           completed_at: nextTask.completedAt,
@@ -770,7 +898,7 @@ export default function PlannerPage() {
               description: nextTask.description,
               subtasks: subtasksForRecurringSpawn(nextTask),
               dueDate: nextDueDate,
-              filePath: "",
+              fileLocations: [],
               recurringType: nextTask.recurringType,
               label: nextTask.label,
               assignedTo: nextTask.assignedTo,
@@ -803,18 +931,24 @@ export default function PlannerPage() {
   const closeCompletionPathModal = () => {
     setPathModalTaskId(null);
     setPendingCompletionOptions(undefined);
-    setFilePathInputValue("");
+    setCompletionFileLocationsInputValue([]);
     setIsSavingCompletionPath(false);
   };
 
-  const requestTaskCompletion = (taskId: string, options?: Omit<MoveTaskOptions, "filePath">) => {
+  const requestTaskCompletion = (taskId: string, options?: Omit<MoveTaskOptions, "fileLocations">) => {
     const location = taskLookup.get(taskId);
     if (!location || location.column === "completed") {
       return;
     }
     setPathModalTaskId(taskId);
     setPendingCompletionOptions(options);
-    setFilePathInputValue(location.task.filePath ?? "");
+    setCompletionFileLocationsInputValue(
+      location.task.fileLocations.length > 0
+        ? location.task.fileLocations
+        : location.task.filePath
+          ? [location.task.filePath]
+          : []
+    );
   };
 
   const handleSaveCompletionPath = async () => {
@@ -825,7 +959,7 @@ export default function PlannerPage() {
     const taskId = pathModalTaskId;
     const saveOptions: MoveTaskOptions = {
       ...pendingCompletionOptions,
-      filePath: filePathInputValue.trim(),
+      fileLocations: normalizeFileLocationsInput(completionFileLocationsInputValue),
     };
 
     setIsSavingCompletionPath(true);
@@ -897,6 +1031,8 @@ export default function PlannerPage() {
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const title = payload.title.trim() || createTaskTitle(taskCounter);
     const normalizedSubtasks = normalizeNewTaskSubtasks(payload, title);
+    const normalizedFileLocations = normalizeFileLocationsInput(payload.fileLocations);
+    const primaryFilePath = primaryFilePathFromLocations(normalizedFileLocations);
     const nextTask: PlannerTask = {
       id: tempId,
       title,
@@ -912,7 +1048,8 @@ export default function PlannerPage() {
       elapsedSeconds: 0,
       isPaused: false,
       pauseNotes: "",
-      filePath: payload.filePath.trim(),
+      fileLocations: normalizedFileLocations,
+      filePath: primaryFilePath,
       totalTimeLabel: "",
       completedAt: null,
       dueDate: payload.dueDate,
@@ -945,7 +1082,8 @@ export default function PlannerPage() {
             title,
             description: payload.description.trim(),
             status: targetStatus,
-            file_path: payload.filePath.trim() || null,
+            file_locations: normalizedFileLocations,
+            file_path: primaryFilePath || null,
             elapsed_seconds: 0,
             started_at: null,
             total_time_label: null,
@@ -962,6 +1100,57 @@ export default function PlannerPage() {
           })
           .select("*")
           .single();
+
+        if (error && isMissingFileLocationsColumnError(error)) {
+          const fallback = await supabase
+            .from("studio_tasks")
+            .insert({
+              title,
+              description: payload.description.trim(),
+              status: targetStatus,
+              file_path: primaryFilePath || null,
+              elapsed_seconds: 0,
+              started_at: null,
+              total_time_label: null,
+              completed_at: null,
+              due_date: payload.dueDate,
+              recurring_type: payload.recurringType,
+              subtasks: normalizedSubtasks,
+              assigned_users: serializeAssignedUsers([]),
+              label: payload.label,
+              assigned_to: payload.assignedTo ?? null,
+              is_auto_generated: false,
+              photoshoot_id: null,
+              order_index: options?.initialOrderIndex ?? 0,
+            })
+            .select("*")
+            .single();
+          if (fallback.error || !fallback.data) {
+            throw new Error(fallback.error?.message ?? "Could not create planner task.");
+          }
+
+          const persistedTask = mapRowToTask(fallback.data as StudioTaskRow);
+          let boardWithPersistedId: PlannerBoardState | null = null;
+          setBoard((prev) => {
+            const next: PlannerBoardState = {
+              master: prev.master.map((task) => (task.id === tempId ? persistedTask : task)),
+              planning: prev.planning.map((task) => (task.id === tempId ? persistedTask : task)),
+              processing: prev.processing.map((task) => (task.id === tempId ? persistedTask : task)),
+              completed: prev.completed.map((task) => (task.id === tempId ? persistedTask : task)),
+            };
+            const ordered = applyOrderIndexes(next);
+            boardWithPersistedId = ordered;
+            return ordered;
+          });
+
+          if (boardWithPersistedId) {
+            await syncOrderIndexes(boardWithPersistedId);
+          } else if (optimisticBoard) {
+            await syncOrderIndexes(optimisticBoard);
+          }
+          setPersistenceError(null);
+          return;
+        }
 
         if (error || !data) {
           throw new Error(error?.message ?? "Could not create planner task.");
@@ -1013,7 +1202,7 @@ export default function PlannerPage() {
         description: "New manual planner task. Click and edit details in future iteration.",
         subtasks: createStandardPlannerSubtasks(createTaskTitle(taskCounter)),
         dueDate: null,
-        filePath: "",
+        fileLocations: [],
         recurringType: "none",
         label: null,
         assignedTo: null,
@@ -1056,7 +1245,7 @@ export default function PlannerPage() {
       elapsedSeconds: activeTask.elapsedSeconds,
       startedAtSec: activeTask.startedAtSec,
       totalTimeLabel: activeTask.totalTimeLabel,
-      filePath: activeTask.filePath,
+      fileLocations: activeTask.fileLocations,
       dueDate: activeTask.dueDate,
       recurringType: activeTask.recurringType,
       isAutoGenerated: activeTask.isAutoGenerated,
@@ -1128,7 +1317,8 @@ export default function PlannerPage() {
             title: payload.title.trim() || "Untitled Template",
             description: payload.description.trim(),
             status: "template",
-            file_path: payload.filePath.trim() || null,
+            file_locations: normalizeFileLocationsInput(payload.fileLocations),
+            file_path: primaryFilePathFromLocations(normalizeFileLocationsInput(payload.fileLocations)) || null,
             elapsed_seconds: 0,
             started_at: null,
             total_time_label: null,
@@ -1145,6 +1335,47 @@ export default function PlannerPage() {
           })
           .select("*")
           .single();
+
+        if (error && isMissingFileLocationsColumnError(error)) {
+          const fallback = await supabase
+            .from("studio_tasks")
+            .insert({
+              title: payload.title.trim() || "Untitled Template",
+              description: payload.description.trim(),
+              status: "template",
+              file_path: primaryFilePathFromLocations(normalizeFileLocationsInput(payload.fileLocations)) || null,
+              elapsed_seconds: 0,
+              started_at: null,
+              total_time_label: null,
+              completed_at: null,
+              due_date: payload.dueDate,
+              recurring_type: payload.recurringType,
+              subtasks: payload.subtasks,
+              assigned_users: serializeAssignedUsers([]),
+              label: null,
+              assigned_to: null,
+              is_auto_generated: false,
+              photoshoot_id: null,
+              order_index: 999999,
+            })
+            .select("*")
+            .single();
+          if (fallback.error || !fallback.data) {
+            throw new Error(fallback.error?.message ?? "Could not save template.");
+          }
+
+          const mappedTask = mapRowToTask(fallback.data as StudioTaskRow);
+          const persistedTemplate: PlannerTemplateOption = {
+            id: mappedTask.id,
+            title: mappedTask.title,
+            description: mappedTask.description,
+            subtasks: mappedTask.subtasks,
+            recurringType: mappedTask.recurringType,
+          };
+          setTemplates((prev) => prev.map((item) => (item.id === tempId ? persistedTemplate : item)));
+          setPersistenceError(null);
+          return;
+        }
 
         if (error || !data) {
           throw new Error(error?.message ?? "Could not save template.");
@@ -1195,7 +1426,8 @@ export default function PlannerPage() {
                 description: effective.description,
                 subtasks: sortSubtasksForDisplay(effective.subtasks),
                 dueDate: effective.dueDate,
-                filePath: effective.filePath,
+                fileLocations: normalizeFileLocationsInput(effective.fileLocations),
+                filePath: primaryFilePathFromLocations(normalizeFileLocationsInput(effective.fileLocations)),
                 recurringType: effective.recurringType,
                 label: effective.label,
                 assignedTo: effective.assignedTo,
@@ -1213,7 +1445,8 @@ export default function PlannerPage() {
           description: effective.description,
           subtasks: sortSubtasksForDisplay(effective.subtasks),
           due_date: effective.dueDate,
-          file_path: effective.filePath || null,
+          file_locations: normalizeFileLocationsInput(effective.fileLocations),
+          file_path: primaryFilePathFromLocations(normalizeFileLocationsInput(effective.fileLocations)) || null,
           recurring_type: effective.recurringType,
           label: effective.label,
           assigned_to: effective.assignedTo,
@@ -1515,7 +1748,12 @@ export default function PlannerPage() {
       startedAtSec: null,
       isPaused: true,
       pauseNotes: trimmedNotes,
-      filePath: trimmedFilePath || task.filePath,
+      fileLocations: normalizeFileLocationsInput(
+        trimmedFilePath ? [...task.fileLocations, trimmedFilePath] : task.fileLocations
+      ),
+      filePath: primaryFilePathFromLocations(
+        normalizeFileLocationsInput(trimmedFilePath ? [...task.fileLocations, trimmedFilePath] : task.fileLocations)
+      ),
     }));
 
     setIsSavingPause(true);
@@ -1524,6 +1762,9 @@ export default function PlannerPage() {
         started_at: null,
         elapsed_seconds: elapsed,
         pause_reason: trimmedNotes || null,
+        file_locations: normalizeFileLocationsInput(
+          trimmedFilePath ? [...latestTask.fileLocations, trimmedFilePath] : latestTask.fileLocations
+        ),
         file_path: trimmedFilePath || latestTask.filePath || null,
       });
       setPersistenceError(null);
@@ -2056,9 +2297,10 @@ export default function PlannerPage() {
                                   {task.pauseNotes ? (
                                     <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{task.pauseNotes}</p>
                                   ) : null}
-                                  {task.filePath ? (
+                                  {task.fileLocations.length > 0 ? (
                                     <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
-                                      Link: {task.filePath}
+                                      Links: {task.fileLocations[0]}
+                                      {task.fileLocations.length > 1 ? ` (+${task.fileLocations.length - 1})` : ""}
                                     </p>
                                   ) : null}
                                 </div>
@@ -2070,9 +2312,10 @@ export default function PlannerPage() {
                                     : `Elapsed: ${formatDuration(elapsedNow)}`}
                                 </p>
                               ) : null}
-                              {column.id === "completed" && task.filePath ? (
+                              {column.id === "completed" && task.fileLocations.length > 0 ? (
                                 <p className="mt-1 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
-                                  File: {task.filePath}
+                                  Files: {task.fileLocations[0]}
+                                  {task.fileLocations.length > 1 ? ` (+${task.fileLocations.length - 1})` : ""}
                                 </p>
                               ) : null}
                               {totalCount > 0 ? (
@@ -2122,9 +2365,9 @@ export default function PlannerPage() {
       />
       <PlannerCompletionPathModal
         isOpen={pathModalTaskId !== null}
-        filePath={filePathInputValue}
+        fileLocations={completionFileLocationsInputValue}
         isSaving={isSavingCompletionPath}
-        onFilePathChange={setFilePathInputValue}
+        onFileLocationsChange={setCompletionFileLocationsInputValue}
         onSavePath={() => void handleSaveCompletionPath()}
         onCancel={closeCompletionPathModal}
       />

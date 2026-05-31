@@ -1,33 +1,27 @@
 "use client";
 
-import { useEffect, useState, type DragEvent } from "react";
+import { useState, type DragEvent } from "react";
 
 import { getDirectoryFromFilePath, getElectronFilePath } from "@/lib/plannerFilePath";
 
 type PlannerCompletionPathModalProps = {
   isOpen: boolean;
-  filePath: string;
+  fileLocations: string[];
   isSaving?: boolean;
-  onFilePathChange: (value: string) => void;
+  onFileLocationsChange: (values: string[]) => void;
   onSavePath: () => void;
   onCancel: () => void;
 };
 
 export default function PlannerCompletionPathModal({
   isOpen,
-  filePath,
+  fileLocations,
   isSaving = false,
-  onFilePathChange,
+  onFileLocationsChange,
   onSavePath,
   onCancel,
 }: PlannerCompletionPathModalProps) {
   const [isDropzoneActive, setIsDropzoneActive] = useState(false);
-
-  useEffect(() => {
-    if (!isOpen) {
-      setIsDropzoneActive(false);
-    }
-  }, [isOpen]);
 
   if (!isOpen) {
     return null;
@@ -63,8 +57,29 @@ export default function PlannerCompletionPathModal({
 
     const absolutePath = getElectronFilePath(file);
     if (absolutePath) {
-      onFilePathChange(getDirectoryFromFilePath(absolutePath));
+      const nextPath = getDirectoryFromFilePath(absolutePath).trim();
+      if (!nextPath) {
+        return;
+      }
+      const cleaned = fileLocations.map((value) => value.trim()).filter(Boolean);
+      onFileLocationsChange(cleaned.includes(nextPath) ? cleaned : [...cleaned, nextPath]);
     }
+  };
+
+  const effectiveLocations = fileLocations.length > 0 ? fileLocations : [""];
+
+  const handleUpdateLocation = (index: number, value: string) => {
+    const next = [...effectiveLocations];
+    next[index] = value;
+    onFileLocationsChange(next);
+  };
+
+  const handleRemoveLocation = (index: number) => {
+    onFileLocationsChange(effectiveLocations.filter((_, i) => i !== index));
+  };
+
+  const handleAddLocation = () => {
+    onFileLocationsChange([...effectiveLocations, ""]);
   };
 
   return (
@@ -87,8 +102,7 @@ export default function PlannerCompletionPathModal({
           Task Completed! Link Finished Files
         </h2>
         <p className="mt-2 text-sm text-zinc-400">
-          Add the local folder path for finished deliverables. You can drag a file from the desktop app or paste the
-          path manually.
+          Add one or more local paths/links for finished deliverables before finalizing completion.
         </p>
 
         <div
@@ -103,14 +117,36 @@ export default function PlannerCompletionPathModal({
           }`}
         >
           <p className="mb-4 text-center text-sm text-zinc-400">
-            Drag and drop the finished folder here, or paste the path.
+            Drag and drop a finished folder here, or paste paths/links manually.
           </p>
-          <input
-            value={filePath}
-            onChange={(event) => onFilePathChange(event.target.value)}
-            placeholder="C:\Projects\Deliverables\Shoot-001"
-            className="w-full rounded-lg border border-zinc-600 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
-          />
+          <div className="w-full space-y-2">
+            {effectiveLocations.map((location, index) => (
+              <div key={`completion-location-${index}`} className="flex items-center gap-2">
+                <input
+                  value={location}
+                  onChange={(event) => handleUpdateLocation(index, event.target.value)}
+                  placeholder="C:\\Projects\\Deliverables\\Shoot-001 or https://link"
+                  className="w-full rounded-lg border border-zinc-600 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleRemoveLocation(index)}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-zinc-600 text-sm font-bold text-zinc-200 transition hover:bg-zinc-800"
+                  aria-label="Remove location"
+                  title="Remove location"
+                >
+                  x
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={handleAddLocation}
+            className="mt-3 inline-flex h-8 items-center justify-center rounded-md border border-zinc-600 px-3 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-800"
+          >
+            + Add Location
+          </button>
         </div>
 
         <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">

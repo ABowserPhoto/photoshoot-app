@@ -34,7 +34,6 @@ const SELECTION_SYNCING_STATUS = "syncing_selection";
 const CLAIM_STATUS = "pending_processing";
 const ACTIVE_STATUS = "Processing";
 const READY_FOR_REVIEW_STATUS = "Ready for Review";
-const FAILED_STATUS = "Failed";
 const PREVIEW_DEBOUNCE_MS = 1500;
 const RAW_PREVIEW_EXTENSIONS = new Set([".nef", ".cr2", ".cr3", ".arw", ".dng", ".raf", ".rw2", ".orf"]);
 const RAW_PREVIEW_TAGS = ["PreviewImage", "JpgFromRaw", "OtherImage", "ThumbnailImage"];
@@ -1339,8 +1338,14 @@ async function processPendingProcessing(supabase) {
       const mergedDir = path.join(taskRoot, "3_Merged");
       const mergedFiles = readNaturallySortedImageFiles(mergedDir);
       const sqiMergedCount = mergedFiles.filter((name) => name.toLowerCase().includes("_sqi")).length;
+      const expectedComfyJobs = sqiMergedCount;
+      const queuedComfyJobs = Number(processingResult.comfyQueuedCount ?? 0);
+      const failedComfyJobs = Number(processingResult.comfyFailedCount ?? 0);
+      const noMergeNeeded = expectedComfyJobs === 0;
+      let comfyResult = { copied: 0, timedOut: false };
+
       if (processingResult.comfyQueuedCount > 0 && sqiMergedCount > 0) {
-        const comfyResult = await waitForComfyOutputs(taskRoot, sqiMergedCount, processingStartedAtMs);
+        comfyResult = await waitForComfyOutputs(taskRoot, sqiMergedCount, processingStartedAtMs);
         if (comfyResult.timedOut) {
           console.warn(`[worker] Continuing task ${taskId} after Comfy timeout.`);
         }
@@ -1349,14 +1354,40 @@ async function processPendingProcessing(supabase) {
           `[worker] Skipping Comfy wait for task ${taskId} (queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}, sqi=${sqiMergedCount}).`
         );
       }
-      await uploadMergedAndFinalsForReview(supabase, localFolderName);
-      await finalizeTask(supabase, taskId, READY_FOR_REVIEW_STATUS);
-      console.info(`[worker] Task ${taskId} marked as ${READY_FOR_REVIEW_STATUS}.`);
+
+      const fullyMerged =
+        expectedComfyJobs > 0 &&
+        queuedComfyJobs === expectedComfyJobs &&
+        failedComfyJobs === 0 &&
+        comfyResult.timedOut === false &&
+        Number(comfyResult.copied ?? 0) >= expectedComfyJobs;
+
+      if (fullyMerged) {
+        await uploadMergedAndFinalsForReview(supabase, localFolderName);
+        await finalizeTask(supabase, taskId, READY_FOR_REVIEW_STATUS);
+        console.info(`[worker] Task ${taskId} marked as ${READY_FOR_REVIEW_STATUS}.`);
+      } else {
+        const reasonParts = [
+          noMergeNeeded ? "no-merge-needed" : null,
+          queuedComfyJobs !== expectedComfyJobs
+            ? `queued-mismatch(${queuedComfyJobs}/${expectedComfyJobs})`
+            : null,
+          failedComfyJobs > 0 ? `failed=${failedComfyJobs}` : null,
+          comfyResult.timedOut ? "timeout" : null,
+          expectedComfyJobs > 0 && Number(comfyResult.copied ?? 0) < expectedComfyJobs
+            ? `copied-mismatch(${Number(comfyResult.copied ?? 0)}/${expectedComfyJobs})`
+            : null,
+        ].filter(Boolean);
+        await finalizeTask(supabase, taskId, SELECTION_AVAILABLE_STATUS);
+        console.info(
+          `[worker] Task ${taskId} left in ${SELECTION_AVAILABLE_STATUS}; merge completion not 100% (${reasonParts.join(", ") || "unknown-reason"}).`
+        );
+      }
     } catch (err) {
       console.error("RAW COMFY ERROR:", err);
       console.error(`[worker] Task ${taskId} failed:`, err instanceof Error ? err.message : err);
       try {
-        await finalizeTask(supabase, taskId, FAILED_STATUS);
+        await finalizeTask(supabase, taskId, SELECTION_AVAILABLE_STATUS);
       } catch (statusErr) {
         console.error(
           `[worker] Could not set fallback status for ${taskId}:`,

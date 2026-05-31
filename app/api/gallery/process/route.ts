@@ -69,7 +69,7 @@ export async function POST(request: Request) {
 
         const { error: statusError } = await supabase
           .from("tasks")
-          .update({ status: "ready-for-review" })
+          .update({ status: "Selection Available" })
           .eq("id", shootId);
 
         if (statusError) {

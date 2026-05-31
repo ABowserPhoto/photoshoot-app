@@ -6,6 +6,7 @@ const http = require("http");
 
 const isDev = !app.isPackaged;
 const DEFAULT_PORT = Number(process.env.PORT) || 3000;
+const CUSTOM_ICON_PATH = path.join(__dirname, "..", "public", "WorkflowLogo-2.ico");
 
 let mainWindow = null;
 let widgetWindow = null;
@@ -22,6 +23,27 @@ const IPC_CHANNELS = {
   TOGGLE_WIDGET: "desktop-widget:toggle",
   FOCUS_MAIN: "desktop-widget:focus-main",
 };
+
+function resolveAppIconPath() {
+  if (fs.existsSync(CUSTOM_ICON_PATH)) {
+    return CUSTOM_ICON_PATH;
+  }
+
+  const fallbackCandidates = [
+    path.join(process.resourcesPath, "icon.ico"),
+    path.join(app.getAppPath(), "build", "icon.ico"),
+    path.join(app.getAppPath(), "public", "favicon.ico"),
+    path.join(__dirname, "..", "build", "icon.ico"),
+  ];
+
+  for (const candidate of fallbackCandidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
 
 function resolveStandaloneServerPath() {
   const candidates = [
@@ -187,10 +209,12 @@ function stopProductionServer() {
 }
 
 function createWindow(loadUrl = serverUrl) {
+  const appIconPath = resolveAppIconPath();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     frame: true,
+    icon: appIconPath ?? undefined,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -224,6 +248,7 @@ function createFloatingWidget(loadUrl = serverUrl) {
     return widgetWindow;
   }
 
+  const appIconPath = resolveAppIconPath();
   widgetWindow = new BrowserWindow({
     width: 320,
     height: 450,
@@ -233,6 +258,7 @@ function createFloatingWidget(loadUrl = serverUrl) {
     resizable: false,
     skipTaskbar: true,
     show: false,
+    icon: appIconPath ?? undefined,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -298,18 +324,9 @@ function focusMainWindow() {
 }
 
 function resolveTrayIcon() {
-  const candidates = [
-    path.join(process.resourcesPath, "icon.ico"),
-    path.join(app.getAppPath(), "build", "icon.ico"),
-    path.join(app.getAppPath(), "public", "favicon.ico"),
-    path.join(__dirname, "..", "build", "icon.ico"),
-  ];
-
-  for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) {
-      continue;
-    }
-    const image = nativeImage.createFromPath(candidate);
+  const appIconPath = resolveAppIconPath();
+  if (appIconPath) {
+    const image = nativeImage.createFromPath(appIconPath);
     if (!image.isEmpty()) {
       return image;
     }
