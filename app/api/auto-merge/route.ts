@@ -13,8 +13,6 @@ export const dynamic = "force-dynamic";
 const SNS_HDR_PATH =
   process.env.SNSHDR_PATH?.trim() || "C:\\Program Files\\SNS-HDR Pro 2\\SNS-HDR.exe";
 const SNS_HDR_PRESET = process.env.SNSHDR_PRESET?.trim() || "Hero_Interior";
-const SNS_HDR_PRESET_DIR =
-  process.env.SNSHDR_PRESET_DIR?.trim() || "C:\\Program Files\\SNS-HDR Pro 2\\Presets";
 const SNSHDR_TEMPLATE_PATH =
   process.env.SNSHDR_TEMPLATE_PATH?.trim() || path.join(process.cwd(), "lib", "comfy", "workflow_api.json");
 
@@ -43,26 +41,6 @@ type CommandRunResult = {
   stdout: string;
   stderr: string;
 };
-
-function looksLikeAbsolutePath(value: string): boolean {
-  return /^[a-zA-Z]:\\/.test(value) || value.startsWith("\\\\");
-}
-
-function resolveSnsHdrPresetArg(
-  rawPreset: string
-): { presetArg: string; existsOnDisk: boolean; resolution: "absolute-path" | "raw-name" } {
-  const trimmed = rawPreset.trim();
-  if (!trimmed) {
-    return { presetArg: "Hero_Interior", existsOnDisk: false, resolution: "raw-name" };
-  }
-
-  if (looksLikeAbsolutePath(trimmed)) {
-    const withExt = path.extname(trimmed) ? trimmed : `${trimmed}.sfs`;
-    return { presetArg: withExt, existsOnDisk: fs.existsSync(withExt), resolution: "absolute-path" };
-  }
-  // Pass preset names (e.g. Hero_Interior) directly and let SNS-HDR resolve internally.
-  return { presetArg: trimmed, existsOnDisk: false, resolution: "raw-name" };
-}
 
 async function runCommandWithDiagnostics(
   command: string,
@@ -249,17 +227,14 @@ export async function POST(request: Request) {
 
     const outputs: string[] = [];
     const origin = resolvePublicOrigin(request);
-    const snsPreset = resolveSnsHdrPresetArg(SNS_HDR_PRESET);
+    const snsPreset = SNS_HDR_PRESET;
     const templateExists = fs.existsSync(SNSHDR_TEMPLATE_PATH);
     console.info("[auto-merge] snsHDR template diagnostics", {
       templatePath: SNSHDR_TEMPLATE_PATH,
       templateExists,
       snsHdrPath: SNS_HDR_PATH,
       snsHdrExists: fs.existsSync(SNS_HDR_PATH),
-      snsHdrPresetRaw: SNS_HDR_PRESET,
-      snsHdrPresetArg: snsPreset.presetArg,
-      snsHdrPresetExists: snsPreset.existsOnDisk,
-      snsHdrPresetDir: SNS_HDR_PRESET_DIR,
+      snsHdrPreset: snsPreset,
       localFolderName,
       bracketSize,
     });
@@ -282,7 +257,7 @@ export async function POST(request: Request) {
             .toString(16)
             .slice(2)}.jpg`
         );
-        const snsArgs = [...inputs, "-preset", snsPreset.presetArg, "-o", tempOutFile];
+        const snsArgs = [...inputs, "-preset", snsPreset, "-o", tempOutFile];
         const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
         console.log("Executing snsHDR command:", constructedCommandString);
         await runCommandWithDiagnostics(
@@ -294,7 +269,7 @@ export async function POST(request: Request) {
             outFile,
             tempOutFile,
             inputs,
-            snsPreset: snsPreset.presetArg,
+            snsPreset,
             commandPreview: constructedCommandString,
           }
         );

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import sharp from "sharp";
@@ -12,8 +13,10 @@ import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 const execAsync = promisify(exec);
 
-const SNS_HDR_PATH = '"C:\\Program Files\\SNS-HDR Pro 2\\SNS-HDR.exe"';
-const SNS_HDR_PRESET = "Hero_Interior";
+const SNS_HDR_PATH = process.env.SNSHDR_PATH?.trim() || "C:\\Program Files\\SNS-HDR Pro 2\\SNS-HDR.exe";
+const SNS_HDR_PRESET = process.env.SNSHDR_PRESET?.trim() || "Hero_Interior";
+const EXIFTOOL_PATH =
+  process.env.EXIFTOOL_PATH?.trim() || "C:\\Program Files\\SNS-HDR Pro 2\\ExifTool.exe";
 const COMFY_TRIGGER_TOKENS = (process.env.COMFYUI_TRIGGER_TOKENS ?? "_sqi")
   .split(",")
   .map((token) => token.trim().toLowerCase())
@@ -56,22 +59,73 @@ function quoteArg(p: string): string {
   return `"${p.replace(/"/g, '\\"')}"`;
 }
 
-let exiftoolPathPromise: Promise<string> | null = null;
+type CommandRunResult = {
+  stdout: string;
+  stderr: string;
+};
 
-async function getExiftoolPath(): Promise<string> {
-  if (!exiftoolPathPromise) {
-    exiftoolPathPromise = import("exiftool-vendored").then(async (module) => {
-      const resolved = module.exiftoolPath ?? module.default?.exiftoolPath;
-      if (typeof resolved === "function") {
-        return resolved();
-      }
-      if (typeof resolved === "string" && resolved.trim()) {
-        return resolved;
-      }
-      throw new Error("exiftool-vendored did not expose exiftoolPath.");
+async function runCommandWithDiagnostics(
+  command: string,
+  args: string[],
+  context: Record<string, unknown>
+): Promise<CommandRunResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
     });
-  }
-  return exiftoolPathPromise;
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      console.error("[processingEngine] merge command process error", {
+        ...context,
+        command,
+        args,
+        error: error.message,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+      });
+      reject(
+        new Error(
+          `Merge process failed to start: ${error.message}${
+            stderr.trim() ? ` | stderr=${stderr.trim()}` : ""
+          }`
+        )
+      );
+    });
+
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      console.error("[processingEngine] merge command non-zero exit", {
+        ...context,
+        command,
+        args,
+        exitCode: code,
+        signal,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+      });
+      reject(
+        new Error(
+          `Merge command failed (exit=${code ?? "null"}${signal ? `, signal=${signal}` : ""})${
+            stderr.trim() ? ` | stderr=${stderr.trim()}` : ""
+          }`
+        )
+      );
+    });
+  });
 }
 
 function createSupabase(): SupabaseClient | null {
@@ -365,36 +419,73 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
     let bracketIndex = 1;
     const comfyErrors: string[] = [];
     const origin = resolveInternalAppOrigin();
+    const snsPreset = SNS_HDR_PRESET;
+    console.info("[processingEngine] snsHDR diagnostics", {
+      snsHdrPath: SNS_HDR_PATH,
+      snsHdrExists: fs.existsSync(SNS_HDR_PATH),
+      snsHdrPreset: snsPreset,
+      localFolderName,
+    });
 
     const totalBrackets = brackets.length;
     for (const group of brackets) {
+      const currentBracketIndex = bracketIndex;
       const inputs = group.map((name) => path.join(selectsDir, name));
       const firstName = group[0]!;
-      const outBaseName = mergedOutputFileName(firstName, bracketIndex, totalBrackets);
+      const outBaseName = mergedOutputFileName(firstName, currentBracketIndex, totalBrackets);
       const outFile = path.join(mergedDir, outBaseName);
+      const tempOutFile = path.join(
+        mergedDir,
+        `${path.basename(outBaseName, path.extname(outBaseName))}.__tmp_${Date.now()}_${Math.random()
+          .toString(16)
+          .slice(2)}${path.extname(outBaseName) || ".jpg"}`
+      );
 
-      const parts = [
-        SNS_HDR_PATH,
-        ...inputs.map(quoteArg),
-        "-preset",
-        quoteArg(SNS_HDR_PRESET),
-        "-o",
-        quoteArg(outFile),
-      ];
-      const cmd = parts.join(" ");
-      await execAsync(cmd, { windowsHide: true });
+      const snsArgs = [...inputs, "-preset", snsPreset, "-o", tempOutFile];
+      const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
+      console.log("[processingEngine] Executing snsHDR command:", constructedCommandString);
+      try {
+        await runCommandWithDiagnostics(SNS_HDR_PATH, snsArgs, {
+          localFolderName,
+          bracketIndex: currentBracketIndex,
+          outFile,
+          tempOutFile,
+          inputs,
+          snsPreset,
+          commandPreview: constructedCommandString,
+        });
+      } catch (error) {
+        const mergeError = error instanceof Error ? error.message : String(error);
+        throw new Error(`snsHDR failed on bracket ${currentBracketIndex}: ${mergeError}`);
+      }
+      if (fs.existsSync(outFile)) {
+        await fs.promises.unlink(outFile);
+      }
+      await fs.promises.rename(tempOutFile, outFile);
 
-      const exiftoolPath = await getExiftoolPath();
-      const restoreExifCmd = [
-        quoteArg(exiftoolPath),
-        "-TagsFromFile",
-        quoteArg(inputs[0]!),
-        "-all:all",
-        "-overwrite_original",
-        quoteArg(outFile),
-      ].join(" ");
-      await execAsync(restoreExifCmd, { windowsHide: true });
-      console.log("[processingEngine] Restored EXIF data from original bracket");
+      try {
+        const restoreExifCmd = [
+          quoteArg(EXIFTOOL_PATH),
+          "-TagsFromFile",
+          quoteArg(inputs[0]!),
+          "-all:all",
+          "-overwrite_original",
+          quoteArg(outFile),
+        ].join(" ");
+        await execAsync(restoreExifCmd, { windowsHide: true });
+        console.log("[processingEngine] Restored EXIF data from original bracket");
+      } catch (exifError) {
+        const message = exifError instanceof Error ? exifError.message : String(exifError);
+        const maybeErrno = (exifError as { code?: string } | null)?.code;
+        if (maybeErrno === "ENOENT" || /not\s+found/i.test(message)) {
+          console.warn("ExifTool not found, skipping metadata injection");
+        } else {
+          console.warn(
+            `[processingEngine] EXIF restore failed for ${outBaseName}; continuing without EXIF metadata.`,
+            message
+          );
+        }
+      }
 
       mergedOutputs.push(outFile);
       mergedMeta.push({ outBaseName, firstName, bracketIndex });

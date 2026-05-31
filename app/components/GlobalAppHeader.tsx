@@ -16,6 +16,9 @@ function hideTopSuiteBar(pathname: string | null) {
   if (pathname === "/planner" || pathname.startsWith("/planner/")) {
     return true;
   }
+  if (pathname === "/desktop-widget" || pathname.startsWith("/desktop-widget/")) {
+    return true;
+  }
   return false;
 }
 

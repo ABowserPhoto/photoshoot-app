@@ -518,6 +518,7 @@ export default function KanbanBoard({
   showArchived = false,
 }: KanbanBoardProps) {
   const [board, setBoard] = useState<BoardState>(INITIAL_BOARD);
+  const [ipcRefreshSignal, setIpcRefreshSignal] = useState(0);
   const [archivedTasks, setArchivedTasks] = useState<BoardTask[]>([]);
   const [collapsedColumns, setCollapsedColumns] = useState<Partial<Record<ColumnKey, boolean>>>({});
   const [isLoading, setIsLoading] = useState(true);
@@ -565,6 +566,16 @@ export default function KanbanBoard({
       window.clearTimeout(timer);
     };
   }, [previewRegenToast]);
+
+  useEffect(() => {
+    const onWidgetRefresh = () => {
+      setIpcRefreshSignal((prev) => prev + 1);
+    };
+    window.addEventListener("desktop-widget:refresh", onWidgetRefresh);
+    return () => {
+      window.removeEventListener("desktop-widget:refresh", onWidgetRefresh);
+    };
+  }, []);
 
   const dailyCompletionCount = useMemo(
     () => countTodayCompletions(board, archivedTasks),
@@ -672,7 +683,7 @@ export default function KanbanBoard({
     return () => {
       isMounted = false;
     };
-  }, [refreshSignal]);
+  }, [refreshSignal, ipcRefreshSignal]);
 
   useEffect(() => {
     if (!supabase) {

@@ -22,6 +22,9 @@ const FOLDER_POLL_INTERVAL_MS = 15 * 1000;
 const PROCESSING_POLL_INTERVAL_MS = 5 * 60 * 1000;
 const PREVIEW_FALLBACK_SYNC_INTERVAL_MS = 4 * 60 * 1000;
 const LOCAL_PROCESS_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const SELECTS_DEBOUNCE_MS = readPositiveIntEnv("SELECTS_DEBOUNCE_MS", 8000);
+const SELECTS_STABILITY_WAIT_MS = readPositiveIntEnv("SELECTS_STABILITY_WAIT_MS", 2500);
+const SELECTS_STABILITY_MAX_PASSES = readPositiveIntEnv("SELECTS_STABILITY_MAX_PASSES", 8);
 
 const AWAITING_FOLDER_STATUS = "awaiting_folder_creation";
 const BOOKING_STATUS = "Booking";
@@ -95,8 +98,11 @@ const COMFY_WAIT_TIMEOUT_MS = readPositiveIntEnv("COMFY_WAIT_TIMEOUT_MS", 12 * 6
 const previewSyncTimers = new Map();
 const previewSyncInFlight = new Set();
 const previewSyncPending = new Set();
+const selectsProcessTimers = new Map();
 let rawWatcherStarted = false;
+let selectsWatcherStarted = false;
 let exiftoolPathPromise = null;
+let lastSelectsTriggerAtMs = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -828,6 +834,71 @@ function localFolderNameFromRawPath(filePath) {
   return taskSegments.join(path.sep);
 }
 
+function localFolderNameFromSelectsPath(filePath) {
+  const root = getShootFoldersRoot();
+  const absolute = path.resolve(filePath);
+  const relativeToRoot = path.relative(root, absolute);
+  if (!relativeToRoot || relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
+    return null;
+  }
+  const segments = relativeToRoot.split(path.sep).filter(Boolean);
+  const selectsIndex = segments.indexOf("2_Selects");
+  if (selectsIndex < 1) {
+    return null;
+  }
+  const taskSegments = segments.slice(0, selectsIndex);
+  if (taskSegments.length === 0) {
+    return null;
+  }
+  return taskSegments.join(path.sep);
+}
+
+function getSelectsFolderSnapshot(selectsDir) {
+  if (!fs.existsSync(selectsDir)) {
+    return "missing";
+  }
+  try {
+    const entries = fs.readdirSync(selectsDir, { withFileTypes: true });
+    const snapshot = entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => {
+        const fullPath = path.join(selectsDir, entry.name);
+        try {
+          const stat = fs.statSync(fullPath);
+          return `${entry.name}:${stat.size}:${Math.floor(stat.mtimeMs)}`;
+        } catch {
+          return `${entry.name}:stat-error`;
+        }
+      })
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+    return snapshot.join("|");
+  } catch (error) {
+    return `snapshot-error:${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+async function waitForSelectsFolderToStabilize(localFolderName) {
+  const selectsDir = path.join(getShootFoldersRoot(), localFolderName, "2_Selects");
+  let previous = "";
+  for (let pass = 1; pass <= SELECTS_STABILITY_MAX_PASSES; pass += 1) {
+    const current = getSelectsFolderSnapshot(selectsDir);
+    if (pass > 1 && current === previous) {
+      console.info(
+        `[worker] Selects folder stabilized for ${localFolderName} after ${pass} pass(es).`
+      );
+      return;
+    }
+    previous = current;
+    console.log(
+      `[worker] Selects stabilization pass ${pass}/${SELECTS_STABILITY_MAX_PASSES} for ${localFolderName}`
+    );
+    await sleep(SELECTS_STABILITY_WAIT_MS);
+  }
+  console.warn(
+    `[worker] Selects folder did not stabilize within max passes for ${localFolderName}; proceeding anyway.`
+  );
+}
+
 function schedulePreviewSync(localFolderName) {
   const existing = previewSyncTimers.get(localFolderName);
   if (existing) {
@@ -843,6 +914,51 @@ function schedulePreviewSync(localFolderName) {
     });
   }, PREVIEW_DEBOUNCE_MS);
   previewSyncTimers.set(localFolderName, timer);
+}
+
+function scheduleSelectsProcessing(localFolderName, filePath, eventName) {
+  if (eventName === "add" || eventName === "change") {
+    console.log("New file detected:", filePath);
+  }
+  console.log(
+    `[worker] Selects watcher event="${eventName}" folder="${localFolderName}" path="${filePath}"`
+  );
+  const existing = selectsProcessTimers.get(localFolderName);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  const timer = setTimeout(() => {
+    selectsProcessTimers.delete(localFolderName);
+    lastSelectsTriggerAtMs = Date.now();
+    void (async () => {
+      try {
+        console.info(
+          `[worker] Selects debounce elapsed for ${localFolderName}. Waiting for stable copy completion before processing.`
+        );
+        await waitForSelectsFolderToStabilize(localFolderName);
+        await processSelectionAvailable(getSupabaseClient());
+        await processPendingProcessing(getSupabaseClient());
+      } catch (error) {
+        console.error(
+          `[worker] Immediate selects-triggered processing failed for ${localFolderName}:`,
+          error instanceof Error ? error.message : error
+        );
+      }
+    })();
+  }, SELECTS_DEBOUNCE_MS);
+  selectsProcessTimers.set(localFolderName, timer);
+}
+
+function startWorkerHeartbeat() {
+  setInterval(() => {
+    const queueSize = selectsProcessTimers.size;
+    const lastTrigger = lastSelectsTriggerAtMs
+      ? new Date(lastSelectsTriggerAtMs).toISOString()
+      : "never";
+    console.info(
+      `[Heartbeat] Watcher armed | Queue size: ${queueSize} | Last trigger: ${lastTrigger}`
+    );
+  }, 60 * 1000);
 }
 
 function startRawFolderWatcher() {
@@ -878,6 +994,42 @@ function startRawFolderWatcher() {
 
   console.info(
     `[worker] Watching shoot root for RAW changes: ${root} (polling enabled, awaitWriteFinish=2000/100)`
+  );
+}
+
+function startSelectsFolderWatcher() {
+  if (selectsWatcherStarted) {
+    return;
+  }
+  selectsWatcherStarted = true;
+
+  const root = getShootFoldersRoot();
+  const watcher = chokidar.watch(root, {
+    ignoreInitial: false,
+    awaitWriteFinish: {
+      stabilityThreshold: 2500,
+      pollInterval: 100,
+    },
+    usePolling: true,
+  });
+
+  watcher.on("all", (eventName, filePath) => {
+    if (!["add", "change", "unlink", "addDir", "unlinkDir"].includes(eventName)) {
+      return;
+    }
+    const localFolderName = localFolderNameFromSelectsPath(filePath);
+    if (!localFolderName) {
+      return;
+    }
+    scheduleSelectsProcessing(localFolderName, filePath, eventName);
+  });
+
+  watcher.on("error", (error) => {
+    console.error("[worker] selects chokidar watcher error:", error);
+  });
+
+  console.info(
+    `[worker] Watching shoot root for Selects changes: ${root} (polling enabled, awaitWriteFinish=2500/100, debounce=${SELECTS_DEBOUNCE_MS}ms)`
   );
 }
 
@@ -1322,6 +1474,8 @@ async function main() {
     console.error("[worker] Initial full preview sync failed:", err instanceof Error ? err.message : err);
   });
   startRawFolderWatcher();
+  startSelectsFolderWatcher();
+  startWorkerHeartbeat();
 
   await processAwaitingFolderCreation(getSupabaseClient()).catch((err) => {
     console.error("[worker] Initial folder run failed:", err instanceof Error ? err.message : err);

@@ -339,6 +339,7 @@ export default function PlannerPage() {
   const [masterListSubtaskDraft, setMasterListSubtaskDraft] = useState<Record<string, string>>({});
   const [masterListSubtasksExpanded, setMasterListSubtasksExpanded] = useState<Record<string, boolean>>({});
   const boardRef = useRef(board);
+  const loadTasksRef = useRef<(() => Promise<void>) | null>(null);
   boardRef.current = board;
 
   useEffect(() => {
@@ -452,10 +453,26 @@ export default function PlannerPage() {
       setLoadingTasks(false);
     };
 
+    loadTasksRef.current = loadTasks;
+
     void loadTasks();
 
     return () => {
       isMounted = false;
+      loadTasksRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleWidgetRefresh = () => {
+      const refresh = loadTasksRef.current;
+      if (refresh) {
+        void refresh();
+      }
+    };
+    window.addEventListener("desktop-widget:refresh", handleWidgetRefresh);
+    return () => {
+      window.removeEventListener("desktop-widget:refresh", handleWidgetRefresh);
     };
   }, []);
 

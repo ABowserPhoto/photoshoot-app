@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -8,9 +8,20 @@ const isDev = !app.isPackaged;
 const DEFAULT_PORT = Number(process.env.PORT) || 3000;
 
 let mainWindow = null;
+let widgetWindow = null;
+let tray = null;
 let nextServerProcess = null;
 let serverUrl = `http://localhost:${DEFAULT_PORT}`;
 let serverReadyPromise = null;
+
+const IPC_CHANNELS = {
+  REFRESH_MAIN: "desktop-widget:refresh-main",
+  REFRESH_WIDGET: "desktop-widget:refresh-widget",
+  REFRESH_EVENT: "desktop-widget:refresh",
+  HIDE_WIDGET: "desktop-widget:hide",
+  TOGGLE_WIDGET: "desktop-widget:toggle",
+  FOCUS_MAIN: "desktop-widget:focus-main",
+};
 
 function resolveStandaloneServerPath() {
   const candidates = [
@@ -179,7 +190,7 @@ function createWindow(loadUrl = serverUrl) {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
-    titleBarStyle: "hidden",
+    frame: true,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -189,8 +200,206 @@ function createWindow(loadUrl = serverUrl) {
   mainWindow.loadURL(loadUrl);
   mainWindow.webContents.openDevTools();
 
+  mainWindow.on("minimize", () => {
+    showWidgetWindow();
+  });
+
+  mainWindow.on("restore", () => {
+    hideWidgetWindow();
+  });
+
   mainWindow.on("closed", () => {
+    if (widgetWindow && !widgetWindow.isDestroyed()) {
+      widgetWindow.close();
+    }
+    widgetWindow = null;
     mainWindow = null;
+  });
+
+  return mainWindow;
+}
+
+function createFloatingWidget(loadUrl = serverUrl) {
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    return widgetWindow;
+  }
+
+  widgetWindow = new BrowserWindow({
+    width: 320,
+    height: 450,
+    alwaysOnTop: true,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    skipTaskbar: true,
+    show: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+  });
+
+  widgetWindow.loadURL(`${loadUrl}/desktop-widget`);
+
+  widgetWindow.on("close", (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      widgetWindow.hide();
+    }
+  });
+
+  widgetWindow.on("closed", () => {
+    widgetWindow = null;
+  });
+
+  return widgetWindow;
+}
+
+function showWidgetWindow() {
+  const windowRef = createFloatingWidget(serverUrl);
+  if (!windowRef || windowRef.isDestroyed()) {
+    return;
+  }
+  windowRef.show();
+  windowRef.focus();
+}
+
+function hideWidgetWindow() {
+  if (!widgetWindow || widgetWindow.isDestroyed()) {
+    return;
+  }
+  widgetWindow.hide();
+}
+
+function toggleWidgetWindow() {
+  if (!widgetWindow || widgetWindow.isDestroyed()) {
+    showWidgetWindow();
+    return;
+  }
+  if (widgetWindow.isVisible()) {
+    hideWidgetWindow();
+  } else {
+    showWidgetWindow();
+  }
+}
+
+function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createWindow(serverUrl);
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function resolveTrayIcon() {
+  const candidates = [
+    path.join(process.resourcesPath, "icon.ico"),
+    path.join(app.getAppPath(), "build", "icon.ico"),
+    path.join(app.getAppPath(), "public", "favicon.ico"),
+    path.join(__dirname, "..", "build", "icon.ico"),
+  ];
+
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+    const image = nativeImage.createFromPath(candidate);
+    if (!image.isEmpty()) {
+      return image;
+    }
+  }
+
+  const executableIcon = nativeImage.createFromPath(process.execPath);
+  if (!executableIcon.isEmpty()) {
+    return executableIcon.resize({ width: 16, height: 16 });
+  }
+
+  return nativeImage.createFromDataURL(
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAQAAAC1+jfqAAAAHklEQVR4AWMYBaNgFIyCUTAKRsEoGAWjYBSMglEAAAT9AAEnjdaSAAAAAElFTkSuQmCC"
+  );
+}
+
+function setupTray() {
+  if (tray) {
+    return tray;
+  }
+
+  tray = new Tray(resolveTrayIcon());
+  tray.setToolTip("Workflow Studio");
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: "Open Main App",
+      click: () => {
+        focusMainWindow();
+      },
+    },
+    {
+      label: "Show Quick Widget",
+      click: () => {
+        showWidgetWindow();
+      },
+    },
+    {
+      label: "Hide Quick Widget",
+      click: () => {
+        hideWidgetWindow();
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Quit",
+      click: () => {
+        app.isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+
+  tray.setContextMenu(contextMenu);
+  tray.on("click", () => {
+    toggleWidgetWindow();
+  });
+
+  return tray;
+}
+
+function setupWidgetIpc() {
+  ipcMain.removeAllListeners(IPC_CHANNELS.REFRESH_MAIN);
+  ipcMain.removeAllListeners(IPC_CHANNELS.REFRESH_WIDGET);
+  ipcMain.removeAllListeners(IPC_CHANNELS.HIDE_WIDGET);
+  ipcMain.removeAllListeners(IPC_CHANNELS.TOGGLE_WIDGET);
+  ipcMain.removeAllListeners(IPC_CHANNELS.FOCUS_MAIN);
+
+  ipcMain.on(IPC_CHANNELS.REFRESH_MAIN, () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC_CHANNELS.REFRESH_EVENT, { source: "widget" });
+    }
+  });
+
+  ipcMain.on(IPC_CHANNELS.REFRESH_WIDGET, () => {
+    if (widgetWindow && !widgetWindow.isDestroyed()) {
+      widgetWindow.webContents.send(IPC_CHANNELS.REFRESH_EVENT, { source: "main" });
+    }
+  });
+
+  ipcMain.on(IPC_CHANNELS.HIDE_WIDGET, () => {
+    hideWidgetWindow();
+  });
+
+  ipcMain.on(IPC_CHANNELS.TOGGLE_WIDGET, () => {
+    toggleWidgetWindow();
+  });
+
+  ipcMain.on(IPC_CHANNELS.FOCUS_MAIN, () => {
+    focusMainWindow();
+    hideWidgetWindow();
   });
 }
 
@@ -203,6 +412,9 @@ async function bootstrap() {
   }
 
   createWindow(serverUrl);
+  createFloatingWidget(serverUrl);
+  setupWidgetIpc();
+  setupTray();
 }
 
 app.whenReady().then(bootstrap).catch((error) => {
@@ -211,10 +423,15 @@ app.whenReady().then(bootstrap).catch((error) => {
 });
 
 app.on("before-quit", () => {
+  app.isQuitting = true;
   stopProductionServer();
 });
 
 app.on("will-quit", () => {
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
   stopProductionServer();
 });
 
