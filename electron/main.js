@@ -3,8 +3,10 @@ const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
+const dotenv = require("dotenv");
 
 const isDev = !app.isPackaged;
+loadBundledProductionEnv();
 const DEFAULT_PORT = Number(process.env.PORT) || 3000;
 const CUSTOM_ICON_PATH = path.join(__dirname, "..", "public", "WorkflowLogo-2.ico");
 
@@ -14,6 +16,38 @@ let tray = null;
 let nextServerProcess = null;
 let serverUrl = `http://localhost:${DEFAULT_PORT}`;
 let serverReadyPromise = null;
+
+function loadBundledProductionEnv() {
+  if (isDev) {
+    return;
+  }
+
+  const candidates = [
+    path.join(app.getAppPath(), "electron", "runtime", ".env.production"),
+    path.join(process.resourcesPath, "app.asar", "electron", "runtime", ".env.production"),
+    path.join(process.resourcesPath, "electron", "runtime", ".env.production"),
+  ];
+
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+
+    try {
+      const parsed = dotenv.parse(fs.readFileSync(candidate, "utf8"));
+      for (const [key, value] of Object.entries(parsed)) {
+        if (process.env[key] == null) {
+          process.env[key] = value;
+        }
+      }
+      console.info(`[env] Loaded bundled runtime env from: ${candidate}`);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[env] Failed loading bundled runtime env (${candidate}): ${message}`);
+    }
+  }
+}
 
 const IPC_CHANNELS = {
   REFRESH_MAIN: "desktop-widget:refresh-main",

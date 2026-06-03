@@ -8,6 +8,8 @@ import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 
 export type GlobalNavButtonsProps = {
   className?: string;
+  /** Rendered between separator and Statistics. */
+  secondaryMiddle?: ReactNode;
   /** Rendered after View Archive (e.g. logout). */
   children?: ReactNode;
 };
@@ -18,7 +20,7 @@ const btnBase =
 const idle = "border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800 dark:border-zinc-600";
 const active = "border-zinc-100 bg-zinc-100 text-zinc-900 shadow-sm dark:border-zinc-100";
 
-export default function GlobalNavButtons({ className, children }: GlobalNavButtonsProps) {
+export default function GlobalNavButtons({ className, secondaryMiddle, children }: GlobalNavButtonsProps) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { isLoading, isAdmin } = useAuthRole();
@@ -58,11 +60,6 @@ export default function GlobalNavButtons({ className, children }: GlobalNavButto
       <Link href="/moodboard" className={`${btnBase} ${moodboardActive ? active : idle}`} prefetch>
         Moodboard
       </Link>
-      <div
-        className="mx-2 h-6 w-px shrink-0 self-center bg-gray-600"
-        aria-hidden
-        role="presentation"
-      />
       {isLoading ? (
         <span
           className={`${btnBase} cursor-wait border-zinc-700 bg-zinc-900 text-zinc-400`}
@@ -71,27 +68,33 @@ export default function GlobalNavButtons({ className, children }: GlobalNavButto
           Booking
         </span>
       ) : isAdmin ? (
-        <>
-          <Link
-            href="/?booking=1"
-            className={`${btnBase} ${bookingActive ? active : idle}`}
-            scroll={false}
-          >
-            Booking
-          </Link>
-          <Link
-            href="/admin/statistics"
-            className={`${btnBase} ${statisticsActive ? active : idle}`}
-            prefetch
-          >
-            Statistics
-          </Link>
-        </>
+        <Link
+          href="/?booking=1"
+          className={`${btnBase} ${bookingActive ? active : idle}`}
+          scroll={false}
+        >
+          Booking
+        </Link>
       ) : (
         <Link href="/" className={`${btnBase} ${bookingActive ? active : idle}`}>
           Booking
         </Link>
       )}
+      <div
+        className="mx-2 h-6 w-px shrink-0 self-center bg-gray-600"
+        aria-hidden
+        role="presentation"
+      />
+      {secondaryMiddle}
+      {!isLoading && isAdmin ? (
+        <Link
+          href="/admin/statistics"
+          className={`${btnBase} ${statisticsActive ? active : idle}`}
+          prefetch
+        >
+          Statistics
+        </Link>
+      ) : null}
       <Link href={archive ? "/" : "/?archive=1"} className={`${btnBase} ${archive ? active : idle}`} scroll={false}>
         {archive ? "View Active Board" : "View Archive"}
       </Link>

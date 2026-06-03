@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState, Suspense, useCallback } from "rea
 import PlannerStats from "@/app/components/PlannerStats";
 import GlobalNavButtons from "@/app/components/GlobalNavButtons";
 import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
+import JibbleClockToggle from "@/app/components/JibbleClockToggle";
 import TaskAssigneeAvatars from "@/app/components/TaskAssigneeAvatars";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { usePlannerGlobalSafe } from "@/app/contexts/PlannerGlobalContext";
@@ -72,6 +73,8 @@ type PlannerTask = {
   dueDate: string | null;
   orderIndex: number;
   recurringType: RecurringType;
+  clientName: string;
+  totalFee: number | null;
 };
 
 type PlannerBoardState = Record<PlannerStatusKey, PlannerTask[]>;
@@ -98,10 +101,14 @@ type StudioTaskRow = {
   subtasks: unknown;
   assigned_users?: unknown;
   assigned_to?: string | null;
+  user_id?: string | null;
+  created_by?: string | null;
   label?: string | null;
   is_auto_generated?: boolean | null;
   photoshoot_id?: string | null;
   order_index: number | null;
+  client_name?: string | null;
+  total_fee?: number | null;
 };
 
 const COLUMN_CONFIG: Array<{ id: PlannerColumnKey; title: string }> = [
@@ -143,9 +150,42 @@ function normalizeDbStatus(value: string | null | undefined): PlannerDbStatus {
 }
 
 function normalizePlannerStatus(value: string | null | undefined): PlannerStatusKey {
-  const normalized = normalizeDbStatus(value);
-  return normalized === "template" ? "master" : normalized;
+  const raw = (value ?? "").trim().toLowerCase().replace(/\s+/g, "-");
+  if (raw === "template") {
+    return "master";
+  }
+  if (raw === "processing" || raw === "pending_processing" || raw === "syncing_selection") {
+    return "processing";
+  }
+  if (
+    raw === "completed" ||
+    raw === "ready-for-review" ||
+    raw === "ready_for_review" ||
+    raw === "send-email" ||
+    raw === "send_email"
+  ) {
+    return "completed";
+  }
+  if (raw === "planning") {
+    return "planning";
+  }
+  return "master";
 }
+
+function normalizeNullableId(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+const SHARED_OWNER_IDS = [
+  ...(process.env.NEXT_PUBLIC_PLANNER_SHARED_OWNER_IDS ?? "").split(","),
+  process.env.NEXT_PUBLIC_MASTER_USER_ID ?? "",
+]
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 function normalizeRecurringType(value: string | null | undefined): RecurringType {
   const normalized = (value ?? "").trim().toLowerCase();
@@ -380,6 +420,8 @@ function mapRowToTask(row: StudioTaskRow): PlannerTask {
     dueDate: row.due_date ?? null,
     orderIndex: row.order_index ?? 0,
     recurringType: normalizeRecurringType(row.recurring_type),
+    clientName: row.client_name?.trim() ?? "",
+    totalFee: row.total_fee != null && Number.isFinite(Number(row.total_fee)) ? Number(row.total_fee) : null,
   };
   return ensureStandardPlannerSubtasksOnTask(baseTask);
 }
@@ -464,40 +506,36 @@ export default function PlannerPage() {
       }
 
       const [tasksResult, profilesResult] = await Promise.all([
-        gatekeeperMode
-          ? fetch("/api/planner/tasks", { cache: "no-store", credentials: "include" })
-              .then(async (res) => {
-                const json = (await res.json().catch(() => null)) as {
-                  data?: StudioTaskRow[];
-                  error?: string;
-                } | null;
-                if (!res.ok) {
-                  return { data: null, error: { message: json?.error ?? `HTTP ${res.status}` } };
-                }
-                return { data: (json?.data ?? []) as StudioTaskRow[], error: null };
-              })
-              .catch((error: unknown) => ({
-                data: null,
-                error: { message: error instanceof Error ? error.message : "Network error loading tasks." },
-              }))
-          : supabase.from("studio_tasks").select("*").order("order_index", { ascending: true }),
-        gatekeeperMode
-          ? fetch("/api/planner/assignees", { cache: "no-store", credentials: "include" })
-              .then(async (res) => {
-                const json = (await res.json().catch(() => null)) as {
-                  data?: ProfileRow[];
-                  error?: string;
-                } | null;
-                if (!res.ok) {
-                  return { data: null, error: { message: json?.error ?? `HTTP ${res.status}` } };
-                }
-                return { data: (json?.data ?? []) as ProfileRow[], error: null };
-              })
-              .catch((error: unknown) => ({
-                data: null,
-                error: { message: error instanceof Error ? error.message : "Network error loading assignees." },
-              }))
-          : supabase.from("profiles").select("id, email, full_name"),
+        fetch("/api/planner/tasks", { cache: "no-store", credentials: "include" })
+          .then(async (res) => {
+            const json = (await res.json().catch(() => null)) as {
+              data?: StudioTaskRow[];
+              error?: string;
+            } | null;
+            if (!res.ok) {
+              return { data: null, error: { message: json?.error ?? `HTTP ${res.status}` } };
+            }
+            return { data: (json?.data ?? []) as StudioTaskRow[], error: null };
+          })
+          .catch((error: unknown) => ({
+            data: null,
+            error: { message: error instanceof Error ? error.message : "Network error loading tasks." },
+          })),
+        fetch("/api/planner/assignees", { cache: "no-store", credentials: "include" })
+          .then(async (res) => {
+            const json = (await res.json().catch(() => null)) as {
+              data?: ProfileRow[];
+              error?: string;
+            } | null;
+            if (!res.ok) {
+              return { data: null, error: { message: json?.error ?? `HTTP ${res.status}` } };
+            }
+            return { data: (json?.data ?? []) as ProfileRow[], error: null };
+          })
+          .catch((error: unknown) => ({
+            data: null,
+            error: { message: error instanceof Error ? error.message : "Network error loading assignees." },
+          })),
       ]);
 
       if (!isMounted) {
@@ -534,14 +572,27 @@ export default function PlannerPage() {
         if (normalizeDbStatus(row.status) === "template") {
           return true;
         }
-        const assigned = row.assigned_to;
-        if (assigned == null || String(assigned).trim() === "") {
+        const assignedTo = normalizeNullableId(row.assigned_to);
+        const ownerOrCreator = normalizeNullableId(row.created_by) ?? normalizeNullableId(row.user_id);
+        const sharedOwnerSet = new Set(SHARED_OWNER_IDS);
+
+        if (!assignedTo) {
           return true;
         }
         if (!uid && !gatekeeperMode) {
           return false;
         }
-        return gatekeeperMode ? true : String(assigned) === uid;
+        if (gatekeeperMode) {
+          return true;
+        }
+
+        const isAssignedToCurrentUser = assignedTo === uid;
+        const isOwnedByCurrentUser = ownerOrCreator === uid;
+        const isSharedOwnerTask =
+          (ownerOrCreator != null && sharedOwnerSet.has(ownerOrCreator)) || sharedOwnerSet.has(assignedTo);
+        const isSystemTask = ownerOrCreator == null;
+
+        return isAssignedToCurrentUser || isOwnedByCurrentUser || isSharedOwnerTask || isSystemTask;
       });
 
       const nextBoard: PlannerBoardState = { master: [], planning: [], processing: [], completed: [] };
@@ -705,6 +756,8 @@ export default function PlannerPage() {
       label: PlannerTaskLabel;
       assigned_to: string | null;
       file_locations: string[] | null;
+      client_name: string | null;
+      total_fee: number | null;
     }>
   ) => {
     if (!supabase) {
@@ -902,6 +955,8 @@ export default function PlannerPage() {
               recurringType: nextTask.recurringType,
               label: nextTask.label,
               assignedTo: nextTask.assignedTo,
+              clientName: nextTask.clientName,
+              totalFee: nextTask.totalFee,
             },
             { appendToBottom: true, initialOrderIndex: 999999 }
           );
@@ -1055,6 +1110,8 @@ export default function PlannerPage() {
       dueDate: payload.dueDate,
       orderIndex: options?.initialOrderIndex ?? 0,
       recurringType: payload.recurringType,
+      clientName: payload.clientName.trim(),
+      totalFee: payload.totalFee,
     };
     let previousBoard: PlannerBoardState | null = null;
     let optimisticBoard: PlannerBoardState | null = null;
@@ -1094,6 +1151,8 @@ export default function PlannerPage() {
             assigned_users: serializeAssignedUsers([]),
             label: payload.label,
             assigned_to: payload.assignedTo ?? null,
+            client_name: payload.clientName.trim() || null,
+            total_fee: payload.totalFee,
             is_auto_generated: false,
             photoshoot_id: null,
             order_index: options?.initialOrderIndex ?? 0,
@@ -1119,6 +1178,8 @@ export default function PlannerPage() {
               assigned_users: serializeAssignedUsers([]),
               label: payload.label,
               assigned_to: payload.assignedTo ?? null,
+              client_name: payload.clientName.trim() || null,
+              total_fee: payload.totalFee,
               is_auto_generated: false,
               photoshoot_id: null,
               order_index: options?.initialOrderIndex ?? 0,
@@ -1194,23 +1255,6 @@ export default function PlannerPage() {
     createTaskOptimistically("master", payload, { appendToBottom: true, initialOrderIndex: 999999 });
   };
 
-  const handleQuickAddPlanningTask = () => {
-    createTaskOptimistically(
-      "planning",
-      {
-        title: createTaskTitle(taskCounter),
-        description: "New manual planner task. Click and edit details in future iteration.",
-        subtasks: createStandardPlannerSubtasks(createTaskTitle(taskCounter)),
-        dueDate: null,
-        fileLocations: [],
-        recurringType: "none",
-        label: null,
-        assignedTo: null,
-      },
-      { appendToBottom: true }
-    );
-  };
-
   const isColumnCollapsed = (columnId: PlannerColumnKey) => {
     const manuallySet = collapsedColumns[columnId];
     if (typeof manuallySet === "boolean") {
@@ -1251,6 +1295,8 @@ export default function PlannerPage() {
       isAutoGenerated: activeTask.isAutoGenerated,
       label: activeTask.label,
       assignedTo: activeTask.assignedTo,
+      clientName: activeTask.clientName,
+      totalFee: activeTask.totalFee,
     };
   }, [isCreateModalOpen, activeTask]);
 
@@ -1431,6 +1477,8 @@ export default function PlannerPage() {
                 recurringType: effective.recurringType,
                 label: effective.label,
                 assignedTo: effective.assignedTo,
+                clientName: effective.clientName,
+                totalFee: effective.totalFee,
               }
             : task
         );
@@ -1450,6 +1498,8 @@ export default function PlannerPage() {
           recurring_type: effective.recurringType,
           label: effective.label,
           assigned_to: effective.assignedTo,
+          client_name: effective.clientName.trim() || null,
+          total_fee: effective.totalFee,
         });
         setPersistenceError(null);
       } catch (error) {
@@ -1891,7 +1941,10 @@ export default function PlannerPage() {
           {!authLoading && authenticated ? (
             <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 sm:max-w-[780px] sm:justify-end">
               <Suspense fallback={null}>
-                <GlobalNavButtons className="flex flex-wrap items-center justify-end gap-2">
+                <GlobalNavButtons
+                  className="flex flex-wrap items-center justify-end gap-2"
+                  secondaryMiddle={<JibbleClockToggle />}
+                >
                   <GlobalLogoutControl />
                 </GlobalNavButtons>
               </Suspense>
@@ -2234,15 +2287,6 @@ export default function PlannerPage() {
 
                     {!isCollapsed ? (
                       <div className="h-[calc(70vh-62px)] space-y-2 overflow-y-auto pr-1 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-600">
-                        {column.id === "planning" ? (
-                          <button
-                            type="button"
-                            onClick={handleQuickAddPlanningTask}
-                            className="inline-flex h-9 w-full items-center justify-center rounded-md border border-zinc-300 bg-white px-3 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                          >
-                            Add Planning Task
-                          </button>
-                        ) : null}
                         {board[column.id].map((task) => {
                           const completedCount = task.subtasks.filter((subtask) => subtask.isCompleted).length;
                           const totalCount = task.subtasks.length;

@@ -9,6 +9,7 @@ import KanbanBoard, { type BoardTask } from "./components/KanbanBoard";
 import StatsSidebar from "./components/StatsSidebar";
 import GlobalNavButtons from "@/app/components/GlobalNavButtons";
 import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
+import JibbleClockToggle from "@/app/components/JibbleClockToggle";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
@@ -985,6 +986,7 @@ function HomeContent() {
               <Suspense fallback={null}>
                 <GlobalNavButtons
                   className="flex flex-wrap items-center justify-end gap-2"
+                  secondaryMiddle={<JibbleClockToggle />}
                 >
                   <GlobalLogoutControl />
                 </GlobalNavButtons>

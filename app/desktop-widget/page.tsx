@@ -104,6 +104,8 @@ export default function DesktopWidgetPage() {
   const [loading, setLoading] = useState(true);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showTaskPrompt, setShowTaskPrompt] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState("");
 
   const notifyMainRefresh = useCallback(() => {
     const ipc = getIpcRenderer();
@@ -449,12 +451,21 @@ export default function DesktopWidgetPage() {
     setBusyTaskId(null);
   };
 
-  const handleAddTask = async () => {
+  const handleAddTask = () => {
     if (busyTaskId) {
       return;
     }
-    const title = window.prompt("Task title");
-    if (!title || !title.trim()) {
+    setShowTaskPrompt(true);
+  };
+
+  const submitNewTask = async () => {
+    if (busyTaskId) {
+      return;
+    }
+
+    const title = newTaskTitle.trim();
+    if (!title) {
+      setError("Please enter a task title.");
       return;
     }
 
@@ -467,7 +478,7 @@ export default function DesktopWidgetPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         action: "create",
-        title: title.trim(),
+        title,
         assignedTo: userId,
       }),
     });
@@ -481,7 +492,15 @@ export default function DesktopWidgetPage() {
 
     notifyMainRefresh();
     await loadWidgetState();
+    setNewTaskTitle("");
+    setShowTaskPrompt(false);
     setBusyTaskId(null);
+  };
+
+  const closeTaskPrompt = () => {
+    setShowTaskPrompt(false);
+    setNewTaskTitle("");
+    setError(null);
   };
 
   const handleHideWidget = () => {
@@ -611,6 +630,48 @@ export default function DesktopWidgetPage() {
           {error ? <p className="text-xs text-red-300">{error}</p> : null}
         </div>
       </section>
+
+      {showTaskPrompt ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" style={{ WebkitAppRegion: "no-drag" }}>
+          <div className="w-full max-w-sm rounded-xl border border-zinc-700 bg-zinc-900 p-3 shadow-2xl">
+            <p className="text-sm font-semibold text-zinc-100">Add Task</p>
+            <input
+              type="text"
+              value={newTaskTitle}
+              onChange={(event) => setNewTaskTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void submitNewTask();
+                }
+                if (event.key === "Escape") {
+                  closeTaskPrompt();
+                }
+              }}
+              autoFocus
+              placeholder="Task title"
+              className="mt-2 h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none transition focus:border-emerald-400/70"
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeTaskPrompt}
+                className="inline-flex h-9 items-center justify-center rounded-md border border-zinc-700 bg-zinc-800 px-3 text-xs font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitNewTask()}
+                disabled={busyTaskId === "new"}
+                className="inline-flex h-9 items-center justify-center rounded-md border border-emerald-400/40 bg-emerald-500/15 px-3 text-xs font-semibold text-emerald-100 transition hover:border-emerald-300/70 hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

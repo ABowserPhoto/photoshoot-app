@@ -1075,44 +1075,85 @@ async function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) 
 async function processTaskLocally(task) {
   const localOrigin = process.env.LOCAL_APP_ORIGIN?.trim() || "http://127.0.0.1:3000";
   const workerSecret = requiredEnv("LOCAL_WORKER_SECRET");
-  const url = `${localOrigin.replace(/\/$/, "")}/api/worker/process-task`;
+  const url = `${localOrigin.replace(/\/$/, "")}/api/worker/process-single-item`;
   console.info(
-    `[worker] Calling local process-task endpoint: ${url} (timeout ${LOCAL_PROCESS_TIMEOUT_MS}ms)`
+    `[worker] Calling local process-single-item endpoint: ${url} (timeout ${LOCAL_PROCESS_TIMEOUT_MS}ms)`
   );
+  const taskRoot = path.join(getShootFoldersRoot(), String(task.local_folder_name ?? "").trim());
+  const selectsDir = path.join(taskRoot, "2_Selects");
+  const brackets = await buildTimestampBracketsFromDir(selectsDir);
+  const totalItems = brackets.length;
+  const processingStartedAtMs = Date.now();
 
-  try {
-    const response = await fetchWithTimeout(
-      url,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-worker-secret": workerSecret,
-        },
-        body: JSON.stringify({
-          taskId: String(task.id),
-          local_folder_name: task.local_folder_name,
-        }),
-      },
-      LOCAL_PROCESS_TIMEOUT_MS
-    );
-
-    const payload = await response.json().catch(() => null);
-    if (!response.ok || !payload?.success) {
-      const message =
-        payload?.error || `Local processing failed for task ${task.id} (HTTP ${response.status}).`;
-      throw new Error(message);
-    }
-    return {
-      comfyQueuedCount: Number(payload?.comfyQueuedCount) || 0,
-      comfyFailedCount: Number(payload?.comfyFailedCount) || 0,
-      comfyErrors: Array.isArray(payload?.comfyErrors) ? payload.comfyErrors.map((v) => String(v)) : [],
-    };
-  } catch (err) {
-    const message = toFetchErrorMessage(err, `[worker] process-task request failed for task ${task.id}`);
-    console.error(message, err);
-    throw err instanceof Error ? err : new Error(message);
+  if (totalItems === 0) {
+    throw new Error(`No bracket groups found for task ${task.id} in ${selectsDir}.`);
   }
+
+  let processedItems = 0;
+  let failedItems = 0;
+  let comfyQueuedCount = 0;
+  let comfyFailedCount = 0;
+  const comfyErrors = [];
+  let expectedComfyJobs = 0;
+
+  for (let photoIndex = 0; photoIndex < totalItems; photoIndex += 1) {
+    console.log(`[Worker] Task ${task.id}: Merging photo ${photoIndex + 1} of ${totalItems}...`);
+    try {
+      const response = await fetchWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-worker-secret": workerSecret,
+          },
+          body: JSON.stringify({
+            taskId: String(task.id),
+            local_folder_name: task.local_folder_name,
+            bracketIndex: photoIndex,
+          }),
+        },
+        LOCAL_PROCESS_TIMEOUT_MS
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.success) {
+        const message =
+          payload?.error ||
+          `Local single-item processing failed for task ${task.id} bracket ${photoIndex} (HTTP ${response.status}).`;
+        throw new Error(message);
+      }
+
+      processedItems += 1;
+      comfyQueuedCount += Number(payload?.comfyQueuedCount) || 0;
+      comfyFailedCount += Number(payload?.comfyFailedCount) || 0;
+      expectedComfyJobs += Number(payload?.expectedComfyJobs) || 0;
+      if (Array.isArray(payload?.comfyErrors)) {
+        for (const errorLine of payload.comfyErrors) {
+          comfyErrors.push(String(errorLine));
+        }
+      }
+    } catch (err) {
+      failedItems += 1;
+      const message = toFetchErrorMessage(
+        err,
+        `[worker] process-single-item request failed for task ${task.id} bracket ${photoIndex}`
+      );
+      console.error(message, err);
+      // Continue with next bracket/photo set even when this one fails.
+      continue;
+    }
+  }
+
+  return {
+    totalItems,
+    processedItems,
+    failedItems,
+    processingStartedAtMs,
+    expectedComfyJobs,
+    comfyQueuedCount,
+    comfyFailedCount,
+    comfyErrors,
+  };
 }
 
 async function finalizeTask(supabase, taskId, status) {
@@ -1308,7 +1349,8 @@ async function processPendingProcessing(supabase) {
   }
 
   console.info(`[worker] Found ${queue.length} queued task(s).`);
-  for (const task of queue) {
+  for (const [index, task] of queue.entries()) {
+    console.log(`[Worker] Processing item ${index + 1} of ${queue.length}...`);
     const taskId = String(task.id);
     const localFolderName = String(task.local_folder_name ?? "").trim();
     if (!localFolderName) {
@@ -1324,38 +1366,47 @@ async function processPendingProcessing(supabase) {
       }
 
       console.info(`[worker] Processing task ${taskId}...`);
-      const processingStartedAtMs = Date.now();
       const processingResult = await processTaskLocally({ id: taskId, local_folder_name: localFolderName });
       console.info(
-        `[worker] Local Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}`
+        `[worker] Local Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}, processed=${processingResult.processedItems}/${processingResult.totalItems}, failedItems=${processingResult.failedItems}`
       );
       if (processingResult.comfyErrors.length > 0) {
         for (const errorLine of processingResult.comfyErrors) {
           console.error(`[worker] ${errorLine}`);
         }
       }
+      if (processingResult.failedItems > 0 || processingResult.processedItems !== processingResult.totalItems) {
+        await finalizeTask(supabase, taskId, SELECTION_AVAILABLE_STATUS);
+        console.warn(
+          `[worker] Task ${taskId} left in ${SELECTION_AVAILABLE_STATUS}; ${processingResult.failedItems} of ${processingResult.totalItems} bracket(s) failed.`
+        );
+        continue;
+      }
       const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
-      const mergedDir = path.join(taskRoot, "3_Merged");
-      const mergedFiles = readNaturallySortedImageFiles(mergedDir);
-      const sqiMergedCount = mergedFiles.filter((name) => name.toLowerCase().includes("_sqi")).length;
-      const expectedComfyJobs = sqiMergedCount;
+      const expectedComfyJobs = Number(processingResult.expectedComfyJobs ?? 0);
       const queuedComfyJobs = Number(processingResult.comfyQueuedCount ?? 0);
       const failedComfyJobs = Number(processingResult.comfyFailedCount ?? 0);
       const noMergeNeeded = expectedComfyJobs === 0;
       let comfyResult = { copied: 0, timedOut: false };
 
-      if (processingResult.comfyQueuedCount > 0 && sqiMergedCount > 0) {
-        comfyResult = await waitForComfyOutputs(taskRoot, sqiMergedCount, processingStartedAtMs);
+      if (processingResult.comfyQueuedCount > 0 && expectedComfyJobs > 0) {
+        comfyResult = await waitForComfyOutputs(
+          taskRoot,
+          expectedComfyJobs,
+          Number(processingResult.processingStartedAtMs ?? Date.now())
+        );
         if (comfyResult.timedOut) {
           console.warn(`[worker] Continuing task ${taskId} after Comfy timeout.`);
         }
       } else {
         console.warn(
-          `[worker] Skipping Comfy wait for task ${taskId} (queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}, sqi=${sqiMergedCount}).`
+          `[worker] Skipping Comfy wait for task ${taskId} (queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}, expected=${expectedComfyJobs}).`
         );
       }
 
       const fullyMerged =
+        processingResult.failedItems === 0 &&
+        processingResult.processedItems === processingResult.totalItems &&
         expectedComfyJobs > 0 &&
         queuedComfyJobs === expectedComfyJobs &&
         failedComfyJobs === 0 &&
@@ -1394,6 +1445,8 @@ async function processPendingProcessing(supabase) {
           statusErr instanceof Error ? statusErr.message : statusErr
         );
       }
+      // Continue processing the remaining queue items even when one item fails.
+      continue;
     }
   }
 }

@@ -12,7 +12,8 @@
     "dev:electron": "wait-on http://localhost:3000 && electron .",
     "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
     "dev:desktop": "concurrently \"npm run dev\" \"npm run dev:electron\"",
-    "build:desktop": "next build && node scripts/prepare-electron-standalone.mjs && electron-builder"
+    "prepare:desktop-env": "node scripts/prepare-electron-env.mjs",
+    "build:desktop": "node -e \"require('fs').rmSync('dist-desktop',{recursive:true,force:true})\" && set CSC_IDENTITY_AUTO_DISCOVERY=false && npm run prepare:desktop-env && next build && node scripts/prepare-electron-standalone.mjs && electron-builder"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -56,14 +57,24 @@
   },
   "build": {
     "appId": "com.studiosuite.workflow",
-    "productName": "Workflow Studio",
+    "productName": "Studio Workflow Suite",
+    "artifactName": "Studio-Workflow-Suite-${version}-${os}-${arch}.${ext}",
+    "icon": "build/icon.ico",
+    "asar": true,
     "directories": {
       "output": "dist-desktop"
     },
     "files": [
       "main.js",
       "electron/**/*",
-      "package.json"
+      "package.json",
+      "!.env.local",
+      "!**/.env.local",
+      "!**/.env.development",
+      "!**/.env.development.local",
+      "!dist-desktop/**/*",
+      "!dist/**/*",
+      "!out/**/*"
     ],
     "extraResources": [
       {
@@ -75,7 +86,14 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
     },
     "mac": {
       "target": "dmg"

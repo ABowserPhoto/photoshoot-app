@@ -8,14 +8,14 @@ const allowedDevOrigins =
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
   typescript: {
     ignoreBuildErrors: true,
   },
   allowedDevOrigins: allowedDevOrigins.length > 0 ? allowedDevOrigins : undefined,
   experimental: {
+    serverActions: {
+      bodySizeLimit: "50mb",
+    },
     proxyClientMaxBodySize: 1024 * 1024 * 1024,
   },
 };

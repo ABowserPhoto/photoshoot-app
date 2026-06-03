@@ -22,6 +22,7 @@ import {
 } from "@/app/actions/statistics";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { formatDurationLong } from "@/lib/adminStatsFormat";
+import MonthlyBillingSummary from "@/app/planner/components/MonthlyBillingSummary";
 
 type SortKey =
   | "date"
@@ -306,6 +307,8 @@ export default function AdminStatisticsPage() {
             hint={`Avg ${formatMinutesShort(summary.averageTaskDuration)} per task`}
           />
         </section>
+
+        <MonthlyBillingSummary />
 
         <section className="grid gap-4 xl:grid-cols-2">
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">

@@ -19,6 +19,12 @@
 
 # production
 /build
+/dist-desktop/
+/dist/
+/out/
+/release/
+!build/icon.ico
+!build/icon.png
 
 # misc
 .DS_Store
