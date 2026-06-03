@@ -8,6 +8,9 @@ const staticSrc = path.join(root, ".next", "static");
 const staticDest = path.join(standaloneDir, ".next", "static");
 const publicSrc = path.join(root, "public");
 const publicDest = path.join(standaloneDir, "public");
+const rootNodeModules = path.join(root, "node_modules");
+const standaloneNodeModules = path.join(standaloneDir, "node_modules");
+const REQUIRED_RUNTIME_MODULES = ["next", "react", "react-dom", "styled-jsx"];
 
 function copyDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
@@ -20,6 +23,17 @@ function copyDir(src, dest) {
       fs.copyFileSync(srcPath, destPath);
     }
   }
+}
+
+function ensureRuntimeModule(moduleName) {
+  const src = path.join(rootNodeModules, ...moduleName.split("/"));
+  const dest = path.join(standaloneNodeModules, ...moduleName.split("/"));
+
+  if (!fs.existsSync(src)) {
+    throw new Error(`Missing runtime module "${moduleName}" at ${src}`);
+  }
+
+  copyDir(src, dest);
 }
 
 if (!fs.existsSync(standaloneDir)) {
@@ -39,5 +53,10 @@ if (!fs.existsSync(publicSrc)) {
 
 copyDir(staticSrc, staticDest);
 copyDir(publicSrc, publicDest);
+for (const moduleName of REQUIRED_RUNTIME_MODULES) {
+  ensureRuntimeModule(moduleName);
+}
 
-console.log("Prepared standalone bundle for Electron packaging.");
+console.log(
+  `Prepared standalone bundle for Electron packaging and ensured runtime modules: ${REQUIRED_RUNTIME_MODULES.join(", ")}`
+);

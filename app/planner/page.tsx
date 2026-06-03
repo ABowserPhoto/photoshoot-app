@@ -180,6 +180,28 @@ function normalizeNullableId(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+function normalizeClientNameInput(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim();
+}
+
+function normalizeTotalFeeInput(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().replace(",", ".");
+    if (!normalized) {
+      return null;
+    }
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 const SHARED_OWNER_IDS = [
   ...(process.env.NEXT_PUBLIC_PLANNER_SHARED_OWNER_IDS ?? "").split(","),
   process.env.NEXT_PUBLIC_MASTER_USER_ID ?? "",
@@ -776,9 +798,18 @@ export default function PlannerPage() {
       return;
     }
 
-    let { error } = await supabase.from("studio_tasks").update(updates).eq("id", taskId);
+    const sanitizedUpdates: Record<string, unknown> = { ...updates };
+    if ("client_name" in sanitizedUpdates) {
+      const clientName = normalizeClientNameInput(sanitizedUpdates.client_name);
+      sanitizedUpdates.client_name = clientName || null;
+    }
+    if ("total_fee" in sanitizedUpdates) {
+      sanitizedUpdates.total_fee = normalizeTotalFeeInput(sanitizedUpdates.total_fee);
+    }
+
+    let { error } = await supabase.from("studio_tasks").update(sanitizedUpdates).eq("id", taskId);
     if (error && "file_locations" in updates && isMissingFileLocationsColumnError(error)) {
-      const fallbackPayload = withoutFileLocationsField(updates as Record<string, unknown>);
+      const fallbackPayload = withoutFileLocationsField(sanitizedUpdates);
       const fallbackResult = await supabase.from("studio_tasks").update(fallbackPayload).eq("id", taskId);
       error = fallbackResult.error;
     }
@@ -1088,6 +1119,8 @@ export default function PlannerPage() {
     const normalizedSubtasks = normalizeNewTaskSubtasks(payload, title);
     const normalizedFileLocations = normalizeFileLocationsInput(payload.fileLocations);
     const primaryFilePath = primaryFilePathFromLocations(normalizedFileLocations);
+    const normalizedClientName = normalizeClientNameInput(payload.clientName);
+    const normalizedTotalFee = normalizeTotalFeeInput(payload.totalFee);
     const nextTask: PlannerTask = {
       id: tempId,
       title,
@@ -1110,8 +1143,8 @@ export default function PlannerPage() {
       dueDate: payload.dueDate,
       orderIndex: options?.initialOrderIndex ?? 0,
       recurringType: payload.recurringType,
-      clientName: payload.clientName.trim(),
-      totalFee: payload.totalFee,
+      clientName: normalizedClientName,
+      totalFee: normalizedTotalFee,
     };
     let previousBoard: PlannerBoardState | null = null;
     let optimisticBoard: PlannerBoardState | null = null;
@@ -1151,8 +1184,8 @@ export default function PlannerPage() {
             assigned_users: serializeAssignedUsers([]),
             label: payload.label,
             assigned_to: payload.assignedTo ?? null,
-            client_name: payload.clientName.trim() || null,
-            total_fee: payload.totalFee,
+            client_name: normalizedClientName || null,
+            total_fee: normalizedTotalFee,
             is_auto_generated: false,
             photoshoot_id: null,
             order_index: options?.initialOrderIndex ?? 0,
@@ -1178,8 +1211,8 @@ export default function PlannerPage() {
               assigned_users: serializeAssignedUsers([]),
               label: payload.label,
               assigned_to: payload.assignedTo ?? null,
-              client_name: payload.clientName.trim() || null,
-              total_fee: payload.totalFee,
+              client_name: normalizedClientName || null,
+              total_fee: normalizedTotalFee,
               is_auto_generated: false,
               photoshoot_id: null,
               order_index: options?.initialOrderIndex ?? 0,
@@ -1459,6 +1492,8 @@ export default function PlannerPage() {
             label: loc.task.label,
           }
         : updates;
+    const normalizedClientName = normalizeClientNameInput(effective.clientName);
+    const normalizedTotalFee = normalizeTotalFeeInput(effective.totalFee);
     let previousBoard: PlannerBoardState | null = null;
     setBoard((prev) => {
       previousBoard = prev;
@@ -1477,8 +1512,8 @@ export default function PlannerPage() {
                 recurringType: effective.recurringType,
                 label: effective.label,
                 assignedTo: effective.assignedTo,
-                clientName: effective.clientName,
-                totalFee: effective.totalFee,
+                clientName: normalizedClientName,
+                totalFee: normalizedTotalFee,
               }
             : task
         );
@@ -1498,8 +1533,8 @@ export default function PlannerPage() {
           recurring_type: effective.recurringType,
           label: effective.label,
           assigned_to: effective.assignedTo,
-          client_name: effective.clientName.trim() || null,
-          total_fee: effective.totalFee,
+          client_name: normalizedClientName || null,
+          total_fee: normalizedTotalFee,
         });
         setPersistenceError(null);
       } catch (error) {

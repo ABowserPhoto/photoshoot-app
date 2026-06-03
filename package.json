@@ -67,6 +67,7 @@
     "files": [
       "main.js",
       "electron/**/*",
+      "build/icon.ico",
       "package.json",
       "!.env.local",
       "!**/.env.local",
@@ -77,6 +78,10 @@
       "!out/**/*"
     ],
     "extraResources": [
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      },
       {
         "from": ".next/standalone",
         "to": "standalone",

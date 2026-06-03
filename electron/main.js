@@ -8,7 +8,7 @@ const dotenv = require("dotenv");
 const isDev = !app.isPackaged;
 loadBundledProductionEnv();
 const DEFAULT_PORT = Number(process.env.PORT) || 3000;
-const CUSTOM_ICON_PATH = path.join(__dirname, "..", "public", "WorkflowLogo-2.ico");
+const BRAND_ICON_RELATIVE_PATH = path.join("build", "icon.ico");
 
 let mainWindow = null;
 let widgetWindow = null;
@@ -59,18 +59,15 @@ const IPC_CHANNELS = {
 };
 
 function resolveAppIconPath() {
-  if (fs.existsSync(CUSTOM_ICON_PATH)) {
-    return CUSTOM_ICON_PATH;
-  }
-
-  const fallbackCandidates = [
+  const candidates = [
+    path.join(__dirname, "..", BRAND_ICON_RELATIVE_PATH),
+    path.join(app.getAppPath(), BRAND_ICON_RELATIVE_PATH),
     path.join(process.resourcesPath, "icon.ico"),
-    path.join(app.getAppPath(), "build", "icon.ico"),
+    path.join(process.resourcesPath, "app.asar", BRAND_ICON_RELATIVE_PATH),
     path.join(app.getAppPath(), "public", "favicon.ico"),
-    path.join(__dirname, "..", "build", "icon.ico"),
   ];
 
-  for (const candidate of fallbackCandidates) {
+  for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
       return candidate;
     }
@@ -93,6 +90,17 @@ function resolveStandaloneServerPath() {
   }
 
   return null;
+}
+
+function resolveStandaloneNodePath(serverDir) {
+  const candidates = [
+    path.join(serverDir, "node_modules"),
+    path.join(app.getAppPath(), "node_modules"),
+    path.join(process.resourcesPath, "app.asar", "node_modules"),
+    path.join(process.resourcesPath, "node_modules"),
+  ];
+
+  return candidates.filter((candidate, index) => fs.existsSync(candidate) && candidates.indexOf(candidate) === index);
 }
 
 function extractPortFromLog(text) {
@@ -159,6 +167,7 @@ function startProductionServer() {
     const serverDir = path.dirname(serverPath);
     const port = DEFAULT_PORT;
     let resolved = false;
+    const nodePathEntries = resolveStandaloneNodePath(serverDir);
 
     const finish = async (nextPort = port) => {
       if (resolved) {
@@ -182,6 +191,7 @@ function startProductionServer() {
         PORT: String(port),
         HOSTNAME: "127.0.0.1",
         ELECTRON_RUN_AS_NODE: "1",
+        NODE_PATH: nodePathEntries.join(path.delimiter),
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -214,7 +224,7 @@ function startProductionServer() {
       }
     });
 
-    window.setTimeout(() => {
+    setTimeout(() => {
       void finish(port);
     }, 30000);
   });
@@ -235,7 +245,7 @@ function stopProductionServer() {
 
   child.kill("SIGTERM");
 
-  window.setTimeout(() => {
+  setTimeout(() => {
     if (!child.killed) {
       child.kill("SIGKILL");
     }
@@ -252,11 +262,14 @@ function createWindow(loadUrl = serverUrl) {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
+      devTools: isDev,
     },
   });
 
   mainWindow.loadURL(loadUrl);
-  mainWindow.webContents.openDevTools();
+  if (isDev) {
+    mainWindow.webContents.openDevTools();
+  }
 
   mainWindow.on("minimize", () => {
     showWidgetWindow();
@@ -296,6 +309,7 @@ function createFloatingWidget(loadUrl = serverUrl) {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
+      devTools: isDev,
     },
   });
 
