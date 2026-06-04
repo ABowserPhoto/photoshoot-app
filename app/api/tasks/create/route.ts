@@ -51,6 +51,13 @@ export async function POST(request: Request) {
     insertRow.preview_preference === "middle" || insertRow.preview_preference === "last"
       ? insertRow.preview_preference
       : "first";
+  const skipInvoiceRaw = insertRow.skip_invoice;
+  insertRow.skip_invoice =
+    typeof skipInvoiceRaw === "boolean"
+      ? skipInvoiceRaw
+      : typeof skipInvoiceRaw === "string"
+        ? ["1", "true", "yes", "on"].includes(skipInvoiceRaw.trim().toLowerCase())
+        : false;
 
   const cookieStore = await cookies();
   const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {

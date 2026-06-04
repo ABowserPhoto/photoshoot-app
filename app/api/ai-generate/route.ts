@@ -19,6 +19,15 @@ const IMAGE_POLL_INTERVAL_MS = 2500;
 const IMAGE_POLL_TIMEOUT_MS = 180_000;
 const VIDEO_POLL_INTERVAL_MS = 5000;
 const VIDEO_POLL_TIMEOUT_MS = 600_000;
+const TEMP_AI_DIR = path.join(process.cwd(), "public", "temp_ai");
+const TEMP_MEDIA_CONTENT_TYPE: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".mp4": "video/mp4",
+};
 
 type GenerateMode = "text2image" | "text2video" | "image2video";
 
@@ -344,12 +353,44 @@ async function saveOutputToTempAi(
   output: ComfyOutputImage,
   buffer: Buffer
 ): Promise<string> {
-  const tempDir = path.join(process.cwd(), "public", "temp_ai");
-  fs.mkdirSync(tempDir, { recursive: true });
+  fs.mkdirSync(TEMP_AI_DIR, { recursive: true });
   const outputFilename = `${promptId}_${path.basename(output.filename ?? "output")}`;
-  const destinationPath = path.join(tempDir, outputFilename);
+  const destinationPath = path.join(TEMP_AI_DIR, outputFilename);
   fs.writeFileSync(destinationPath, buffer);
-  return `/temp_ai/${encodeURIComponent(outputFilename)}`;
+  return `/api/ai-generate?file=${encodeURIComponent(outputFilename)}`;
+}
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const file = (searchParams.get("file") ?? "").trim();
+  const safeFile = path.basename(file);
+  if (!safeFile) {
+    return NextResponse.json({ error: "file query parameter is required." }, { status: 400 });
+  }
+
+  const ext = path.extname(safeFile).toLowerCase();
+  const contentType = TEMP_MEDIA_CONTENT_TYPE[ext];
+  if (!contentType) {
+    return NextResponse.json({ error: "Unsupported generated media type." }, { status: 400 });
+  }
+
+  const absolutePath = path.resolve(TEMP_AI_DIR, safeFile);
+  const tempRoot = path.resolve(TEMP_AI_DIR);
+  if (!absolutePath.toLowerCase().startsWith(tempRoot.toLowerCase() + path.sep)) {
+    return NextResponse.json({ error: "Access denied." }, { status: 403 });
+  }
+  if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
+    return NextResponse.json({ error: "Generated media file not found." }, { status: 404 });
+  }
+
+  const buffer = fs.readFileSync(absolutePath);
+  return new NextResponse(buffer, {
+    status: 200,
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "no-store, max-age=0",
+    },
+  });
 }
 
 function patchTextToImageWorkflow(

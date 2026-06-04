@@ -37,6 +37,7 @@ type UploadTaskData = {
   zip_code?: string;
   city?: string;
   lexoffice_contact_id?: string;
+  skip_invoice?: boolean | string | number | null;
   [key: string]: unknown;
 };
 
@@ -67,6 +68,7 @@ type DbTaskRow = {
   due_date?: string | null;
   local_folder_name?: string | null;
   bracket_size?: number | null;
+  skip_invoice?: boolean | null;
 };
 
 type DbClientRow = {
@@ -165,6 +167,7 @@ export async function POST(request: Request) {
     let dbBracketSize = 3;
     let dbLexofficeContactId = "";
     let dbLocalFolderName = "";
+    let dbSkipInvoice = false;
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey =
@@ -179,7 +182,7 @@ export async function POST(request: Request) {
       const { data: taskRow, error: taskLookupError } = await supabase
         .from("tasks")
         .select(
-          "id, title, client, company_name, contact_first_name, contact_last_name, email, phone, street, zip_code, city, country, lexoffice_contact_id, services, products, services_lexoffice_id, products_lexoffice_id, tax_percentage, amount_type, discount, photoshoot_type, shoot_location, photoshoot_date, due_date, local_folder_name, bracket_size"
+          "id, title, client, company_name, contact_first_name, contact_last_name, email, phone, street, zip_code, city, country, lexoffice_contact_id, services, products, services_lexoffice_id, products_lexoffice_id, tax_percentage, amount_type, discount, photoshoot_type, shoot_location, photoshoot_date, due_date, local_folder_name, bracket_size, skip_invoice"
         )
         .eq("id", taskId)
         .maybeSingle();
@@ -220,6 +223,7 @@ export async function POST(request: Request) {
         dbDueDate = row.due_date ?? "";
         dbLocalFolderName = row.local_folder_name ?? "";
         dbBracketSize = Number(row.bracket_size ?? 3) === 5 ? 5 : 3;
+        dbSkipInvoice = Boolean(row.skip_invoice);
 
         if (dbLexofficeContactId) {
           const { data: clientRow } = await supabase
@@ -336,6 +340,15 @@ export async function POST(request: Request) {
       dbShootLocation || (typeof taskData.shoot_location === "string" ? taskData.shoot_location : "");
     const resolvedPhotoshootType =
       dbPhotoshootType || (typeof taskData.photoshoot_type === "string" ? taskData.photoshoot_type : "");
+    const skipInvoiceFromPayload =
+      typeof taskData.skip_invoice === "boolean"
+        ? taskData.skip_invoice
+        : typeof taskData.skip_invoice === "string"
+          ? ["1", "true", "yes", "on"].includes(taskData.skip_invoice.trim().toLowerCase())
+          : typeof taskData.skip_invoice === "number"
+            ? taskData.skip_invoice !== 0
+            : false;
+    const skipInvoice = dbSkipInvoice || skipInvoiceFromPayload;
 
     const zapierPayload = {
       ...taskData,
@@ -387,9 +400,19 @@ export async function POST(request: Request) {
       amount_type: amountType,
       discount: discountValue,
       total_price: invoiceTotal,
+      skip_invoice: skipInvoice,
     };
 
     console.log("ZAPIER PAYLOAD:", zapierPayload);
+    if (skipInvoice) {
+      return Response.json({
+        success: true,
+        folder: taskDirectory,
+        localFolder: localFinalDirectory,
+        files: files.map((file) => file.name),
+        skippedInvoice: true,
+      });
+    }
     let webhookResponse: Response;
     try {
       webhookResponse = await fetchWithTimeout(

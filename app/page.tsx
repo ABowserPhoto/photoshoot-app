@@ -15,7 +15,7 @@ import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
 
 type AmountType = "Net" | "Gross";
-type PhotoshootType = "Real Estate" | "Business Portraits" | "Food";
+type PhotoshootType = "Real Estate" | "Business Portraits" | "Food" | "Wedding";
 type ItemType = "Service" | "Product";
 type PreviewPreference = "first" | "middle" | "last";
 
@@ -98,6 +98,7 @@ type TaskSupabasePayload = {
   status: string;
   title: string;
   client: string;
+  skip_invoice: boolean;
 };
 
 const selectStyles = {
@@ -250,6 +251,7 @@ function HomeContent() {
   const [previewPreference, setPreviewPreference] = useState<PreviewPreference>("first");
   const [dueDate, setDueDate] = useState("");
   const [discount, setDiscount] = useState(0);
+  const [skipInvoice, setSkipInvoice] = useState(false);
   const [currentTaskStatus, setCurrentTaskStatus] = useState<BoardTask["status"]>("booking");
   const [localFolderNameDisplay, setLocalFolderNameDisplay] = useState("");
   const [openSections, setOpenSections] = useState({
@@ -504,6 +506,7 @@ function HomeContent() {
     setPreviewPreference("first");
     setDueDate("");
     setDiscount(0);
+    setSkipInvoice(false);
     setCurrentTaskStatus("booking");
     setLocalFolderNameDisplay("");
     setPreservedTaskTitle("");
@@ -572,6 +575,7 @@ function HomeContent() {
     setPreviewPreference(task.previewPreference ?? "first");
     setDueDate(task.dueDate);
     setDiscount(task.discount);
+    setSkipInvoice(task.skipInvoice ?? false);
     setCurrentTaskStatus(task.status);
     setLocalFolderNameDisplay(task.localFolderName ?? "");
     setPreservedTaskTitle(task.taskTitle?.trim() ?? "");
@@ -729,6 +733,7 @@ function HomeContent() {
           "send-email": "Send Email",
           completed: "Completed",
         }[currentTaskStatus],
+        skip_invoice: skipInvoice,
       };
       const { error } = await supabase.from("tasks").update(editorPayload).eq("id", editingTaskId);
       setIsSubmitting(false);
@@ -826,6 +831,7 @@ function HomeContent() {
         : "awaiting_folder_creation",
       title: generatedTitle,
       client: displayClientLabel,
+      skip_invoice: skipInvoice,
     };
 
     if (editingTaskId) {
@@ -917,6 +923,7 @@ function HomeContent() {
       products_lexoffice_id: (Array.isArray(uploadTask.products) ? uploadTask.products : []).map(
         (p) => p.lexoffice_id ?? ""
       ),
+      skip_invoice: uploadTask.skipInvoice ?? false,
     };
 
     console.log("ZAPIER PAYLOAD:", payload);
@@ -1187,6 +1194,14 @@ function HomeContent() {
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
+                      <label className="sm:col-span-2 inline-flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={skipInvoice}
+                          onChange={(event) => setSkipInvoice(event.target.checked)}
+                        />
+                        No Invoice (skip Zapier/Lexoffice invoice trigger)
+                      </label>
                     </div>
                     <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
@@ -1423,6 +1438,7 @@ function HomeContent() {
                         <option value="Real Estate">Real Estate</option>
                         <option value="Business Portraits">Business Portraits</option>
                         <option value="Food">Food</option>
+                        <option value="Wedding">Wedding</option>
                       </select>
                     </label>
                     <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">

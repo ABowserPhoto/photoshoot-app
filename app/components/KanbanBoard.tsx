@@ -48,7 +48,7 @@ export type BoardTask = {
   taxPercentage: number;
   amountType: "Net" | "Gross";
   discount: number;
-  photoshootType: "Real Estate" | "Business Portraits" | "Food";
+  photoshootType: "Real Estate" | "Business Portraits" | "Food" | "Wedding";
   shootLocation: string;
   photoshootDate: string;
   dueDate: string;
@@ -61,6 +61,7 @@ export type BoardTask = {
   isArchived: boolean;
   completedAt: string | null;
   updatedAt: string | null;
+  skipInvoice: boolean;
 };
 
 type BoardState = Record<ColumnKey, BoardTask[]>;
@@ -122,6 +123,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     isArchived: false,
     completedAt: null,
     updatedAt: null,
+    skipInvoice: false,
   },
   {
     id: "fallback-2",
@@ -156,6 +158,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     isArchived: false,
     completedAt: null,
     updatedAt: null,
+    skipInvoice: false,
   },
 ];
 
@@ -191,6 +194,7 @@ type DbTask = {
   cover_image_url: string | null;
   completed_at: string | null;
   updated_at: string | null;
+  skip_invoice?: boolean | null;
 };
 
 const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
@@ -481,6 +485,8 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
           ? "Real Estate"
           : row.photoshoot_type === "Food"
             ? "Food"
+            : row.photoshoot_type === "Wedding"
+              ? "Wedding"
           : (existing?.photoshootType ?? "Real Estate"),
     shootLocation: typeof row.shoot_location === "string" ? row.shoot_location : (existing?.shootLocation ?? ""),
     photoshootDate,
@@ -508,6 +514,12 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
         : row.updated_at === null
           ? null
           : (existing?.updatedAt ?? null),
+    skipInvoice:
+      typeof row.skip_invoice === "boolean"
+        ? row.skip_invoice
+        : row.skip_invoice == null
+          ? (existing?.skipInvoice ?? false)
+          : Boolean(row.skip_invoice),
   };
 }
 

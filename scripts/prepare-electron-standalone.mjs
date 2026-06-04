@@ -6,6 +6,8 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const standaloneDir = path.join(root, ".next", "standalone");
 const staticSrc = path.join(root, ".next", "static");
 const staticDest = path.join(standaloneDir, ".next", "static");
+const serverChunksSrc = path.join(root, ".next", "server", "chunks");
+const serverChunksDest = path.join(standaloneDir, ".next", "server", "chunks");
 const publicSrc = path.join(root, "public");
 const publicDest = path.join(standaloneDir, "public");
 const rootNodeModules = path.join(root, "node_modules");
@@ -51,12 +53,20 @@ if (!fs.existsSync(publicSrc)) {
   process.exit(1);
 }
 
+if (!fs.existsSync(serverChunksSrc)) {
+  console.error("Missing .next/server/chunks. Run `next build` first.");
+  process.exit(1);
+}
+
 copyDir(staticSrc, staticDest);
 copyDir(publicSrc, publicDest);
+// Next standalone on Windows can miss traced server runtime chunks.
+// Force-copy the full chunk directory so route runtime loading is stable.
+copyDir(serverChunksSrc, serverChunksDest);
 for (const moduleName of REQUIRED_RUNTIME_MODULES) {
   ensureRuntimeModule(moduleName);
 }
 
 console.log(
-  `Prepared standalone bundle for Electron packaging and ensured runtime modules: ${REQUIRED_RUNTIME_MODULES.join(", ")}`
+  `Prepared standalone bundle for Electron packaging, synced server chunks, and ensured runtime modules: ${REQUIRED_RUNTIME_MODULES.join(", ")}`
 );
