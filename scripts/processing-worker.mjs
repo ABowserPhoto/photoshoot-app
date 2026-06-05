@@ -609,9 +609,12 @@ async function syncTaskPreviews(supabase, taskRow) {
   const chunks = await buildTimestampBracketsFromDir(rawDir);
   const previewPreference = normalizePreviewPreference(taskRow.preview_preference);
   const forceGalleryPreviewDbSync = galleryPreviewsNeedsDbSync(taskRow.gallery_previews);
+  const { selectedChunkIndices } = parseSelectionPayload(taskRow.gallery_selection);
+  const selectedChunkSet = new Set(selectedChunkIndices);
   const nextItems = [];
   let processedCount = 0;
   let skippedCount = 0;
+  let selectedSkippedCount = 0;
   let failedCount = 0;
   let reusedFromStorageCount = 0;
 
@@ -623,6 +626,12 @@ async function syncTaskPreviews(supabase, taskRow) {
   });
 
   for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+    if (selectedChunkSet.has(chunkIndex)) {
+      // Keep historical selection in gallery_selection, but never regenerate selected previews.
+      selectedSkippedCount += 1;
+      continue;
+    }
+
     const chunk = chunks[chunkIndex];
     const firstFilename = resolvePreviewSourceFilename(chunk, previewPreference);
     if (!firstFilename) {
@@ -715,7 +724,7 @@ async function syncTaskPreviews(supabase, taskRow) {
 
   await persistGalleryPreviews(supabase, taskRow.id, chunks, nextItems);
   console.info(
-    `[worker] Folder [${localFolderName}] complete. Processed: ${processedCount} | Skipped: ${skippedCount} | Failed: ${failedCount} | ReusedFromStorage: ${reusedFromStorageCount} | DbItems: ${nextItems.length}`
+    `[worker] Folder [${localFolderName}] complete. Processed: ${processedCount} | Skipped: ${skippedCount} | SelectedSkipped: ${selectedSkippedCount} | Failed: ${failedCount} | ReusedFromStorage: ${reusedFromStorageCount} | DbItems: ${nextItems.length}`
   );
 }
 

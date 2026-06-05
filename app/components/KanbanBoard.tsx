@@ -545,6 +545,7 @@ export default function KanbanBoard({
   const [mergePromptError, setMergePromptError] = useState<string | null>(null);
   const [reviewMergedTask, setReviewMergedTask] = useState<BoardTask | null>(null);
   const [regeneratingPreviewTaskId, setRegeneratingPreviewTaskId] = useState<string | null>(null);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [previewRegenToast, setPreviewRegenToast] = useState<string | null>(null);
   const boardRef = useRef(board);
   const archivedTasksRef = useRef(archivedTasks);
@@ -1198,6 +1199,45 @@ export default function KanbanBoard({
     }
   };
 
+  const handleDeleteTask = async (task: BoardTask) => {
+    if (!task.id.trim()) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "Delete this task permanently? This will also permanently remove all task files from Supabase Storage."
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    const previousArchived = archivedTasksRef.current;
+    setDeletingTaskId(task.id);
+    setArchivedTasks((prev) => prev.filter((row) => row.id !== task.id));
+    try {
+      const response = await fetch("/api/tasks", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId: task.id }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { error?: unknown; removedCount?: unknown }
+        | null;
+      if (!response.ok) {
+        throw new Error(toErrorString(payload?.error, `Failed to delete task (${response.status}).`));
+      }
+      const removedCount =
+        typeof payload?.removedCount === "number" && Number.isFinite(payload.removedCount)
+          ? payload.removedCount
+          : 0;
+      setStatusMessage(`Task deleted permanently. Purged ${removedCount} storage object(s).`);
+    } catch (error) {
+      setArchivedTasks(previousArchived);
+      setStatusMessage(toErrorString(error, "Task deletion failed."));
+    } finally {
+      setDeletingTaskId(null);
+    }
+  };
+
   return (
     <div className="relative w-full">
       {!showArchived ? <DailyStreakBadge count={dailyCompletionCount} /> : null}
@@ -1250,6 +1290,17 @@ export default function KanbanBoard({
                   className="mt-3 rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-700"
                 >
                   Restore
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingTaskId === task.id}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleDeleteTask(task);
+                  }}
+                  className="ml-2 mt-3 rounded-md border border-red-300 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-700 dark:text-red-300 dark:hover:bg-red-950/40"
+                >
+                  {deletingTaskId === task.id ? "Deleting..." : "Delete Permanently"}
                 </button>
               </article>
             ))}

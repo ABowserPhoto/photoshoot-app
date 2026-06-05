@@ -3,12 +3,29 @@ import { NextResponse } from "next/server";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
+import { purgeTaskStorage } from "@/lib/server/purgeTaskStorage";
 import { redactTaskRowForRole } from "@/lib/tasksRedact";
 import type { TaskRow } from "@/lib/tasksRedact";
 
 export const dynamic = "force-dynamic";
 const TASKS_FETCH_TIMEOUT_MS = Number(process.env.TASKS_FETCH_TIMEOUT_MS ?? "8000");
 let cachedRows: TaskRow[] = [];
+
+function getDeleteClient() {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const key = supabaseServiceRoleKey || supabaseAnonKey;
+  if (!supabaseUrl || !key) {
+    return null;
+  }
+  return createClient(supabaseUrl, key, {
+    auth: { persistSession: false },
+    global: {
+      fetch: (input, init) => fetchWithTimeout(input, init, TASKS_FETCH_TIMEOUT_MS),
+    },
+  });
+}
 
 export async function GET() {
   const auth = await getAuthRole();
@@ -73,4 +90,50 @@ export async function GET() {
           : "Supabase temporarily unavailable; returning empty task list.",
     });
   }
+}
+
+export async function DELETE(request: Request) {
+  const auth = await getAuthRole();
+  if (!auth.authenticated || !auth.isAdmin) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const url = new URL(request.url);
+  const fromQuery = url.searchParams.get("taskId")?.trim() ?? "";
+  const body = (await request.json().catch(() => null)) as { taskId?: unknown } | null;
+  const fromBody = typeof body?.taskId === "string" ? body.taskId.trim() : "";
+  const taskId = fromBody || fromQuery;
+
+  if (!taskId) {
+    return NextResponse.json({ error: "taskId is required." }, { status: 400 });
+  }
+
+  const purgeResult = await purgeTaskStorage(taskId, { strict: true });
+  if (!purgeResult.ok) {
+    return NextResponse.json(
+      {
+        error:
+          purgeResult.error ||
+          "Could not fully purge task storage. Task was not deleted to avoid orphaned files.",
+      },
+      { status: 500 }
+    );
+  }
+
+  const supabase = getDeleteClient();
+  if (!supabase) {
+    return NextResponse.json({ error: "Supabase is not configured for deletion." }, { status: 503 });
+  }
+
+  const { error: deleteError } = await supabase.from("tasks").delete().eq("id", taskId);
+  if (deleteError) {
+    return NextResponse.json({ error: deleteError.message }, { status: 500 });
+  }
+
+  return NextResponse.json({
+    success: true,
+    taskId,
+    removedCount: purgeResult.removedCount,
+    buckets: purgeResult.buckets,
+  });
 }

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
-import { RotateCcw, RotateCw } from "lucide-react";
+import { Lock, RotateCcw, RotateCw } from "lucide-react";
 
 type GalleryItem = {
   chunkIndex: number;
@@ -18,6 +18,12 @@ type GalleryResponse = {
   bracketSize?: number;
   totalChunks?: number;
   gallery?: GalleryItem[];
+  selectedGallery?: GalleryItem[];
+  selection?: {
+    selectedChunkIndices?: number[];
+    selectedFiles?: string[];
+    submittedAt?: string | null;
+  };
   error?: string;
 };
 
@@ -31,6 +37,23 @@ type ProcessResponse = {
 };
 
 type RotateDirection = "cw" | "ccw";
+
+function formatSelectionLockedLabel(submittedAt: string): string | null {
+  const parsed = new Date(submittedAt);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  const datePart = new Intl.DateTimeFormat("de-DE", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(parsed);
+  const timePart = new Intl.DateTimeFormat("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(parsed);
+  return `Auswahl gesperrt am ${datePart} um ${timePart} Uhr`;
+}
 
 export default function GalleryPage() {
   const searchParams = useSearchParams();
@@ -52,6 +75,9 @@ export default function GalleryPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
+  const [isLockedByServer, setIsLockedByServer] = useState(false);
+  const [lockedSelectedGallery, setLockedSelectedGallery] = useState<GalleryItem[]>([]);
+  const [selectionLockedAt, setSelectionLockedAt] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [rotatingByChunk, setRotatingByChunk] = useState<Record<number, RotateDirection | undefined>>({});
@@ -70,11 +96,17 @@ export default function GalleryPage() {
 
   /** After successful submit, only selected scenes are shown (ignores rating filter). */
   const gridItems = useMemo(() => {
+    if (isLockedByServer) {
+      if (lockedSelectedGallery.length > 0) {
+        return lockedSelectedGallery;
+      }
+      return gallery.filter((item) => selectedChunks.has(item.chunkIndex));
+    }
     if (isSuccess) {
       return gallery.filter((item) => selectedChunks.has(item.chunkIndex));
     }
     return filteredGallery;
-  }, [gallery, filteredGallery, isSuccess, selectedChunks]);
+  }, [gallery, filteredGallery, isSuccess, isLockedByServer, lockedSelectedGallery, selectedChunks]);
 
   const activeModalItem = useMemo(
     () => (activeChunkIndex == null ? null : gridItems.find((item) => item.chunkIndex === activeChunkIndex) ?? null),
@@ -97,6 +129,16 @@ export default function GalleryPage() {
     }
     return !isSelectionAvailable;
   }, [isSelectionAvailable, taskStatus]);
+  const selectionLockedLabel = useMemo(() => {
+    if (selectionLockedAt) {
+      return formatSelectionLockedLabel(selectionLockedAt);
+    }
+    if (isLockedByServer || isSuccess) {
+      return "Auswahl gesperrt – Ihre Fotos wurden erfolgreich übermittelt.";
+    }
+    return null;
+  }, [isLockedByServer, isSuccess, selectionLockedAt]);
+  const showLockedBadge = (isLockedByServer || isSuccess) && Boolean(selectionLockedLabel);
 
   useEffect(() => {
     if (!shootId.trim()) {
@@ -109,6 +151,9 @@ export default function GalleryPage() {
   useEffect(() => {
     if (!selectionStorageKey) {
       setSelectedChunks(new Set());
+      return;
+    }
+    if (isLockedByServer) {
       return;
     }
     try {
@@ -125,20 +170,27 @@ export default function GalleryPage() {
     } catch {
       setSelectedChunks(new Set());
     }
-  }, [selectionStorageKey]);
+  }, [isLockedByServer, selectionStorageKey]);
 
   useEffect(() => {
     if (!selectionStorageKey) {
       return;
     }
+    if (isLockedByServer) {
+      window.localStorage.removeItem(selectionStorageKey);
+      return;
+    }
     window.localStorage.setItem(selectionStorageKey, JSON.stringify(selectedIndices));
-  }, [selectionStorageKey, selectedIndices]);
+  }, [isLockedByServer, selectionStorageKey, selectedIndices]);
 
   async function loadGallery(targetShootId: string) {
     setIsLoading(true);
     setErrorMessage(null);
     setSuccessMessage(null);
     setIsSuccess(false);
+    setIsLockedByServer(false);
+    setLockedSelectedGallery([]);
+    setSelectionLockedAt(null);
     setRatingsByChunk({});
     setActiveChunkIndex(null);
     try {
@@ -160,6 +212,24 @@ export default function GalleryPage() {
       setLocalFolderName(payload?.localFolderName ?? "");
       setTaskStatus(typeof payload?.status === "string" ? payload.status : "");
       setGallery(payload?.gallery ?? []);
+      const serverSelectedIndices = Array.from(
+        new Set(
+          (Array.isArray(payload?.selection?.selectedChunkIndices) ? payload.selection.selectedChunkIndices : [])
+            .map((value) => Number(value))
+            .filter((value) => Number.isInteger(value) && value >= 0)
+        )
+      ).sort((a, b) => a - b);
+      if (serverSelectedIndices.length > 0) {
+        setSelectedChunks(new Set(serverSelectedIndices));
+        setIsSuccess(true);
+        setIsLockedByServer(true);
+        setLockedSelectedGallery(payload?.selectedGallery ?? []);
+        const submittedAt =
+          typeof payload?.selection?.submittedAt === "string" ? payload.selection.submittedAt.trim() : "";
+        setSelectionLockedAt(submittedAt || null);
+        setSuccessMessage("Auswahl bereits eingereicht. Galerie ist im Nur-Lesen-Modus.");
+        return;
+      }
     } catch {
       setTaskStatus(null);
       setGallery([]);
@@ -170,7 +240,7 @@ export default function GalleryPage() {
   }
 
   function toggleChunk(index: number) {
-    if (isSuccess) {
+    if (isSuccess || isLockedByServer) {
       return;
     }
     setSelectedChunks((prev) => {
@@ -185,7 +255,7 @@ export default function GalleryPage() {
   }
 
   function setRating(index: number, rating: number) {
-    if (isSuccess) {
+    if (isSuccess || isLockedByServer) {
       return;
     }
     setRatingsByChunk((prev) => ({ ...prev, [index]: rating }));
@@ -208,7 +278,7 @@ export default function GalleryPage() {
   }
 
   async function submitSelections() {
-    if (isSuccess) {
+    if (isSuccess || isLockedByServer) {
       return;
     }
     if (selectedIndices.length === 0) {
@@ -249,6 +319,7 @@ export default function GalleryPage() {
         window.localStorage.removeItem(selectionStorageKey);
       }
       setIsSuccess(true);
+      setSelectionLockedAt(new Date().toISOString());
       setSuccessMessage("Auswahl erfolgreich gesendet. Vielen Dank!");
     } catch {
       setErrorMessage("Netzwerkfehler beim Absenden der Auswahl.");
@@ -258,6 +329,9 @@ export default function GalleryPage() {
   }
 
   async function rotatePreview(item: GalleryItem, direction: RotateDirection) {
+    if (isLockedByServer) {
+      return;
+    }
     if (!shootId.trim()) {
       setErrorMessage("Could not rotate image: missing shootId.");
       return;
@@ -376,13 +450,26 @@ export default function GalleryPage() {
       <>
       <div className="mx-auto max-w-7xl px-4 pb-28 pt-4 sm:px-6">
         <header className="mb-4">
-          <h1 className="text-xl font-semibold">Wählen Sie Ihre Lieblingsfotos aus</h1>
-          <p className="mt-1 text-sm text-zinc-400">
-            Klicken Sie auf ein Bild, um die Szene für die Bearbeitung zu markieren.
-          </p>
+          <h1 className="text-xl font-semibold">
+            {showLockedBadge ? "Ihre ausgewählten Fotos" : "Wählen Sie Ihre Lieblingsfotos aus"}
+          </h1>
+          {showLockedBadge ? (
+            <div
+              className="mt-3 inline-flex max-w-full items-center gap-2.5 rounded-full border border-emerald-700/50 bg-emerald-950/40 px-4 py-2 text-sm text-emerald-100 shadow-sm"
+              role="status"
+              aria-live="polite"
+            >
+              <Lock className="h-4 w-4 shrink-0 text-emerald-400" aria-hidden />
+              <span className="font-medium">{selectionLockedLabel}</span>
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-zinc-400">
+              Klicken Sie auf ein Bild, um die Szene für die Bearbeitung zu markieren.
+            </p>
+          )}
         </header>
 
-        {!isSuccess ? (
+        {!isSuccess && !isLockedByServer ? (
         <section className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/50 p-2">
           <span className="px-1 text-xs font-medium uppercase tracking-wide text-zinc-300">
             Bewertung filtern
@@ -461,11 +548,11 @@ export default function GalleryPage() {
                   <div className="border-t border-zinc-800 px-2 py-2">
                     <div className="truncate text-[11px] text-zinc-400">{displayFilename(item.firstFilename)}</div>
                     <div className="mt-1 flex items-center justify-between gap-2">
-                      <StarsRow chunkIndex={item.chunkIndex} disabled={isSuccess} />
+                      <StarsRow chunkIndex={item.chunkIndex} disabled={isSuccess || isLockedByServer} />
                       <div className="flex items-center gap-1.5">
                         <button
                           type="button"
-                          disabled={isSuccess || isRotatingThisItem}
+                          disabled={isSuccess || isLockedByServer || isRotatingThisItem}
                           onClick={(event) => {
                             event.stopPropagation();
                             void rotatePreview(item, "ccw");
@@ -480,7 +567,7 @@ export default function GalleryPage() {
                         </button>
                         <button
                           type="button"
-                          disabled={isSuccess || isRotatingThisItem}
+                          disabled={isSuccess || isLockedByServer || isRotatingThisItem}
                           onClick={(event) => {
                             event.stopPropagation();
                             void rotatePreview(item, "cw");
@@ -495,13 +582,13 @@ export default function GalleryPage() {
                         </button>
                         <button
                           type="button"
-                          disabled={isSuccess}
+                          disabled={isSuccess || isLockedByServer}
                           onClick={(event) => {
                             event.stopPropagation();
                             toggleChunk(item.chunkIndex);
                           }}
                           aria-label={`Szene ${item.chunkIndex + 1} ${selected ? "abwählen" : "auswählen"}`}
-                          aria-disabled={isSuccess}
+                          aria-disabled={isSuccess || isLockedByServer}
                           className={`inline-flex h-5 w-5 items-center justify-center rounded-sm border text-[11px] font-bold disabled:cursor-not-allowed disabled:opacity-60 ${
                             selected
                               ? "border-green-400 bg-green-500 text-white"
@@ -578,12 +665,16 @@ export default function GalleryPage() {
             <div className="mt-3 w-full max-w-3xl rounded-lg border border-zinc-700 bg-zinc-900/80 px-4 py-3">
               <div className="truncate text-sm text-zinc-300">{displayFilename(activeModalItem.firstFilename)}</div>
               <div className="mt-2 flex items-center justify-between gap-3">
-                <StarsRow chunkIndex={activeModalItem.chunkIndex} size="text-xl" disabled={isSuccess} />
+                <StarsRow
+                  chunkIndex={activeModalItem.chunkIndex}
+                  size="text-xl"
+                  disabled={isSuccess || isLockedByServer}
+                />
                 <button
                   type="button"
-                  disabled={isSuccess}
+                  disabled={isSuccess || isLockedByServer}
                   onClick={() => toggleChunk(activeModalItem.chunkIndex)}
-                  aria-disabled={isSuccess}
+                  aria-disabled={isSuccess || isLockedByServer}
                   className={`inline-flex h-7 min-w-7 items-center justify-center rounded-sm border px-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${
                     selectedChunks.has(activeModalItem.chunkIndex)
                       ? "border-green-400 bg-green-500 text-white"
@@ -606,14 +697,20 @@ export default function GalleryPage() {
           <button
             type="button"
             onClick={() => void submitSelections()}
-            disabled={isSubmitting || selectedCount === 0 || isSuccess}
+            disabled={isSubmitting || selectedCount === 0 || isSuccess || isLockedByServer}
             className={`h-10 rounded-md px-5 text-sm font-semibold text-white ${
-              isSuccess
+              isSuccess || isLockedByServer
                 ? "cursor-default bg-[#9E9900]"
                 : "bg-[#BA1F00] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
             }`}
           >
-            {isSuccess ? "Auswahl gesendet!" : isSubmitting ? "Wird gesendet..." : "Auswahl absenden"}
+            {isLockedByServer
+              ? "Auswahl bereits gesendet"
+              : isSuccess
+                ? "Auswahl gesendet!"
+                : isSubmitting
+                  ? "Wird gesendet..."
+                  : "Auswahl absenden"}
           </button>
         </div>
       </div>

@@ -4,6 +4,8 @@ type PurgeResult = {
   ok: boolean;
   removedCount: number;
   buckets: string[];
+  remainingCount?: number;
+  error?: string;
 };
 
 function createServerSupabase() {
@@ -33,25 +35,34 @@ async function listAllPathsUnderPrefix(
   if (!supabase) return [];
   const queue = [prefix];
   const files: string[] = [];
+  const pageSize = 1000;
 
   while (queue.length > 0) {
     const current = queue.shift()!;
-    const { data, error } = await supabase.storage.from(bucket).list(current, {
-      limit: 1000,
-      sortBy: { column: "name", order: "asc" },
-    });
-    if (error || !data) {
-      continue;
-    }
-    for (const entry of data) {
-      if (!entry?.name) continue;
-      const fullPath = `${current}/${entry.name}`;
-      const isFolder = !entry.id;
-      if (isFolder) {
-        queue.push(fullPath);
-      } else {
-        files.push(fullPath);
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase.storage.from(bucket).list(current, {
+        limit: pageSize,
+        offset,
+        sortBy: { column: "name", order: "asc" },
+      });
+      if (error || !data || data.length === 0) {
+        break;
       }
+      for (const entry of data) {
+        if (!entry?.name) continue;
+        const fullPath = `${current}/${entry.name}`;
+        const isFolder = !entry.id;
+        if (isFolder) {
+          queue.push(fullPath);
+        } else {
+          files.push(fullPath);
+        }
+      }
+      if (data.length < pageSize) {
+        break;
+      }
+      offset += pageSize;
     }
   }
 
@@ -73,7 +84,11 @@ async function resolveTaskLocalFolderName(
   return typeof localFolderName === "string" ? localFolderName.trim() : "";
 }
 
-export async function purgeTaskStorage(taskId: string): Promise<PurgeResult> {
+export async function purgeTaskStorage(
+  taskId: string,
+  options?: { strict?: boolean }
+): Promise<PurgeResult> {
+  const strict = options?.strict === true;
   const trimmedTaskId = taskId.trim();
   if (!trimmedTaskId) {
     return { ok: true, removedCount: 0, buckets: [] };
@@ -81,7 +96,7 @@ export async function purgeTaskStorage(taskId: string): Promise<PurgeResult> {
 
   const supabase = createServerSupabase();
   if (!supabase) {
-    return { ok: false, removedCount: 0, buckets: [] };
+    return { ok: false, removedCount: 0, buckets: [], error: "Supabase storage credentials are not configured." };
   }
 
   const candidates = [
@@ -102,6 +117,7 @@ export async function purgeTaskStorage(taskId: string): Promise<PurgeResult> {
   );
 
   let removedCount = 0;
+  let hadRemovalError = false;
 
   for (const bucket of buckets) {
     try {
@@ -115,15 +131,41 @@ export async function purgeTaskStorage(taskId: string): Promise<PurgeResult> {
       }
       for (const batch of chunkArray(paths, 100)) {
         const { error } = await supabase.storage.from(bucket).remove(batch);
-        if (!error) {
-          removedCount += batch.length;
+        if (error) {
+          hadRemovalError = true;
+          continue;
         }
+        removedCount += batch.length;
       }
     } catch {
-      // Silent fail by design for already-empty/missing paths.
+      hadRemovalError = true;
     }
   }
 
-  return { ok: true, removedCount, buckets };
+  if (!strict) {
+    return { ok: true, removedCount, buckets };
+  }
+
+  const remainingByBucket = await Promise.all(
+    buckets.map(async (bucket) => {
+      const directFiles = bucket === "previews" ? [`cover_${trimmedTaskId}.jpg`] : [];
+      const nestedPaths = (
+        await Promise.all(prefixes.map((prefix) => listAllPathsUnderPrefix(supabase, bucket, prefix)))
+      ).flat();
+      return Array.from(new Set([...directFiles, ...nestedPaths])).length;
+    })
+  );
+  const remainingCount = remainingByBucket.reduce((sum, value) => sum + value, 0);
+  if (remainingCount > 0 || hadRemovalError) {
+    return {
+      ok: false,
+      removedCount,
+      buckets,
+      remainingCount,
+      error: remainingCount > 0 ? `Storage still contains ${remainingCount} file(s) for this task.` : "Storage purge failed.",
+    };
+  }
+
+  return { ok: true, removedCount, buckets, remainingCount: 0 };
 }
 

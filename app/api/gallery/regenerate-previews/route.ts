@@ -11,6 +11,14 @@ export const dynamic = "force-dynamic";
 
 const SUPABASE_PREVIEWS_BUCKET = process.env.SUPABASE_PREVIEWS_BUCKET?.trim() || "previews";
 const LOCAL_PREVIEWS_DIR = path.join(process.cwd(), "public", "previews");
+
+type PreviewItem = {
+  chunkIndex: number;
+  firstFilename: string;
+  previewUrl: string;
+  storagePath: string;
+};
+
 function getSupabaseServerClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
   const key =
@@ -25,7 +33,8 @@ function getSupabaseServerClient() {
 async function deleteSupabasePreviewObjects(
   supabase: ReturnType<typeof createClient>,
   localFolderName: string,
-  taskId: string
+  taskId: string,
+  protectedStoragePaths: Set<string>
 ) {
   const removedPaths: string[] = [];
   const coverPath = `cover_${taskId}.jpg`;
@@ -49,17 +58,65 @@ async function deleteSupabasePreviewObjects(
     .filter((name) => Boolean(name?.trim()))
     .map((name) => `${sanitizeStoragePath(localFolderName)}/${name}`);
 
-  if (folderObjectPaths.length > 0) {
+  const deletableFolderObjectPaths = folderObjectPaths.filter((storagePath) => {
+    return !protectedStoragePaths.has(storagePath);
+  });
+
+  if (deletableFolderObjectPaths.length > 0) {
     const { error: removeError } = await supabase.storage
       .from(SUPABASE_PREVIEWS_BUCKET)
-      .remove(folderObjectPaths);
+      .remove(deletableFolderObjectPaths);
     if (removeError) {
       throw new Error(`Failed to delete preview objects: ${removeError.message}`);
     }
-    removedPaths.push(...folderObjectPaths);
+    removedPaths.push(...deletableFolderObjectPaths);
   }
 
   return removedPaths;
+}
+
+function parseSelectionPayload(raw: unknown): { selectedChunkIndices: number[] } {
+  const payload = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const selectedChunkIndices = Array.from(
+    new Set(
+      (Array.isArray(payload.selected_chunk_indices) ? payload.selected_chunk_indices : [])
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 0)
+    )
+  ).sort((a, b) => a - b);
+  return { selectedChunkIndices };
+}
+
+function parsePreviewItems(raw: unknown): PreviewItem[] {
+  const payload = raw && typeof raw === "object" ? (raw as { items?: unknown }) : {};
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  return items
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const row = item as {
+        chunkIndex?: unknown;
+        firstFilename?: unknown;
+        middleFilename?: unknown;
+        previewUrl?: unknown;
+        storagePath?: unknown;
+      };
+      const chunkIndex = Number(row.chunkIndex);
+      const firstFilename =
+        typeof row.firstFilename === "string"
+          ? row.firstFilename
+          : typeof row.middleFilename === "string"
+            ? row.middleFilename
+            : "";
+      const previewUrl = typeof row.previewUrl === "string" ? row.previewUrl : "";
+      const storagePath = typeof row.storagePath === "string" ? row.storagePath.trim() : "";
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !firstFilename || !previewUrl || !storagePath) {
+        return null;
+      }
+      return { chunkIndex, firstFilename, previewUrl, storagePath };
+    })
+    .filter((item): item is PreviewItem => item !== null);
 }
 
 function deleteLegacyLocalPreviewFiles(localFolderName: string) {
@@ -110,7 +167,7 @@ export async function POST(request: Request) {
 
     const { data: task, error: fetchError } = await supabase
       .from("tasks")
-      .select("id, local_folder_name, gallery_previews, cover_image_url")
+      .select("id, local_folder_name, gallery_previews, gallery_selection, cover_image_url")
       .eq("id", taskId)
       .maybeSingle();
 
@@ -126,13 +183,27 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Task has no local_folder_name." }, { status: 400 });
     }
 
-    const removedStoragePaths = await deleteSupabasePreviewObjects(supabase, localFolderName, taskId);
+    const previewItems = parsePreviewItems(task.gallery_previews);
+    const { selectedChunkIndices } = parseSelectionPayload(task.gallery_selection);
+    const selectedChunkSet = new Set(selectedChunkIndices);
+    const selectedPreviewItems = previewItems.filter((item) => selectedChunkSet.has(item.chunkIndex));
+    const protectedStoragePaths = new Set(selectedPreviewItems.map((item) => sanitizeStoragePath(item.storagePath)));
+
+    const removedStoragePaths = await deleteSupabasePreviewObjects(
+      supabase,
+      localFolderName,
+      taskId,
+      protectedStoragePaths
+    );
     const removedLocalPaths = deleteLegacyLocalPreviewFiles(localFolderName);
 
     const { error: updateError } = await supabase
       .from("tasks")
       .update({
-        gallery_previews: null,
+        gallery_previews: {
+          updated_at: new Date().toISOString(),
+          items: selectedPreviewItems,
+        },
         cover_image_url: null,
       })
       .eq("id", taskId);
