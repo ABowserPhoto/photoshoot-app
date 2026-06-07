@@ -1,4 +1,5 @@
 import { createServerClient } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
 import type { User } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
@@ -16,9 +17,37 @@ function roleFromSupabaseUser(user: User): UserRole {
   return normalizeRole(raw);
 }
 
+function createServiceSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!url || !serviceKey) {
+    return null;
+  }
+  return createClient(url, serviceKey, { auth: { persistSession: false } });
+}
+
+async function roleFromProfilesTable(userId: string, fallbackUser: User): Promise<UserRole> {
+  const sb = createServiceSupabase();
+  if (!sb) {
+    return roleFromSupabaseUser(fallbackUser);
+  }
+
+  const { data, error } = await sb.from("profiles").select("role").eq("id", userId).maybeSingle();
+  if (error || !data || typeof data !== "object") {
+    return roleFromSupabaseUser(fallbackUser);
+  }
+
+  const rawRole = (data as { role?: unknown }).role;
+  if (rawRole === null || rawRole === undefined || String(rawRole).trim() === "") {
+    return roleFromSupabaseUser(fallbackUser);
+  }
+
+  return normalizeRole(rawRole);
+}
+
 /**
  * Resolves current request auth:
- * - Supabase session (role from metadata), OR
+ * - Supabase session (role from `profiles.role`, then user metadata), OR
  * - Gatekeeper cookie matching APP_ADMIN_PASSWORD / APP_EDITOR_PASSWORD.
  */
 export async function getAuthRole(): Promise<{
@@ -54,7 +83,7 @@ export async function getAuthRole(): Promise<{
     } = await supabase.auth.getUser();
 
     if (user) {
-      const role = roleFromSupabaseUser(user);
+      const role = await roleFromProfilesTable(user.id, user);
       return { authenticated: true, role, isAdmin: role === "admin" };
     }
   }

@@ -21,8 +21,61 @@ import {
   type ProductivityTimeframe,
 } from "@/app/actions/statistics";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
-import { formatDurationLong } from "@/lib/adminStatsFormat";
+import { formatDurationLong, formatEuro } from "@/lib/adminStatsFormat";
 import MonthlyBillingSummary from "@/app/planner/components/MonthlyBillingSummary";
+
+type BusinessTimeframeKey = "week" | "month" | "year" | "lastYear";
+
+type BusinessStatsMetrics = {
+  averageEditTimeMinutes: number;
+  averageTotalTimeMinutes: number;
+  totalBookings: number;
+  totalNetRevenue: number;
+  totalTaxes: number;
+};
+
+type BusinessStatsResponse = {
+  labels: Record<BusinessTimeframeKey, string>;
+  ranges: Record<BusinessTimeframeKey, { start: string; end: string; subtitle: string }>;
+  metrics: Record<BusinessTimeframeKey, BusinessStatsMetrics>;
+  selectedMonth: number;
+  selectedYear: number;
+};
+
+function currentMonthValue(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function parseMonthValue(value: string): { month: number; year: number } | null {
+  if (!/^\d{4}-\d{2}$/.test(value)) {
+    return null;
+  }
+  const [year, month] = value.split("-").map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    return null;
+  }
+  return { month, year };
+}
+
+function shiftMonthValue(value: string, delta: number): string {
+  const parsed = parseMonthValue(value);
+  if (!parsed) {
+    return currentMonthValue();
+  }
+  const date = new Date(parsed.year, parsed.month - 1 + delta, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function formatMonthLabel(value: string): string {
+  const parsed = parseMonthValue(value);
+  if (!parsed) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(
+    new Date(parsed.year, parsed.month - 1, 1)
+  );
+}
 
 type SortKey =
   | "date"
@@ -107,6 +160,11 @@ export default function AdminStatisticsPage() {
   const [dailyLogs, setDailyLogs] = useState<ProductivityDailyLog[]>([]);
   const [sortKey, setSortKey] = useState<SortKey>("clockInAt");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [selectedMonthValue, setSelectedMonthValue] = useState(currentMonthValue);
+  const [businessStats, setBusinessStats] = useState<BusinessStatsResponse | null>(null);
+  const [businessFrame, setBusinessFrame] = useState<BusinessTimeframeKey>("month");
+  const [businessLoading, setBusinessLoading] = useState(true);
+  const [businessError, setBusinessError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!authenticated || !isAdmin) {
@@ -121,27 +179,50 @@ export default function AdminStatisticsPage() {
 
   const loadStats = useCallback(async () => {
     setLoading(true);
+    setBusinessLoading(true);
     setError(null);
-    const res = await getProductivityStats(timeframe, selectedUserId || undefined);
-    if (!res.ok) {
-      setError(res.error);
-      setLoading(false);
-      return;
+    setBusinessError(null);
+
+    const period = parseMonthValue(selectedMonthValue);
+    const month = period?.month;
+    const year = period?.year;
+    const businessQuery = period ? `?month=${period.month}&year=${period.year}` : "";
+
+    const [productivityRes, businessRes] = await Promise.all([
+      getProductivityStats(timeframe, selectedUserId || undefined, month, year),
+      fetch(`/api/admin-stats${businessQuery}`, { cache: "no-store" }),
+    ]);
+
+    if (!productivityRes.ok) {
+      setError(productivityRes.error);
+    } else {
+      setSummary(productivityRes.summary);
+      setBuckets(
+        productivityRes.buckets.map((bucket) => ({
+          label: bucket.label,
+          totalClockedInMinutes: bucket.totalClockedInMinutes,
+          totalTaskMinutes: bucket.totalTaskMinutes,
+          utilizationRate: bucket.utilizationRate,
+          tasksCompleted: bucket.tasksCompleted,
+          studioTasksCompleted: bucket.studioTasksCompleted,
+        }))
+      );
+      setDailyLogs(productivityRes.dailyLogs);
     }
-    setSummary(res.summary);
-    setBuckets(
-      res.buckets.map((bucket) => ({
-        label: bucket.label,
-        totalClockedInMinutes: bucket.totalClockedInMinutes,
-        totalTaskMinutes: bucket.totalTaskMinutes,
-        utilizationRate: bucket.utilizationRate,
-        tasksCompleted: bucket.tasksCompleted,
-        studioTasksCompleted: bucket.studioTasksCompleted,
-      }))
-    );
-    setDailyLogs(res.dailyLogs);
+
+    const businessPayload = (await businessRes.json().catch(() => null)) as
+      | (BusinessStatsResponse & { error?: string })
+      | null;
+    if (!businessRes.ok) {
+      setBusinessError(businessPayload?.error ?? `Failed to load business stats (${businessRes.status}).`);
+      setBusinessStats(null);
+    } else if (businessPayload) {
+      setBusinessStats(businessPayload);
+    }
+
     setLoading(false);
-  }, [selectedUserId, timeframe]);
+    setBusinessLoading(false);
+  }, [selectedMonthValue, selectedUserId, timeframe]);
 
   useEffect(() => {
     if (authLoading || !authenticated || !isAdmin) {
@@ -205,17 +286,6 @@ export default function AdminStatisticsPage() {
     );
   }
 
-  if (!authenticated || !isAdmin) {
-    return (
-      <main className="flex min-h-[50vh] flex-col items-center justify-center gap-3 px-4 text-center">
-        <p className="text-sm text-zinc-300">Admin access required.</p>
-        <Link href="/" className="text-sm font-semibold text-white underline">
-          Back to workflow
-        </Link>
-      </main>
-    );
-  }
-
   return (
     <main className="min-h-[calc(100dvh-64px)] bg-zinc-950 px-4 py-6 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-[1600px] space-y-6">
@@ -241,6 +311,34 @@ export default function AdminStatisticsPage() {
         </header>
 
         <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4">
+          <div className="flex min-w-[240px] flex-col gap-1 text-xs font-medium text-zinc-400">
+            Reporting period
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setSelectedMonthValue((prev) => shiftMonthValue(prev, -1))}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-950 text-sm text-zinc-100 hover:bg-zinc-800"
+                aria-label="Previous month"
+              >
+                ←
+              </button>
+              <input
+                type="month"
+                value={selectedMonthValue}
+                onChange={(e) => setSelectedMonthValue(e.target.value || currentMonthValue())}
+                className="h-10 min-w-[160px] flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-violet-500"
+              />
+              <button
+                type="button"
+                onClick={() => setSelectedMonthValue((prev) => shiftMonthValue(prev, 1))}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-950 text-sm text-zinc-100 hover:bg-zinc-800"
+                aria-label="Next month"
+              >
+                →
+              </button>
+            </div>
+            <span className="text-[11px] text-zinc-500">{formatMonthLabel(selectedMonthValue)}</span>
+          </div>
           <label className="flex min-w-[160px] flex-col gap-1 text-xs font-medium text-zinc-400">
             Timeframe
             <select
@@ -284,6 +382,70 @@ export default function AdminStatisticsPage() {
             {error}
           </div>
         ) : null}
+        {businessError ? (
+          <div className="rounded-xl border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-300">
+            {businessError}
+          </div>
+        ) : null}
+
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-100">Business statistics</h2>
+              <p className="mt-1 text-xs text-zinc-500">
+                Bookings and revenue by photoshoot date for {formatMonthLabel(selectedMonthValue)}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {(["week", "month", "year", "lastYear"] as const).map((key) => {
+                const active = businessFrame === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setBusinessFrame(key)}
+                    className={`rounded-md border px-2.5 py-1 text-xs font-medium transition ${
+                      active
+                        ? "border-violet-500 bg-violet-600 text-white"
+                        : "border-zinc-700 bg-zinc-950 text-zinc-300 hover:bg-zinc-800"
+                    }`}
+                  >
+                    {businessStats?.labels[key] ?? key}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {businessLoading ? (
+            <p className="mt-4 text-sm text-zinc-400">Loading business statistics…</p>
+          ) : (
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+              {(
+                [
+                  ["averageEditTimeMinutes", "Avg edit time", (v: number) => formatDurationLong(v)],
+                  ["averageTotalTimeMinutes", "Avg total time", (v: number) => formatDurationLong(v)],
+                  ["totalBookings", "Bookings", (v: number) => String(Math.round(v))],
+                  ["totalNetRevenue", "Net revenue", (v: number) => formatEuro(v)],
+                  ["totalTaxes", "Taxes", (v: number) => formatEuro(v)],
+                ] as const
+              ).map(([key, label, format]) => {
+                const value = businessStats?.metrics[businessFrame]?.[key] ?? 0;
+                return (
+                  <div
+                    key={key}
+                    className="rounded-xl border border-zinc-800 bg-zinc-950/70 px-3 py-3"
+                  >
+                    <p className="text-[11px] uppercase tracking-wide text-zinc-500">{label}</p>
+                    <p className="mt-1 text-lg font-semibold text-white">{format(value)}</p>
+                    <p className="mt-1 text-[11px] text-zinc-500">
+                      {businessStats?.ranges[businessFrame]?.subtitle ?? ""}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
 
         <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
@@ -308,7 +470,7 @@ export default function AdminStatisticsPage() {
           />
         </section>
 
-        <MonthlyBillingSummary />
+        <MonthlyBillingSummary monthValue={selectedMonthValue} />
 
         <section className="grid gap-4 xl:grid-cols-2">
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">

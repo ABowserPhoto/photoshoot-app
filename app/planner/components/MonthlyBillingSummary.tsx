@@ -37,7 +37,12 @@ function isCompletedLikeStatus(status: string | null | undefined): boolean {
   );
 }
 
-export default function MonthlyBillingSummary() {
+type MonthlyBillingSummaryProps = {
+  /** `YYYY-MM` value from the statistics month selector. Defaults to current month. */
+  monthValue?: string;
+};
+
+export default function MonthlyBillingSummary({ monthValue }: MonthlyBillingSummaryProps) {
   const { authenticated, isAdmin, isLoading } = useAuthRole();
   const [rows, setRows] = useState<BillingTaskRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -78,9 +83,25 @@ export default function MonthlyBillingSummary() {
     };
   }, [authenticated, isAdmin, isLoading]);
 
+  const selectedMonthKey = useMemo(() => {
+    if (monthValue && /^\d{4}-\d{2}$/.test(monthValue)) {
+      const [year, month] = monthValue.split("-").map(Number);
+      return monthKey(new Date(year, month - 1, 1));
+    }
+    return monthKey(new Date());
+  }, [monthValue]);
+
+  const selectedMonthLabel = useMemo(() => {
+    if (monthValue && /^\d{4}-\d{2}$/.test(monthValue)) {
+      const [year, month] = monthValue.split("-").map(Number);
+      return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(
+        new Date(year, month - 1, 1)
+      );
+    }
+    return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(new Date());
+  }, [monthValue]);
+
   const { entries, total } = useMemo(() => {
-    const now = new Date();
-    const currentMonthKey = monthKey(now);
     const grouped = new Map<string, number>();
 
     for (const row of rows) {
@@ -91,7 +112,7 @@ export default function MonthlyBillingSummary() {
       if (Number.isNaN(completedDate.getTime())) {
         continue;
       }
-      if (monthKey(completedDate) !== currentMonthKey) {
+      if (monthKey(completedDate) !== selectedMonthKey) {
         continue;
       }
       const fee = typeof row.total_fee === "number" && Number.isFinite(row.total_fee) ? row.total_fee : 0;
@@ -108,7 +129,7 @@ export default function MonthlyBillingSummary() {
     const sortedEntries = [...grouped.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     const totalRevenue = sortedEntries.reduce((acc, [, value]) => acc + value, 0);
     return { entries: sortedEntries, total: totalRevenue };
-  }, [rows]);
+  }, [rows, selectedMonthKey]);
 
   if (isLoading || !authenticated || !isAdmin) {
     return null;
@@ -123,17 +144,13 @@ export default function MonthlyBillingSummary() {
     );
   }
 
-  const now = new Date();
-
   return (
-    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
+    <section id="monthly-billing" className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
       <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
         Monthly Billing Summary
       </p>
-      <p className="mt-1 text-sm text-zinc-400">
-        {new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(now)}
-      </p>
-      <p className="mt-2 text-xl font-semibold text-white">Current Month Revenue: {euro(total)}</p>
+      <p className="mt-1 text-sm text-zinc-400">{selectedMonthLabel}</p>
+      <p className="mt-2 text-xl font-semibold text-white">Month Revenue: {euro(total)}</p>
       {error ? (
         <p className="mt-2 text-xs text-red-300">{error}</p>
       ) : null}
@@ -148,7 +165,7 @@ export default function MonthlyBillingSummary() {
         ))}
         {entries.length === 0 ? (
           <span className="inline-flex rounded-full border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-400">
-            No completed billing tasks this month.
+            No completed billing tasks for this month.
           </span>
         ) : null}
       </div>

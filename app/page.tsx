@@ -11,6 +11,7 @@ import GlobalNavButtons from "@/app/components/GlobalNavButtons";
 import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
 import JibbleClockToggle from "@/app/components/JibbleClockToggle";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
+import { PERMISSION_DENIED_QUERY } from "@/lib/permissionDenied";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -215,6 +216,7 @@ function HomeContent() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
+  const [accessNotice, setAccessNotice] = useState<string | null>(null);
   const [clientDirectory, setClientDirectory] = useState<ClientDirectoryEntry[]>([]);
   const [serviceCatalog, setServiceCatalog] = useState<CatalogItem[]>([]);
   const [productCatalog, setProductCatalog] = useState<CatalogItem[]>([]);
@@ -464,6 +466,17 @@ function HomeContent() {
   useEffect(() => {
     setShowArchiveView(searchParams.get("archive") === "1");
   }, [searchParams]);
+
+  useEffect(() => {
+    if (searchParams.get(PERMISSION_DENIED_QUERY) !== "1") {
+      return;
+    }
+    setAccessNotice("Permission denied. Admin access required.");
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete(PERMISSION_DENIED_QUERY);
+    const qs = next.toString();
+    router.replace(qs ? `/kanban?${qs}` : "/kanban", { scroll: false });
+  }, [searchParams, router]);
 
   useEffect(() => {
     if (searchParams.get("booking") !== "1") {
@@ -1001,6 +1014,12 @@ function HomeContent() {
             </div>
           ) : null}
         </div>
+
+        {accessNotice ? (
+          <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+            {accessNotice}
+          </p>
+        ) : null}
 
         {formSuccess ? (
           <p className="mb-4 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200">

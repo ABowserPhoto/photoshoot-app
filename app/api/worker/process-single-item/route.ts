@@ -1,17 +1,71 @@
 import path from "node:path";
 import { NextResponse } from "next/server";
 
-import { startProcessingSingleItem } from "@/app/services/processingEngine";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/** Allow long SNS-HDR merges (up to 2 hours per bracket). */
+export const maxDuration = 7200;
 
 type ProcessSingleItemBody = {
   taskId?: string;
   local_folder_name?: string;
   bracketIndex?: number;
 };
+
+type SingleItemProcessingSummary = {
+  ok: boolean;
+  bracketIndex: number;
+  totalBrackets: number;
+  mergedFile?: string;
+  expectedComfyJobs: number;
+  comfyQueuedCount: number;
+  comfyFailedCount: number;
+  comfyErrors: string[];
+  error?: string;
+};
+
+function emptySummary(bracketIndex: number): SingleItemProcessingSummary {
+  return {
+    ok: false,
+    bracketIndex,
+    totalBrackets: 0,
+    expectedComfyJobs: 0,
+    comfyQueuedCount: 0,
+    comfyFailedCount: 0,
+    comfyErrors: [],
+  };
+}
+
+function toErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  return fallback;
+}
+
+function buildResponse(
+  summary: SingleItemProcessingSummary,
+  meta: { taskId: string; localFolderName: string }
+) {
+  return NextResponse.json({
+    success: summary.ok,
+    taskId: meta.taskId,
+    local_folder_name: meta.localFolderName,
+    bracketIndex: summary.bracketIndex,
+    totalBrackets: summary.totalBrackets,
+    mergedFile: summary.mergedFile ?? null,
+    expectedComfyJobs: summary.expectedComfyJobs,
+    comfyQueuedCount: summary.comfyQueuedCount,
+    comfyFailedCount: summary.comfyFailedCount,
+    comfyErrors: summary.comfyErrors,
+    error: summary.error ?? null,
+  });
+}
 
 export async function POST(request: Request) {
   const workerSecret = process.env.LOCAL_WORKER_SECRET?.trim();
@@ -40,20 +94,20 @@ export async function POST(request: Request) {
     );
   }
 
-  const shootFolderPath = path.join(PHOTOS_ROOT, localFolderName);
-  const summary = await startProcessingSingleItem(taskId, shootFolderPath, bracketIndex);
-
-  return NextResponse.json({
-    success: summary.ok,
-    taskId,
-    local_folder_name: localFolderName,
-    bracketIndex: summary.bracketIndex,
-    totalBrackets: summary.totalBrackets,
-    mergedFile: summary.mergedFile ?? null,
-    expectedComfyJobs: summary.expectedComfyJobs,
-    comfyQueuedCount: summary.comfyQueuedCount,
-    comfyFailedCount: summary.comfyFailedCount,
-    comfyErrors: summary.comfyErrors,
-    error: summary.error,
-  });
+  try {
+    const { startProcessingSingleItem } = await import("@/app/services/processingEngine");
+    const shootFolderPath = path.join(PHOTOS_ROOT, localFolderName);
+    const summary = await startProcessingSingleItem(taskId, shootFolderPath, bracketIndex);
+    return buildResponse(summary, { taskId, localFolderName });
+  } catch (error) {
+    const message = toErrorMessage(error, "Unexpected single-item processing failure.");
+    console.error("[process-single-item] Unhandled failure:", { taskId, localFolderName, bracketIndex, error });
+    return buildResponse(
+      {
+        ...emptySummary(bracketIndex),
+        error: message,
+      },
+      { taskId, localFolderName }
+    );
+  }
 }

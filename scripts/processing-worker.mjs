@@ -81,6 +81,11 @@ function readPositiveIntEnv(name, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+const LOCAL_PROCESS_TIMEOUT_MS_EFFECTIVE = readPositiveIntEnv(
+  "LOCAL_PROCESS_TIMEOUT_MS",
+  LOCAL_PROCESS_TIMEOUT_MS
+);
+const PRIORITY_POLL_INTERVAL_MS = readPositiveIntEnv("WORKER_PRIORITY_POLL_INTERVAL_MS", 10 * 1000);
 const RETRY_ATTEMPTS = readPositiveIntEnv("WORKER_RETRY_ATTEMPTS", 3);
 const RETRY_BASE_MS = readPositiveIntEnv("WORKER_RETRY_BASE_MS", 500);
 const PREVIEW_RETRY_ATTEMPTS = readPositiveIntEnv("PREVIEW_RETRY_ATTEMPTS", 3);
@@ -92,7 +97,7 @@ const SUPABASE_FINALS_BUCKET = process.env.SUPABASE_FINALS_BUCKET?.trim() || "fi
 const COMFY_OUTPUT_DIR =
   process.env.COMFYUI_OUTPUT_DIR?.trim() ||
   "F:\\ComfyUI_windows_portable_nvidia\\ComfyUI_windows_portable\\ComfyUI\\output";
-const COMFY_WAIT_TIMEOUT_MS = readPositiveIntEnv("COMFY_WAIT_TIMEOUT_MS", 12 * 60 * 1000);
+const COMFY_WAIT_TIMEOUT_MS = readPositiveIntEnv("COMFY_WAIT_TIMEOUT_MS", 90 * 60 * 1000);
 
 const previewSyncTimers = new Map();
 const previewSyncInFlight = new Set();
@@ -102,6 +107,9 @@ let rawWatcherStarted = false;
 let selectsWatcherStarted = false;
 let exiftoolPathPromise = null;
 let lastSelectsTriggerAtMs = null;
+let processingPipelineInFlight = false;
+let activeMergeTaskId = null;
+let activeMergeLocalFolder = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -924,7 +932,83 @@ function schedulePreviewSync(localFolderName) {
   previewSyncTimers.set(localFolderName, timer);
 }
 
+function getMergePriorityAt(task) {
+  const selection = task?.gallery_selection;
+  if (!selection || typeof selection !== "object") {
+    return 0;
+  }
+  const raw = selection.merge_priority_at;
+  if (typeof raw !== "string" || !raw.trim()) {
+    return 0;
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sortTasksByMergePriority(tasks) {
+  return [...tasks].sort((left, right) => {
+    const priorityDelta = getMergePriorityAt(right) - getMergePriorityAt(left);
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
+    return String(left.id).localeCompare(String(right.id));
+  });
+}
+
+function isMergePipelineBusy() {
+  return processingPipelineInFlight;
+}
+
+async function runProcessingPipeline(supabase, { reason = "poll" } = {}) {
+  if (processingPipelineInFlight) {
+    console.info(
+      `[worker] Skipping processing pipeline (${reason}): active merge in progress for task ${activeMergeTaskId ?? "unknown"} (${activeMergeLocalFolder ?? "unknown folder"}).`
+    );
+    return false;
+  }
+
+  processingPipelineInFlight = true;
+  try {
+    await processSelectionAvailable(supabase);
+    await processPendingProcessing(supabase);
+    return true;
+  } catch (error) {
+    console.error(
+      `[worker] Processing pipeline failed (${reason}):`,
+      error instanceof Error ? error.message : error
+    );
+    return false;
+  } finally {
+    processingPipelineInFlight = false;
+    activeMergeTaskId = null;
+    activeMergeLocalFolder = null;
+  }
+}
+
+async function hasPriorityMergeQueued(supabase) {
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("id, gallery_selection")
+    .in("status", [SELECTION_AVAILABLE_STATUS, CLAIM_STATUS, SELECTION_SYNCING_STATUS, ACTIVE_STATUS])
+    .limit(50);
+
+  if (error) {
+    console.warn(`[worker] Priority merge probe failed: ${error.message}`);
+    return false;
+  }
+
+  const cutoffMs = Date.now() - 4 * 60 * 60 * 1000;
+  return (data ?? []).some((task) => getMergePriorityAt(task) >= cutoffMs);
+}
+
 function scheduleSelectsProcessing(localFolderName, filePath, eventName) {
+  if (processingPipelineInFlight && activeMergeLocalFolder === localFolderName) {
+    console.info(
+      `[worker] Ignoring selects watcher event during active merge for ${localFolderName} (task ${activeMergeTaskId ?? "unknown"}).`
+    );
+    return;
+  }
+
   if (eventName === "add" || eventName === "change") {
     console.log("New file detected:", filePath);
   }
@@ -940,12 +1024,17 @@ function scheduleSelectsProcessing(localFolderName, filePath, eventName) {
     lastSelectsTriggerAtMs = Date.now();
     void (async () => {
       try {
+        if (processingPipelineInFlight) {
+          console.info(
+            `[worker] Selects debounce elapsed for ${localFolderName}, but merge pipeline is busy; deferring.`
+          );
+          return;
+        }
         console.info(
           `[worker] Selects debounce elapsed for ${localFolderName}. Waiting for stable copy completion before processing.`
         );
         await waitForSelectsFolderToStabilize(localFolderName);
-        await processSelectionAvailable(getSupabaseClient());
-        await processPendingProcessing(getSupabaseClient());
+        await runProcessingPipeline(getSupabaseClient(), { reason: `selects-watcher:${localFolderName}` });
       } catch (error) {
         console.error(
           `[worker] Immediate selects-triggered processing failed for ${localFolderName}:`,
@@ -963,8 +1052,11 @@ function startWorkerHeartbeat() {
     const lastTrigger = lastSelectsTriggerAtMs
       ? new Date(lastSelectsTriggerAtMs).toISOString()
       : "never";
+    const activeMerge = processingPipelineInFlight
+      ? `task=${activeMergeTaskId ?? "unknown"} folder=${activeMergeLocalFolder ?? "unknown"}`
+      : "idle";
     console.info(
-      `[Heartbeat] Watcher armed | Queue size: ${queueSize} | Last trigger: ${lastTrigger}`
+      `[Heartbeat] Watcher armed | Debounce queue: ${queueSize} | Last trigger: ${lastTrigger} | Merge pipeline: ${activeMerge}`
     );
   }, 60 * 1000);
 }
@@ -1086,7 +1178,7 @@ async function processTaskLocally(task) {
   const workerSecret = requiredEnv("LOCAL_WORKER_SECRET");
   const url = `${localOrigin.replace(/\/$/, "")}/api/worker/process-single-item`;
   console.info(
-    `[worker] Calling local process-single-item endpoint: ${url} (timeout ${LOCAL_PROCESS_TIMEOUT_MS}ms)`
+    `[worker] Calling local process-single-item endpoint: ${url} (timeout ${LOCAL_PROCESS_TIMEOUT_MS_EFFECTIVE}ms)`
   );
   const taskRoot = path.join(getShootFoldersRoot(), String(task.local_folder_name ?? "").trim());
   const selectsDir = path.join(taskRoot, "2_Selects");
@@ -1122,12 +1214,21 @@ async function processTaskLocally(task) {
             bracketIndex: photoIndex,
           }),
         },
-        LOCAL_PROCESS_TIMEOUT_MS
+        LOCAL_PROCESS_TIMEOUT_MS_EFFECTIVE
       );
-      const payload = await response.json().catch(() => null);
+      const responseText = await response.text();
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        payload = null;
+      }
       if (!response.ok || !payload?.success) {
         const message =
           payload?.error ||
+          (responseText.trim() && !responseText.trim().startsWith("<")
+            ? responseText.trim().slice(0, 500)
+            : null) ||
           `Local single-item processing failed for task ${task.id} bracket ${photoIndex} (HTTP ${response.status}).`;
         throw new Error(message);
       }
@@ -1342,7 +1443,7 @@ async function processAwaitingFolderCreation(supabase) {
 async function processPendingProcessing(supabase) {
   const { data, error } = await supabase
     .from("tasks")
-    .select("id, local_folder_name, status")
+    .select("id, local_folder_name, status, gallery_selection")
     .eq("status", CLAIM_STATUS)
     .order("id", { ascending: true })
     .limit(20);
@@ -1351,7 +1452,7 @@ async function processPendingProcessing(supabase) {
     throw new Error(`Polling failed: ${error.message}`);
   }
 
-  const queue = data ?? [];
+  const queue = sortTasksByMergePriority(data ?? []);
   if (queue.length === 0) {
     console.info(`[worker] No ${CLAIM_STATUS} tasks found.`);
     return;
@@ -1375,6 +1476,8 @@ async function processPendingProcessing(supabase) {
       }
 
       console.info(`[worker] Processing task ${taskId}...`);
+      activeMergeTaskId = taskId;
+      activeMergeLocalFolder = localFolderName;
       const processingResult = await processTaskLocally({ id: taskId, local_folder_name: localFolderName });
       console.info(
         `[worker] Local Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}, processed=${processingResult.processedItems}/${processingResult.totalItems}, failedItems=${processingResult.failedItems}`
@@ -1472,7 +1575,7 @@ async function processSelectionAvailable(supabase) {
     throw new Error(`Selection sync poll failed: ${error.message}`);
   }
 
-  const queue = data ?? [];
+  const queue = sortTasksByMergePriority(data ?? []);
   if (queue.length === 0) {
     console.info(`[worker] No ${SELECTION_AVAILABLE_STATUS} tasks found.`);
     return;
@@ -1562,6 +1665,9 @@ async function main() {
   console.info(
     `[worker] Comfy output dir: ${COMFY_OUTPUT_DIR}; wait_timeout_ms=${COMFY_WAIT_TIMEOUT_MS}; SUPABASE_FINALS_BUCKET=${SUPABASE_FINALS_BUCKET}`
   );
+  console.info(
+    `[worker] Merge timeouts: single_item_ms=${LOCAL_PROCESS_TIMEOUT_MS_EFFECTIVE}, priority_poll_ms=${PRIORITY_POLL_INTERVAL_MS}`
+  );
   await logExiftoolStartupStatus();
   await processInitialPreviewSync(getSupabaseClient()).catch((err) => {
     console.error("[worker] Initial full preview sync failed:", err instanceof Error ? err.message : err);
@@ -1580,20 +1686,30 @@ async function main() {
     });
   }, FOLDER_POLL_INTERVAL_MS);
 
-  await processPendingProcessing(getSupabaseClient()).catch((err) => {
+  await runProcessingPipeline(getSupabaseClient(), { reason: "startup" }).catch((err) => {
     console.error("[worker] Initial processing run failed:", err instanceof Error ? err.message : err);
-  });
-  await processSelectionAvailable(getSupabaseClient()).catch((err) => {
-    console.error("[worker] Initial selection sync run failed:", err instanceof Error ? err.message : err);
   });
 
   setInterval(() => {
-    void processSelectionAvailable(getSupabaseClient())
-      .then(() => processPendingProcessing(getSupabaseClient()))
-      .catch((err) => {
-        console.error("[worker] Processing poll failed:", err instanceof Error ? err.message : err);
-      });
+    void runProcessingPipeline(getSupabaseClient(), { reason: "scheduled-poll" }).catch((err) => {
+      console.error("[worker] Processing poll failed:", err instanceof Error ? err.message : err);
+    });
   }, PROCESSING_POLL_INTERVAL_MS);
+
+  setInterval(() => {
+    void (async () => {
+      if (isMergePipelineBusy()) {
+        return;
+      }
+      const supabase = getSupabaseClient();
+      if (!(await hasPriorityMergeQueued(supabase))) {
+        return;
+      }
+      await runProcessingPipeline(supabase, { reason: "priority-poll" });
+    })().catch((err) => {
+      console.error("[worker] Priority poll failed:", err instanceof Error ? err.message : err);
+    });
+  }, PRIORITY_POLL_INTERVAL_MS);
 
   setInterval(() => {
     void processInitialPreviewSync(getSupabaseClient()).catch((err) => {
@@ -1601,5 +1717,16 @@ async function main() {
     });
   }, PREVIEW_FALLBACK_SYNC_INTERVAL_MS);
 }
+
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    "[worker] Unhandled promise rejection (worker continues):",
+    reason instanceof Error ? reason.message : reason
+  );
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("[worker] Uncaught exception (worker continues):", error);
+});
 
 void main();

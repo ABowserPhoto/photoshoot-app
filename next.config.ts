@@ -8,6 +8,7 @@ const allowedDevOrigins =
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  serverExternalPackages: ["sharp", "exifreader"],
   typescript: {
     ignoreBuildErrors: true,
   },

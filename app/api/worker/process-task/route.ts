@@ -1,11 +1,12 @@
 import path from "node:path";
 import { NextResponse } from "next/server";
 
-import { startProcessing } from "@/app/services/processingEngine";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/** Allow long batch HDR merges (up to 2 hours). */
+export const maxDuration = 7200;
 
 type ProcessTaskBody = {
   taskId?: string;
@@ -38,17 +39,33 @@ export async function POST(request: Request) {
     );
   }
 
-  const shootFolderPath = path.join(PHOTOS_ROOT, localFolderName);
-  const summary = await startProcessing(taskId, shootFolderPath);
+  try {
+    const { startProcessing } = await import("@/app/services/processingEngine");
+    const shootFolderPath = path.join(PHOTOS_ROOT, localFolderName);
+    const summary = await startProcessing(taskId, shootFolderPath);
 
-  return NextResponse.json({
-    success: summary.ok,
-    taskId,
-    local_folder_name: localFolderName,
-    mergedFiles: summary.mergedFiles ?? [],
-    comfyQueuedCount: summary.comfyQueuedCount ?? 0,
-    comfyFailedCount: summary.comfyFailedCount ?? 0,
-    comfyErrors: summary.comfyErrors ?? [],
-    error: summary.error,
-  });
+    return NextResponse.json({
+      success: summary.ok,
+      taskId,
+      local_folder_name: localFolderName,
+      mergedFiles: summary.mergedFiles ?? [],
+      comfyQueuedCount: summary.comfyQueuedCount ?? 0,
+      comfyFailedCount: summary.comfyFailedCount ?? 0,
+      comfyErrors: summary.comfyErrors ?? [],
+      error: summary.error ?? null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unexpected task processing failure.";
+    console.error("[process-task] Unhandled failure:", { taskId, localFolderName, error });
+    return NextResponse.json({
+      success: false,
+      taskId,
+      local_folder_name: localFolderName,
+      mergedFiles: [],
+      comfyQueuedCount: 0,
+      comfyFailedCount: 0,
+      comfyErrors: [],
+      error: message,
+    });
+  }
 }

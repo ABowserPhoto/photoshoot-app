@@ -87,13 +87,22 @@ export default function GlobalNavButtons({ className, secondaryMiddle, children 
       />
       {secondaryMiddle}
       {!isLoading && isAdmin ? (
-        <Link
-          href="/admin/statistics"
-          className={`${btnBase} ${statisticsActive ? active : idle}`}
-          prefetch
-        >
-          Statistics
-        </Link>
+        <>
+          <Link
+            href="/admin/statistics"
+            className={`${btnBase} ${statisticsActive ? active : idle}`}
+            prefetch
+          >
+            Statistics
+          </Link>
+          <Link
+            href="/admin/statistics#monthly-billing"
+            className={`${btnBase} ${statisticsActive ? active : idle}`}
+            prefetch
+          >
+            Monthly Billing
+          </Link>
+        </>
       ) : null}
       <Link href={archive ? "/" : "/?archive=1"} className={`${btnBase} ${archive ? active : idle}`} scroll={false}>
         {archive ? "View Active Board" : "View Archive"}

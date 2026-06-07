@@ -179,6 +179,23 @@ function monthKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function resolveReferenceDate(month?: number, year?: number): Date {
+  const now = new Date();
+  if (
+    typeof month === "number" &&
+    Number.isInteger(month) &&
+    month >= 1 &&
+    month <= 12 &&
+    typeof year === "number" &&
+    Number.isInteger(year) &&
+    year >= 2000 &&
+    year <= 2100
+  ) {
+    return new Date(year, month - 1, 1, 12, 0, 0, 0);
+  }
+  return now;
+}
+
 function buildTimeSlots(timeframe: ProductivityTimeframe, now = new Date()): {
   rangeStart: Date;
   rangeEnd: Date;
@@ -350,7 +367,9 @@ export async function getProductivityTeamUsers(): Promise<
 
 export async function getProductivityStats(
   timeframe: ProductivityTimeframe,
-  userId?: string
+  userId?: string,
+  month?: number,
+  year?: number
 ): Promise<
   | {
       ok: true;
@@ -370,8 +389,8 @@ export async function getProductivityStats(
     return { ok: false, error: "Database is not configured." };
   }
 
-  const now = new Date();
-  const { rangeStart, rangeEnd, slots } = buildTimeSlots(timeframe, now);
+  const referenceDate = resolveReferenceDate(month, year);
+  const { rangeStart, rangeEnd, slots } = buildTimeSlots(timeframe, referenceDate);
   const filterUserId = userId?.trim() || null;
 
   let shiftsQuery = sb

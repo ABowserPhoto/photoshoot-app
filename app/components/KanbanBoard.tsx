@@ -11,6 +11,7 @@ import DailyStreakBadge from "@/app/components/DailyStreakBadge";
 import { triggerPreviewEmail } from "@/app/actions/zapierActions";
 import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
 import { updateTaskStatus } from "@/app/actions/tasks";
+import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { supabase } from "@/lib/supabaseClient";
 import MergePromptModal from "./MergePromptModal";
 import ReviewMergedModal from "./ReviewMergedModal";
@@ -237,6 +238,14 @@ function normalizeStatus(value: string | null): ColumnKey {
   }
   if (normalized === "processing") {
     return "editing";
+  }
+  if (
+    normalized === "pending-processing" ||
+    normalized === "pending_processing" ||
+    normalized === "syncing-selection" ||
+    normalized === "syncing_selection"
+  ) {
+    return "selection-available";
   }
   return COLUMN_CONFIG.some((column) => column.id === normalized)
     ? (normalized as ColumnKey)
@@ -545,10 +554,14 @@ export default function KanbanBoard({
   const [mergePromptError, setMergePromptError] = useState<string | null>(null);
   const [reviewMergedTask, setReviewMergedTask] = useState<BoardTask | null>(null);
   const [regeneratingPreviewTaskId, setRegeneratingPreviewTaskId] = useState<string | null>(null);
+  const [mergingTaskIds, setMergingTaskIds] = useState<Set<string>>(() => new Set());
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [previewRegenToast, setPreviewRegenToast] = useState<string | null>(null);
+  const [mergeNowToast, setMergeNowToast] = useState<string | null>(null);
+  const { isAdmin, isLoading: authRoleLoading } = useAuthRole();
   const boardRef = useRef(board);
   const archivedTasksRef = useRef(archivedTasks);
+  const mergePrevColumnRef = useRef<Map<string, ColumnKey>>(new Map());
   useEffect(() => {
     boardRef.current = board;
   }, [board]);
@@ -579,6 +592,65 @@ export default function KanbanBoard({
       window.clearTimeout(timer);
     };
   }, [previewRegenToast]);
+
+  useEffect(() => {
+    if (!mergeNowToast) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setMergeNowToast(null);
+    }, 5000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [mergeNowToast]);
+
+  useEffect(() => {
+    if (mergingTaskIds.size === 0) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setIpcRefreshSignal((prev) => prev + 1);
+    }, 10_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [mergingTaskIds]);
+
+  useEffect(() => {
+    if (mergingTaskIds.size === 0) {
+      return;
+    }
+    setMergingTaskIds((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const taskId of prev) {
+        let column: ColumnKey | null = null;
+        for (const config of COLUMN_CONFIG) {
+          if (board[config.id].some((row) => row.id === taskId)) {
+            column = config.id;
+            break;
+          }
+        }
+        const previousColumn = mergePrevColumnRef.current.get(taskId) ?? null;
+        if (column) {
+          mergePrevColumnRef.current.set(taskId, column);
+        }
+        if (!column || column === "ready-for-review" || column === "completed") {
+          next.delete(taskId);
+          mergePrevColumnRef.current.delete(taskId);
+          changed = true;
+          continue;
+        }
+        if (column === "selection-available" && previousColumn === "editing") {
+          next.delete(taskId);
+          mergePrevColumnRef.current.delete(taskId);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [board, mergingTaskIds.size]);
 
   useEffect(() => {
     const onWidgetRefresh = () => {
@@ -1173,6 +1245,47 @@ export default function KanbanBoard({
     setStatusMessage(null);
   };
 
+  const handleMergeNow = async (task: BoardTask) => {
+    if (!task.id.trim()) {
+      return;
+    }
+    setMergingTaskIds((prev) => new Set(prev).add(task.id));
+    setMergeNowToast(null);
+    try {
+      const response = await fetch("/api/tasks/queue-merge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId: task.id }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { error?: unknown; success?: boolean; message?: string }
+        | null;
+      if (!response.ok || !payload?.success) {
+        setMergingTaskIds((prev) => {
+          const next = new Set(prev);
+          next.delete(task.id);
+          return next;
+        });
+        setStatusMessage(toErrorString(payload?.error, `Failed to queue merge (${response.status}).`));
+        return;
+      }
+      setMergeNowToast(
+        typeof payload.message === "string" && payload.message.trim()
+          ? payload.message
+          : "Merge queued with priority."
+      );
+      setStatusMessage(null);
+      setIpcRefreshSignal((prev) => prev + 1);
+    } catch {
+      setMergingTaskIds((prev) => {
+        const next = new Set(prev);
+        next.delete(task.id);
+        return next;
+      });
+      setStatusMessage("Network error while queueing merge.");
+    }
+  };
+
   const handleRegeneratePreviews = async (task: BoardTask) => {
     if (!task.id.trim()) {
       return;
@@ -1252,6 +1365,17 @@ export default function KanbanBoard({
           </p>
         </div>
       ) : null}
+      {mergeNowToast ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed left-1/2 top-6 z-[100] w-full max-w-md -translate-x-1/2 px-4"
+        >
+          <p className="rounded-xl border border-amber-400/50 bg-amber-100/95 px-5 py-3 text-center text-sm font-semibold text-amber-900 shadow-2xl dark:border-amber-500/40 dark:bg-amber-950/95 dark:text-amber-100">
+            {mergeNowToast}
+          </p>
+        </div>
+      ) : null}
       {celebrationToast ? (
         <div
           role="status"
@@ -1291,17 +1415,19 @@ export default function KanbanBoard({
                 >
                   Restore
                 </button>
-                <button
-                  type="button"
-                  disabled={deletingTaskId === task.id}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void handleDeleteTask(task);
-                  }}
-                  className="ml-2 mt-3 rounded-md border border-red-300 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-700 dark:text-red-300 dark:hover:bg-red-950/40"
-                >
-                  {deletingTaskId === task.id ? "Deleting..." : "Delete Permanently"}
-                </button>
+                {!authRoleLoading && isAdmin ? (
+                  <button
+                    type="button"
+                    disabled={deletingTaskId === task.id}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void handleDeleteTask(task);
+                    }}
+                    className="ml-2 mt-3 rounded-md border border-red-300 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-700 dark:text-red-300 dark:hover:bg-red-950/40"
+                  >
+                    {deletingTaskId === task.id ? "Deleting..." : "Delete Permanently"}
+                  </button>
+                ) : null}
               </article>
             ))}
             {!isLoading && archivedTasks.length === 0 ? (
@@ -1405,6 +1531,38 @@ export default function KanbanBoard({
                                 "Regenerate Previews"
                               )}
                             </button>
+                          ) : null}
+                          {column.id === "selection-available" && task.localFolderName?.trim() ? (
+                            <button
+                              type="button"
+                              disabled={mergingTaskIds.has(task.id)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleMergeNow(task);
+                              }}
+                              className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-300/80 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-70 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-950/70"
+                            >
+                              {mergingTaskIds.has(task.id) ? (
+                                <>
+                                  <span
+                                    className="inline-block size-3 animate-spin rounded-full border-2 border-amber-600 border-t-transparent dark:border-amber-300 dark:border-t-transparent"
+                                    aria-hidden
+                                  />
+                                  Merging…
+                                </>
+                              ) : (
+                                "Merge Now"
+                              )}
+                            </button>
+                          ) : null}
+                          {mergingTaskIds.has(task.id) && column.id !== "selection-available" ? (
+                            <p className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                              <span
+                                className="inline-block size-3 animate-spin rounded-full border-2 border-amber-600 border-t-transparent dark:border-amber-300 dark:border-t-transparent"
+                                aria-hidden
+                              />
+                              Merging…
+                            </p>
                           ) : null}
                           {column.id === "completed" ? (
                             <button

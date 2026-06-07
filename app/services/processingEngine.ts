@@ -5,9 +5,6 @@ import { exec } from "node:child_process";
 import { spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import sharp from "sharp";
-
-import { buildTimestampBracketsFromDir } from "@/lib/bracketGrouping.mjs";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
@@ -193,10 +190,64 @@ function normalizeErrorMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
+type SharpConstructor = typeof import("sharp");
+
+let sharpModulePromise: Promise<SharpConstructor> | null = null;
+
+async function getSharp(): Promise<SharpConstructor> {
+  if (!sharpModulePromise) {
+    sharpModulePromise = import("sharp")
+      .then((mod) => mod.default)
+      .catch((error) => {
+        sharpModulePromise = null;
+        throw error;
+      });
+  }
+  return sharpModulePromise;
+}
+
+async function loadTimestampBracketsFromDir(
+  dirPath: string
+): Promise<{ ok: true; brackets: string[][] } | { ok: false; brackets: string[][]; error: string }> {
+  try {
+    const { buildTimestampBracketsFromDir } = await import("@/lib/bracketGrouping.mjs");
+    const brackets = await buildTimestampBracketsFromDir(dirPath);
+    return { ok: true, brackets: Array.isArray(brackets) ? brackets : [] };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[processingEngine] Failed to group brackets:", message);
+    return { ok: false, brackets: [], error: message };
+  }
+}
+
+function failedSingleItemSummary(
+  bracketIndex: number,
+  totalBrackets: number,
+  error: string
+): SingleItemProcessingSummary {
+  return {
+    ok: false,
+    bracketIndex,
+    totalBrackets,
+    expectedComfyJobs: 0,
+    comfyQueuedCount: 0,
+    comfyFailedCount: 0,
+    comfyErrors: [],
+    error,
+  };
+}
+
 function loadWorkflowTemplate(): Record<string, WorkflowNode> {
   const workflowPath = path.join(process.cwd(), "lib", "comfy", "workflow_api.json");
+  if (!fs.existsSync(workflowPath)) {
+    throw new Error(`Comfy workflow template not found at ${workflowPath}`);
+  }
   const raw = fs.readFileSync(workflowPath, "utf8");
-  return JSON.parse(raw) as Record<string, WorkflowNode>;
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Comfy workflow template is invalid.");
+  }
+  return parsed as Record<string, WorkflowNode>;
 }
 
 function validateMergedFilename(filename: string): string {
@@ -231,6 +282,7 @@ async function triggerComfyLocally(localFolderName: string, mergedFilename: stri
   fs.mkdirSync(inputRoot, { recursive: true });
   const resizedFilename = `resized_${Date.now()}_${safeFilename}`.replace(/[^a-zA-Z0-9._-]/g, "_");
   const resizedPath = path.join(inputRoot, resizedFilename);
+  const sharp = await getSharp();
   await sharp(imagePath)
     .resize({ width: 2048, height: 2048, fit: "inside" })
     .toFile(resizedPath);
@@ -277,14 +329,20 @@ async function triggerComfyLocally(localFolderName: string, mergedFilename: stri
   return { promptId: comfyPayload?.prompt_id };
 }
 
-function validateShootFolder(shootFolderPath: string): { taskRoot: string; localFolderName: string } {
-  const taskRoot = path.resolve(shootFolderPath.trim());
+function validateShootFolder(
+  shootFolderPath: string
+): { ok: true; taskRoot: string; localFolderName: string } | { ok: false; error: string } {
+  const trimmed = shootFolderPath.trim();
+  if (!trimmed) {
+    return { ok: false, error: "shootFolderPath is required." };
+  }
+  const taskRoot = path.resolve(trimmed);
   const rootResolved = path.resolve(PHOTOS_ROOT);
   const rel = path.relative(rootResolved, taskRoot);
   if (rel.startsWith("..") || path.isAbsolute(rel) || !rel) {
-    throw new Error("shootFolderPath must be a folder under PHOTOS_ROOT.");
+    return { ok: false, error: "shootFolderPath must be a folder under PHOTOS_ROOT." };
   }
-  return { taskRoot, localFolderName: rel };
+  return { ok: true, taskRoot, localFolderName: rel };
 }
 
 function mergedOutputFileName(
@@ -384,183 +442,167 @@ export async function startProcessingSingleItem(
   shootFolderPath: string,
   bracketIndex: number
 ): Promise<SingleItemProcessingSummary> {
-  const { taskRoot, localFolderName } = validateShootFolder(shootFolderPath);
-  const selectsDir = path.join(taskRoot, "2_Selects");
-  const mergedDir = path.join(taskRoot, "3_Merged");
-
-  if (!fs.existsSync(selectsDir)) {
-    return {
-      ok: false,
-      bracketIndex,
-      totalBrackets: 0,
-      expectedComfyJobs: 0,
-      comfyQueuedCount: 0,
-      comfyFailedCount: 0,
-      comfyErrors: [],
-      error: `Selects folder missing: ${selectsDir}`,
-    };
-  }
-
-  fs.mkdirSync(mergedDir, { recursive: true });
-  const brackets = await buildTimestampBracketsFromDir(selectsDir);
-  const totalBrackets = brackets.length;
-  if (totalBrackets === 0) {
-    return {
-      ok: false,
-      bracketIndex,
-      totalBrackets,
-      expectedComfyJobs: 0,
-      comfyQueuedCount: 0,
-      comfyFailedCount: 0,
-      comfyErrors: [],
-      error: "No images found in 2_Selects.",
-    };
-  }
-  if (!Number.isInteger(bracketIndex) || bracketIndex < 0 || bracketIndex >= totalBrackets) {
-    return {
-      ok: false,
-      bracketIndex,
-      totalBrackets,
-      expectedComfyJobs: 0,
-      comfyQueuedCount: 0,
-      comfyFailedCount: 0,
-      comfyErrors: [],
-      error: `Invalid bracket index ${bracketIndex}. Valid range is 0..${Math.max(0, totalBrackets - 1)}.`,
-    };
-  }
-
-  const group = brackets[bracketIndex] ?? [];
-  const currentBracketIndex = bracketIndex + 1;
-  const firstName = group[0];
-  if (!firstName) {
-    return {
-      ok: false,
-      bracketIndex,
-      totalBrackets,
-      expectedComfyJobs: 0,
-      comfyQueuedCount: 0,
-      comfyFailedCount: 0,
-      comfyErrors: [],
-      error: `Bracket ${currentBracketIndex} is empty.`,
-    };
-  }
-
-  const snsPreset = resolveSnsPresetArg();
-  const inputs = group.map((name) => path.join(selectsDir, name));
-  const outBaseName = mergedOutputFileName(firstName, currentBracketIndex, totalBrackets);
-  const outFile = path.join(mergedDir, outBaseName);
-  const tempOutFile = path.join(
-    mergedDir,
-    `${path.basename(outBaseName, path.extname(outBaseName))}.__tmp_${Date.now()}_${Math.random()
-      .toString(16)
-      .slice(2)}${path.extname(outBaseName) || ".jpg"}`
-  );
-  const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...inputs];
-  const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
-  console.log(`EXECUTING: ${constructedCommandString}`);
-
   try {
-    await runCommandWithDiagnostics(SNS_HDR_PATH, snsArgs, {
-      localFolderName,
-      bracketIndex: currentBracketIndex,
-      outFile,
-      tempOutFile,
-      inputs,
-      snsPreset,
-      commandPreview: constructedCommandString,
-    });
-    if (fs.existsSync(outFile)) {
-      await fs.promises.unlink(outFile);
+    void taskId;
+    const folderValidation = validateShootFolder(shootFolderPath);
+    if (!folderValidation.ok) {
+      return failedSingleItemSummary(bracketIndex, 0, folderValidation.error);
     }
-    await fs.promises.rename(tempOutFile, outFile);
-  } catch (error) {
-    const mergeError = error instanceof Error ? error.message : String(error);
-    return {
-      ok: false,
-      bracketIndex,
-      totalBrackets,
-      expectedComfyJobs: 0,
-      comfyQueuedCount: 0,
-      comfyFailedCount: 0,
-      comfyErrors: [],
-      error: `snsHDR failed on bracket ${currentBracketIndex}: ${mergeError}`,
-    };
-  }
+    const { taskRoot, localFolderName } = folderValidation;
+    const selectsDir = path.join(taskRoot, "2_Selects");
+    const mergedDir = path.join(taskRoot, "3_Merged");
 
-  try {
-    const restoreExifCmd = [
-      quoteArg(EXIFTOOL_PATH),
-      "-TagsFromFile",
-      quoteArg(inputs[0]!),
-      "-all:all",
-      "-overwrite_original",
-      quoteArg(outFile),
-    ].join(" ");
-    await execAsync(restoreExifCmd, { windowsHide: true });
-  } catch (exifError) {
-    const message = exifError instanceof Error ? exifError.message : String(exifError);
-    const maybeErrno = (exifError as { code?: string } | null)?.code;
-    if (!(maybeErrno === "ENOENT" || /not\s+found/i.test(message))) {
-      console.warn(
-        `[processingEngine] EXIF restore failed for ${outBaseName}; continuing without EXIF metadata.`,
-        message
+    if (!fs.existsSync(selectsDir)) {
+      return failedSingleItemSummary(bracketIndex, 0, `Selects folder missing: ${selectsDir}`);
+    }
+
+    fs.mkdirSync(mergedDir, { recursive: true });
+    const bracketResult = await loadTimestampBracketsFromDir(selectsDir);
+    if (!bracketResult.ok) {
+      return failedSingleItemSummary(
+        bracketIndex,
+        0,
+        `Failed to group selected photos: ${bracketResult.error}`
       );
     }
-  }
+    const brackets = bracketResult.brackets;
+    const totalBrackets = brackets.length;
+    if (totalBrackets === 0) {
+      return failedSingleItemSummary(bracketIndex, totalBrackets, "No images found in 2_Selects.");
+    }
+    if (!Number.isInteger(bracketIndex) || bracketIndex < 0 || bracketIndex >= totalBrackets) {
+      return failedSingleItemSummary(
+        bracketIndex,
+        totalBrackets,
+        `Invalid bracket index ${bracketIndex}. Valid range is 0..${Math.max(0, totalBrackets - 1)}.`
+      );
+    }
 
-  // Keep SNS-HDR output untouched to avoid channel remapping/color shifts.
+    const group = brackets[bracketIndex] ?? [];
+    const currentBracketIndex = bracketIndex + 1;
+    const firstName = group[0];
+    if (!firstName) {
+      return failedSingleItemSummary(bracketIndex, totalBrackets, `Bracket ${currentBracketIndex} is empty.`);
+    }
 
-  await enhanceMergedPhotoInPlace(outFile);
+    const snsPreset = resolveSnsPresetArg();
+    const inputs = group.map((name) => path.join(selectsDir, name));
+    const outBaseName = mergedOutputFileName(firstName, currentBracketIndex, totalBrackets);
+    const outFile = path.join(mergedDir, outBaseName);
+    const tempOutFile = path.join(
+      mergedDir,
+      `${path.basename(outBaseName, path.extname(outBaseName))}.__tmp_${Date.now()}_${Math.random()
+        .toString(16)
+        .slice(2)}${path.extname(outBaseName) || ".jpg"}`
+    );
+    const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...inputs];
+    const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
+    console.log(`EXECUTING: ${constructedCommandString}`);
 
-  const comfyErrors: string[] = [];
-  const runComfy = shouldRunComfyForFilename(outBaseName);
-  const expectedComfyJobs = runComfy ? 1 : 0;
-  let comfyQueuedCount = 0;
-  let comfyFailedCount = 0;
-
-  if (runComfy) {
     try {
-      const payload = await triggerComfyLocally(localFolderName, outBaseName);
-      comfyQueuedCount += 1;
-      console.info(
-        `[processingEngine] ComfyUI queued for ${outBaseName}${payload.promptId ? ` (prompt ${payload.promptId})` : ""}.`
-      );
-      const baseName = baseNameForCleanup(firstName);
-      try {
-        await cleanupComfyFinalFilename({
-          localFolderName,
-          mergedFilename: outBaseName,
-          baseName,
-          bracketIndex: currentBracketIndex,
-        });
-      } catch (renameErr) {
-        console.error("[processingEngine] Comfy output rename skipped:", renameErr);
+      await runCommandWithDiagnostics(SNS_HDR_PATH, snsArgs, {
+        localFolderName,
+        bracketIndex: currentBracketIndex,
+        outFile,
+        tempOutFile,
+        inputs,
+        snsPreset,
+        commandPreview: constructedCommandString,
+      });
+      if (fs.existsSync(outFile)) {
+        await fs.promises.unlink(outFile);
       }
-    } catch (err) {
-      comfyFailedCount += 1;
-      const errorText =
-        err instanceof Error ? `${err.message}${err.stack ? `\n${err.stack}` : ""}` : String(err);
-      const detail = `[processingEngine] ComfyUI API failed/not running for ${outBaseName}: ${errorText}`;
-      comfyErrors.push(detail);
-      console.error(detail);
+      await fs.promises.rename(tempOutFile, outFile);
+    } catch (error) {
+      const mergeError = error instanceof Error ? error.message : String(error);
+      return failedSingleItemSummary(
+        bracketIndex,
+        totalBrackets,
+        `snsHDR failed on bracket ${currentBracketIndex}: ${mergeError}`
+      );
     }
-  }
 
-  return {
-    ok: true,
-    bracketIndex,
-    totalBrackets,
-    mergedFile: outBaseName,
-    expectedComfyJobs,
-    comfyQueuedCount,
-    comfyFailedCount,
-    comfyErrors,
-  };
+    try {
+      const restoreExifCmd = [
+        quoteArg(EXIFTOOL_PATH),
+        "-TagsFromFile",
+        quoteArg(inputs[0]!),
+        "-all:all",
+        "-overwrite_original",
+        quoteArg(outFile),
+      ].join(" ");
+      await execAsync(restoreExifCmd, { windowsHide: true });
+    } catch (exifError) {
+      const message = exifError instanceof Error ? exifError.message : String(exifError);
+      const maybeErrno = (exifError as { code?: string } | null)?.code;
+      if (!(maybeErrno === "ENOENT" || /not\s+found/i.test(message))) {
+        console.warn(
+          `[processingEngine] EXIF restore failed for ${outBaseName}; continuing without EXIF metadata.`,
+          message
+        );
+      }
+    }
+
+    await enhanceMergedPhotoInPlace(outFile);
+
+    const comfyErrors: string[] = [];
+    const runComfy = shouldRunComfyForFilename(outBaseName);
+    const expectedComfyJobs = runComfy ? 1 : 0;
+    let comfyQueuedCount = 0;
+    let comfyFailedCount = 0;
+
+    if (runComfy) {
+      try {
+        const payload = await triggerComfyLocally(localFolderName, outBaseName);
+        comfyQueuedCount += 1;
+        console.info(
+          `[processingEngine] ComfyUI queued for ${outBaseName}${payload.promptId ? ` (prompt ${payload.promptId})` : ""}.`
+        );
+        const baseName = baseNameForCleanup(firstName);
+        try {
+          await cleanupComfyFinalFilename({
+            localFolderName,
+            mergedFilename: outBaseName,
+            baseName,
+            bracketIndex: currentBracketIndex,
+          });
+        } catch (renameErr) {
+          console.error("[processingEngine] Comfy output rename skipped:", renameErr);
+        }
+      } catch (err) {
+        comfyFailedCount += 1;
+        const errorText =
+          err instanceof Error ? `${err.message}${err.stack ? `\n${err.stack}` : ""}` : String(err);
+        const detail = `[processingEngine] ComfyUI API failed/not running for ${outBaseName}: ${errorText}`;
+        comfyErrors.push(detail);
+        console.error(detail);
+      }
+    }
+
+    return {
+      ok: true,
+      bracketIndex,
+      totalBrackets,
+      mergedFile: outBaseName,
+      expectedComfyJobs,
+      comfyQueuedCount,
+      comfyFailedCount,
+      comfyErrors,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[processingEngine] startProcessingSingleItem failed:", message, error);
+    return failedSingleItemSummary(bracketIndex, 0, message);
+  }
 }
 
 export async function startProcessing(taskId: string, shootFolderPath: string): Promise<ProcessingSummary> {
   const supabase = createSupabase();
-  const { taskRoot, localFolderName } = validateShootFolder(shootFolderPath);
+  const folderValidation = validateShootFolder(shootFolderPath);
+  if (!folderValidation.ok) {
+    return { ok: false, error: folderValidation.error };
+  }
+  const { taskRoot, localFolderName } = folderValidation;
   const selectsDir = path.join(taskRoot, "2_Selects");
   const mergedDir = path.join(taskRoot, "3_Merged");
 
@@ -584,7 +626,11 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
 
     fs.mkdirSync(mergedDir, { recursive: true });
 
-    const brackets = await buildTimestampBracketsFromDir(selectsDir);
+    const bracketResult = await loadTimestampBracketsFromDir(selectsDir);
+    if (!bracketResult.ok) {
+      throw new Error(`Failed to group selected photos: ${bracketResult.error}`);
+    }
+    const brackets = bracketResult.brackets;
     if (brackets.length === 0) {
       throw new Error("No images found in 2_Selects.");
     }

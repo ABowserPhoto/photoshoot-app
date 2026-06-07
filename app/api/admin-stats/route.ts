@@ -102,23 +102,48 @@ function buildRangePayload(start: Date, end: Date, key: TimeframeKey): DateRange
   };
 }
 
-function isInCurrentWeek(shootDate: Date, now: Date): boolean {
-  const weekStart = startOfWeek(now);
+function parseMonthYearParams(
+  monthParam: string | null,
+  yearParam: string | null
+): { month: number; year: number } | null {
+  const month = Number(monthParam);
+  const year = Number(yearParam);
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
+    return null;
+  }
+  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+    return null;
+  }
+  return { month, year };
+}
+
+function resolveReferenceDate(monthParam: string | null, yearParam: string | null): Date {
+  const parsed = parseMonthYearParams(monthParam, yearParam);
+  if (parsed) {
+    return new Date(parsed.year, parsed.month - 1, 1, 12, 0, 0, 0);
+  }
+  return new Date();
+}
+
+function isInReferenceWeek(shootDate: Date, reference: Date): boolean {
+  const weekStart = startOfWeek(reference);
   const weekEnd = new Date(weekStart);
   weekEnd.setDate(weekEnd.getDate() + 7);
   return shootDate >= weekStart && shootDate < weekEnd;
 }
 
-function isInCurrentMonth(shootDate: Date, now: Date): boolean {
-  return shootDate.getFullYear() === now.getFullYear() && shootDate.getMonth() === now.getMonth();
+function isInReferenceMonth(shootDate: Date, reference: Date): boolean {
+  return (
+    shootDate.getFullYear() === reference.getFullYear() && shootDate.getMonth() === reference.getMonth()
+  );
 }
 
-function isInCurrentYear(shootDate: Date, now: Date): boolean {
-  return shootDate.getFullYear() === now.getFullYear();
+function isInReferenceYear(shootDate: Date, reference: Date): boolean {
+  return shootDate.getFullYear() === reference.getFullYear();
 }
 
-function isInLastYear(shootDate: Date, now: Date): boolean {
-  return shootDate.getFullYear() === now.getFullYear() - 1;
+function isInYearBeforeReference(shootDate: Date, reference: Date): boolean {
+  return shootDate.getFullYear() === reference.getFullYear() - 1;
 }
 
 function parseLineItems(value: unknown): Array<{ quantity: number; price: number }> {
@@ -213,11 +238,17 @@ function average(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const auth = await getAuthRole();
   if (!auth.authenticated || !auth.isAdmin) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  const { searchParams } = new URL(request.url);
+  const monthParam = searchParams.get("month");
+  const yearParam = searchParams.get("year");
+  const selectedPeriod = parseMonthYearParams(monthParam, yearParam);
+  const referenceDate = resolveReferenceDate(monthParam, yearParam);
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
   const key =
@@ -238,13 +269,16 @@ export async function GET() {
   }
 
   const rows = (data ?? []) as TaskRow[];
-  const now = new Date();
-  const currentYear = now.getFullYear();
+  const referenceYear = referenceDate.getFullYear();
   const ranges: Record<TimeframeKey, DateRangePayload> = {
-    week: buildRangePayload(startOfWeek(now), endOfWeek(now), "week"),
-    month: buildRangePayload(startOfMonth(now), endOfMonth(now), "month"),
-    year: buildRangePayload(startOfYear(currentYear), endOfYear(currentYear), "year"),
-    lastYear: buildRangePayload(startOfYear(currentYear - 1), endOfYear(currentYear - 1), "lastYear"),
+    week: buildRangePayload(startOfWeek(referenceDate), endOfWeek(referenceDate), "week"),
+    month: buildRangePayload(startOfMonth(referenceDate), endOfMonth(referenceDate), "month"),
+    year: buildRangePayload(startOfYear(referenceYear), endOfYear(referenceYear), "year"),
+    lastYear: buildRangePayload(
+      startOfYear(referenceYear - 1),
+      endOfYear(referenceYear - 1),
+      "lastYear"
+    ),
   };
   const buckets: Record<TimeframeKey, TaskRow[]> = {
     week: [],
@@ -258,10 +292,10 @@ export async function GET() {
     if (!shootDate) {
       continue;
     }
-    if (isInCurrentWeek(shootDate, now)) buckets.week.push(row);
-    if (isInCurrentMonth(shootDate, now)) buckets.month.push(row);
-    if (isInCurrentYear(shootDate, now)) buckets.year.push(row);
-    if (isInLastYear(shootDate, now)) buckets.lastYear.push(row);
+    if (isInReferenceWeek(shootDate, referenceDate)) buckets.week.push(row);
+    if (isInReferenceMonth(shootDate, referenceDate)) buckets.month.push(row);
+    if (isInReferenceYear(shootDate, referenceDate)) buckets.year.push(row);
+    if (isInYearBeforeReference(shootDate, referenceDate)) buckets.lastYear.push(row);
   }
 
   const metricsByBucket = (Object.keys(buckets) as TimeframeKey[]).reduce<Record<TimeframeKey, Metrics>>(
@@ -287,13 +321,23 @@ export async function GET() {
     }
   );
 
+  const monthLabel = new Intl.DateTimeFormat("en-GB", {
+    month: "long",
+    year: "numeric",
+  }).format(referenceDate);
+  const isCurrentMonth =
+    referenceDate.getFullYear() === new Date().getFullYear() &&
+    referenceDate.getMonth() === new Date().getMonth();
+
   return NextResponse.json({
     generatedAt: new Date().toISOString(),
+    selectedMonth: selectedPeriod?.month ?? referenceDate.getMonth() + 1,
+    selectedYear: selectedPeriod?.year ?? referenceYear,
     labels: {
-      week: "This Week",
-      month: "This Month",
-      year: String(currentYear),
-      lastYear: String(currentYear - 1),
+      week: isCurrentMonth ? "This Week" : `Week of ${ranges.week.subtitle}`,
+      month: isCurrentMonth ? "This Month" : monthLabel,
+      year: String(referenceYear),
+      lastYear: String(referenceYear - 1),
     },
     ranges,
     metrics: metricsByBucket,

@@ -37,6 +37,20 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    if (!supabase) {
+      return;
+    }
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(() => {
+      refresh();
+    });
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [refresh]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function load() {
