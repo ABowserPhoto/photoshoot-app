@@ -13,6 +13,8 @@ const execAsync = promisify(exec);
 const SNS_HDR_PATH = process.env.SNSHDR_PATH?.trim() || "C:\\Program Files\\SNS-HDR Pro 2\\SNS-HDR.exe";
 const SNS_HDR_PRESET = process.env.SNSHDR_PRESET?.trim() || "Hero_Interior";
 const SNS_HDR_PRESET_PATH = process.env.SNSHDR_PRESET_PATH?.trim() || "";
+const RAW_THERAPEE_CLI_PATH = process.env.RAW_THERAPEE_CLI_PATH?.trim() || "";
+const LENS_CORRECTION_PP3_PATH = path.join(process.cwd(), "lens-correction.pp3");
 const EXIFTOOL_PATH =
   process.env.EXIFTOOL_PATH?.trim() || "C:\\Program Files\\SNS-HDR Pro 2\\ExifTool.exe";
 const COMFY_TRIGGER_TOKENS = (process.env.COMFYUI_TRIGGER_TOKENS ?? "_sqi")
@@ -33,6 +35,17 @@ const IMAGE_EXT = new Set([
   ".heic",
   ".heif",
   ".nef",
+]);
+
+const RAW_EXT = new Set([
+  ".nef",
+  ".arw",
+  ".cr2",
+  ".cr3",
+  ".dng",
+  ".raf",
+  ".rw2",
+  ".orf",
 ]);
 
 export type ProcessingSummary = {
@@ -63,6 +76,131 @@ type WorkflowNode = {
 
 function isImageFile(fileName: string): boolean {
   return IMAGE_EXT.has(path.extname(fileName).toLowerCase());
+}
+
+function isRawFile(fileName: string): boolean {
+  return RAW_EXT.has(path.extname(fileName).toLowerCase());
+}
+
+function bracketUsesRawFiles(fileNames: string[]): boolean {
+  return fileNames.length > 0 && fileNames.every((name) => isRawFile(name));
+}
+
+async function linkOrCopyFile(src: string, dest: string): Promise<void> {
+  await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+  if (fs.existsSync(dest)) {
+    return;
+  }
+  try {
+    await fs.promises.link(src, dest);
+  } catch {
+    await fs.promises.copyFile(src, dest);
+  }
+}
+
+async function removeBracketWorkDir(workDir: string | null): Promise<void> {
+  if (!workDir) {
+    return;
+  }
+  try {
+    await fs.promises.rm(workDir, { recursive: true, force: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[processingEngine] Failed to remove bracket work dir ${workDir}:`, message);
+  }
+}
+
+function resolveStraightenedTiffForRaw(
+  tempStraightenedDir: string,
+  rawFileName: string
+): string {
+  const stem = path.basename(rawFileName, path.extname(rawFileName));
+  const candidates = [
+    path.join(tempStraightenedDir, `${stem}.tif`),
+    path.join(tempStraightenedDir, `${stem}.tiff`),
+    path.join(tempStraightenedDir, `${stem}.TIF`),
+    path.join(tempStraightenedDir, `${stem}.TIFF`),
+  ];
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!found) {
+    throw new Error(`RawTherapee output missing for ${rawFileName} in ${tempStraightenedDir}`);
+  }
+  return found;
+}
+
+/**
+ * Lens-correct RAW bracket files via RawTherapee CLI into `{bracketDir}/temp_straightened`.
+ * Returns SNS-HDR input paths (16-bit TIFFs) and a work directory to delete after merge.
+ */
+async function prepareStraightenedBracketInputs(params: {
+  bracketFileNames: string[];
+  selectsDir: string;
+  bracketIndex: number;
+  localFolderName: string;
+}): Promise<{ snsInputs: string[]; workDir: string | null }> {
+  const { bracketFileNames, selectsDir, bracketIndex, localFolderName } = params;
+  const defaultInputs = bracketFileNames.map((name) => path.join(selectsDir, name));
+
+  if (!bracketUsesRawFiles(bracketFileNames)) {
+    return { snsInputs: defaultInputs, workDir: null };
+  }
+
+  const rawTherapeeCli = RAW_THERAPEE_CLI_PATH;
+  if (!rawTherapeeCli) {
+    console.info(
+      "[processingEngine] RAW_THERAPEE_CLI_PATH not set; skipping lens correction for bracket",
+      bracketIndex
+    );
+    return { snsInputs: defaultInputs, workDir: null };
+  }
+  if (!fs.existsSync(rawTherapeeCli)) {
+    throw new Error(`RawTherapee CLI not found at ${rawTherapeeCli}`);
+  }
+  if (!fs.existsSync(LENS_CORRECTION_PP3_PATH)) {
+    throw new Error(`Lens correction profile not found at ${LENS_CORRECTION_PP3_PATH}`);
+  }
+
+  const bracketDir = path.join(selectsDir, `_bracket_${bracketIndex}`);
+  const tempStraightenedDir = path.join(bracketDir, "temp_straightened");
+  await fs.promises.rm(bracketDir, { recursive: true, force: true }).catch(() => null);
+  await fs.promises.mkdir(tempStraightenedDir, { recursive: true });
+
+  for (const fileName of bracketFileNames) {
+    const src = path.join(selectsDir, fileName);
+    const dest = path.join(bracketDir, fileName);
+    await linkOrCopyFile(src, dest);
+  }
+
+  try {
+    const rtArgs = [
+      "-o",
+      tempStraightenedDir,
+      "-p",
+      LENS_CORRECTION_PP3_PATH,
+      "-t",
+      "-Y",
+      "-c",
+      bracketDir,
+    ];
+    const constructedCommandString = `${quoteArg(rawTherapeeCli)} ${rtArgs.map(quoteArg).join(" ")}`;
+    console.log(`[processingEngine] EXECUTING RawTherapee: ${constructedCommandString}`);
+    await runCommandWithDiagnostics(rawTherapeeCli, rtArgs, {
+      stage: "rawtherapee",
+      localFolderName,
+      bracketIndex,
+      bracketDir,
+      tempStraightenedDir,
+      commandPreview: constructedCommandString,
+    });
+
+    const snsInputs = bracketFileNames.map((fileName) =>
+      resolveStraightenedTiffForRaw(tempStraightenedDir, fileName)
+    );
+    return { snsInputs, workDir: bracketDir };
+  } catch (error) {
+    await removeBracketWorkDir(bracketDir);
+    throw error;
+  }
 }
 
 function quoteArg(p: string): string {
@@ -486,7 +624,7 @@ export async function startProcessingSingleItem(
     }
 
     const snsPreset = resolveSnsPresetArg();
-    const inputs = group.map((name) => path.join(selectsDir, name));
+    const originalInputs = group.map((name) => path.join(selectsDir, name));
     const outBaseName = mergedOutputFileName(firstName, currentBracketIndex, totalBrackets);
     const outFile = path.join(mergedDir, outBaseName);
     const tempOutFile = path.join(
@@ -495,38 +633,54 @@ export async function startProcessingSingleItem(
         .toString(16)
         .slice(2)}${path.extname(outBaseName) || ".jpg"}`
     );
-    const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...inputs];
-    const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
-    console.log(`EXECUTING: ${constructedCommandString}`);
 
+    let bracketWorkDir: string | null = null;
+    let snsInputs = originalInputs;
     try {
-      await runCommandWithDiagnostics(SNS_HDR_PATH, snsArgs, {
-        localFolderName,
+      const prepared = await prepareStraightenedBracketInputs({
+        bracketFileNames: group,
+        selectsDir,
         bracketIndex: currentBracketIndex,
-        outFile,
-        tempOutFile,
-        inputs,
-        snsPreset,
-        commandPreview: constructedCommandString,
+        localFolderName,
       });
-      if (fs.existsSync(outFile)) {
-        await fs.promises.unlink(outFile);
+      bracketWorkDir = prepared.workDir;
+      snsInputs = prepared.snsInputs;
+
+      const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...snsInputs];
+      const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
+      console.log(`EXECUTING: ${constructedCommandString}`);
+
+      try {
+        await runCommandWithDiagnostics(SNS_HDR_PATH, snsArgs, {
+          localFolderName,
+          bracketIndex: currentBracketIndex,
+          outFile,
+          tempOutFile,
+          inputs: snsInputs,
+          snsPreset,
+          commandPreview: constructedCommandString,
+        });
+        if (fs.existsSync(outFile)) {
+          await fs.promises.unlink(outFile);
+        }
+        await fs.promises.rename(tempOutFile, outFile);
+      } catch (error) {
+        const mergeError = error instanceof Error ? error.message : String(error);
+        return failedSingleItemSummary(
+          bracketIndex,
+          totalBrackets,
+          `snsHDR failed on bracket ${currentBracketIndex}: ${mergeError}`
+        );
       }
-      await fs.promises.rename(tempOutFile, outFile);
-    } catch (error) {
-      const mergeError = error instanceof Error ? error.message : String(error);
-      return failedSingleItemSummary(
-        bracketIndex,
-        totalBrackets,
-        `snsHDR failed on bracket ${currentBracketIndex}: ${mergeError}`
-      );
+    } finally {
+      await removeBracketWorkDir(bracketWorkDir);
     }
 
     try {
       const restoreExifCmd = [
         quoteArg(EXIFTOOL_PATH),
         "-TagsFromFile",
-        quoteArg(inputs[0]!),
+        quoteArg(originalInputs[0]!),
         "-all:all",
         "-overwrite_original",
         quoteArg(outFile),
@@ -653,7 +807,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
     const totalBrackets = brackets.length;
     for (const group of brackets) {
       const currentBracketIndex = bracketIndex;
-      const inputs = group.map((name) => path.join(selectsDir, name));
+      const originalInputs = group.map((name) => path.join(selectsDir, name));
       const firstName = group[0]!;
       const outBaseName = mergedOutputFileName(firstName, currentBracketIndex, totalBrackets);
       const outFile = path.join(mergedDir, outBaseName);
@@ -664,90 +818,104 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
           .slice(2)}${path.extname(outBaseName) || ".jpg"}`
       );
 
-      const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...inputs];
-      const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
-      console.log(`EXECUTING: ${constructedCommandString}`);
+      let bracketWorkDir: string | null = null;
       try {
-        await runCommandWithDiagnostics(SNS_HDR_PATH, snsArgs, {
-          localFolderName,
+        const prepared = await prepareStraightenedBracketInputs({
+          bracketFileNames: group,
+          selectsDir,
           bracketIndex: currentBracketIndex,
-          outFile,
-          tempOutFile,
-          inputs,
-          snsPreset,
-          commandPreview: constructedCommandString,
+          localFolderName,
         });
-      } catch (error) {
-        const mergeError = error instanceof Error ? error.message : String(error);
-        throw new Error(`snsHDR failed on bracket ${currentBracketIndex}: ${mergeError}`);
-      }
-      if (fs.existsSync(outFile)) {
-        await fs.promises.unlink(outFile);
-      }
-      await fs.promises.rename(tempOutFile, outFile);
+        bracketWorkDir = prepared.workDir;
+        const snsInputs = prepared.snsInputs;
 
-      try {
-        const restoreExifCmd = [
-          quoteArg(EXIFTOOL_PATH),
-          "-TagsFromFile",
-          quoteArg(inputs[0]!),
-          "-all:all",
-          "-overwrite_original",
-          quoteArg(outFile),
-        ].join(" ");
-        await execAsync(restoreExifCmd, { windowsHide: true });
-        console.log("[processingEngine] Restored EXIF data from original bracket");
-      } catch (exifError) {
-        const message = exifError instanceof Error ? exifError.message : String(exifError);
-        const maybeErrno = (exifError as { code?: string } | null)?.code;
-        if (maybeErrno === "ENOENT" || /not\s+found/i.test(message)) {
-          console.warn("ExifTool not found, skipping metadata injection");
-        } else {
-          console.warn(
-            `[processingEngine] EXIF restore failed for ${outBaseName}; continuing without EXIF metadata.`,
-            message
-          );
-        }
-      }
-
-      mergedOutputs.push(outFile);
-      mergedMeta.push({ outBaseName, firstName, bracketIndex });
-      // Keep SNS-HDR output untouched to avoid channel remapping/color shifts.
-      await enhanceMergedPhotoInPlace(outFile);
-
-      const removalTarget = extractRemovalTargetFromFilename(outBaseName);
-      if (removalTarget) {
+        const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...snsInputs];
+        const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
+        console.log(`EXECUTING: ${constructedCommandString}`);
         try {
-          const removeRes = await fetchWithTimeout(
-            `${origin}/api/ai-remove`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                imagePath: outFile,
-                removalTarget,
-              }),
-            },
-            15_000
-          );
-          const removePayload = (await removeRes.json().catch(() => null)) as { error?: string } | null;
-          if (!removeRes.ok) {
-            console.error(
-              "[processingEngine] /api/ai-remove failed:",
-              removeRes.status,
-              removePayload?.error ?? removePayload
-            );
+          await runCommandWithDiagnostics(SNS_HDR_PATH, snsArgs, {
+            localFolderName,
+            bracketIndex: currentBracketIndex,
+            outFile,
+            tempOutFile,
+            inputs: snsInputs,
+            snsPreset,
+            commandPreview: constructedCommandString,
+          });
+        } catch (error) {
+          const mergeError = error instanceof Error ? error.message : String(error);
+          throw new Error(`snsHDR failed on bracket ${currentBracketIndex}: ${mergeError}`);
+        }
+        if (fs.existsSync(outFile)) {
+          await fs.promises.unlink(outFile);
+        }
+        await fs.promises.rename(tempOutFile, outFile);
+
+        try {
+          const restoreExifCmd = [
+            quoteArg(EXIFTOOL_PATH),
+            "-TagsFromFile",
+            quoteArg(originalInputs[0]!),
+            "-all:all",
+            "-overwrite_original",
+            quoteArg(outFile),
+          ].join(" ");
+          await execAsync(restoreExifCmd, { windowsHide: true });
+          console.log("[processingEngine] Restored EXIF data from original bracket");
+        } catch (exifError) {
+          const message = exifError instanceof Error ? exifError.message : String(exifError);
+          const maybeErrno = (exifError as { code?: string } | null)?.code;
+          if (maybeErrno === "ENOENT" || /not\s+found/i.test(message)) {
+            console.warn("ExifTool not found, skipping metadata injection");
           } else {
-            console.info(
-              `[processingEngine] Queued object removal for ${outBaseName} with target "${removalTarget}".`
+            console.warn(
+              `[processingEngine] EXIF restore failed for ${outBaseName}; continuing without EXIF metadata.`,
+              message
             );
           }
-        } catch (error) {
-          console.error(
-            `[processingEngine] /api/ai-remove request failed for ${outBaseName}:`,
-            error instanceof Error ? error.message : error
-          );
         }
+
+        mergedOutputs.push(outFile);
+        mergedMeta.push({ outBaseName, firstName, bracketIndex });
+        // Keep SNS-HDR output untouched to avoid channel remapping/color shifts.
+        await enhanceMergedPhotoInPlace(outFile);
+
+        const removalTarget = extractRemovalTargetFromFilename(outBaseName);
+        if (removalTarget) {
+          try {
+            const removeRes = await fetchWithTimeout(
+              `${origin}/api/ai-remove`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  imagePath: outFile,
+                  removalTarget,
+                }),
+              },
+              15_000
+            );
+            const removePayload = (await removeRes.json().catch(() => null)) as { error?: string } | null;
+            if (!removeRes.ok) {
+              console.error(
+                "[processingEngine] /api/ai-remove failed:",
+                removeRes.status,
+                removePayload?.error ?? removePayload
+              );
+            } else {
+              console.info(
+                `[processingEngine] Queued object removal for ${outBaseName} with target "${removalTarget}".`
+              );
+            }
+          } catch (error) {
+            console.error(
+              `[processingEngine] /api/ai-remove request failed for ${outBaseName}:`,
+              error instanceof Error ? error.message : error
+            );
+          }
+        }
+      } finally {
+        await removeBracketWorkDir(bracketWorkDir);
       }
 
       bracketIndex += 1;
