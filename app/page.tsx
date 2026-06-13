@@ -16,7 +16,15 @@ import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
 
 type AmountType = "Net" | "Gross";
-type PhotoshootType = "Real Estate" | "Business Portraits" | "Food" | "Wedding";
+type PhotoshootType =
+  | "Immobilien"
+  | "Business Portraits"
+  | "Food"
+  | "Product"
+  | "Portrait Pro"
+  | "Studio Portrait"
+  | "Hochzeit"
+  | "Mini Session";
 type ItemType = "Service" | "Product";
 type PreviewPreference = "first" | "middle" | "last";
 
@@ -247,7 +255,7 @@ function HomeContent() {
   const [products, setProducts] = useState<LineItem[]>([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
   const [taxPercentage, setTaxPercentage] = useState(19);
   const [amountType, setAmountType] = useState<AmountType>("Net");
-  const [photoshootType, setPhotoshootType] = useState<PhotoshootType>("Real Estate");
+  const [photoshootType, setPhotoshootType] = useState<PhotoshootType>("Immobilien");
   const [shootLocation, setShootLocation] = useState("");
   const [photoshootDate, setPhotoshootDate] = useState("");
   const [previewPreference, setPreviewPreference] = useState<PreviewPreference>("first");
@@ -513,7 +521,7 @@ function HomeContent() {
     setProducts([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
     setTaxPercentage(19);
     setAmountType("Net");
-    setPhotoshootType("Real Estate");
+    setPhotoshootType("Immobilien");
     setShootLocation("");
     setPhotoshootDate("");
     setPreviewPreference("first");
@@ -981,7 +989,7 @@ function HomeContent() {
 
   return (
     <div className="min-h-screen bg-zinc-50 px-4 py-8 font-sans dark:bg-black sm:px-6 lg:px-8">
-      <main className="mx-auto w-full max-w-[1800px]">
+      <main className="mx-auto w-full min-w-0 max-w-[1800px]">
         <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex min-w-0 flex-1 items-start gap-3">
             <Image
@@ -1028,8 +1036,8 @@ function HomeContent() {
         ) : null}
 
         {!authRoleLoading && isAdmin ? (
-          <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,10fr)_minmax(120px,0.4fr)]">
-            <div className="min-w-0">
+          <div className="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,10fr)_minmax(120px,0.4fr)]">
+            <div className="min-w-0 overflow-x-auto">
               <KanbanBoard
                 refreshSignal={refreshSignal}
                 onTaskClick={openEditModal}
@@ -1042,12 +1050,14 @@ function HomeContent() {
             </div>
           </div>
         ) : (
-          <KanbanBoard
-            refreshSignal={refreshSignal}
-            onTaskClick={openEditModal}
-            onTaskMoved={handleTaskMoved}
-            showArchived={showArchiveView}
-          />
+          <div className="min-w-0 overflow-x-auto">
+            <KanbanBoard
+              refreshSignal={refreshSignal}
+              onTaskClick={openEditModal}
+              onTaskMoved={handleTaskMoved}
+              showArchived={showArchiveView}
+            />
+          </div>
         )}
       </main>
 
@@ -1454,10 +1464,14 @@ function HomeContent() {
                         onChange={(event) => setPhotoshootType(event.target.value as PhotoshootType)}
                         className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                       >
-                        <option value="Real Estate">Real Estate</option>
+                        <option value="Immobilien">Immobilien</option>
                         <option value="Business Portraits">Business Portraits</option>
                         <option value="Food">Food</option>
-                        <option value="Wedding">Wedding</option>
+                        <option value="Product">Product</option>
+                        <option value="Portrait Pro">Portrait Pro</option>
+                        <option value="Studio Portrait">Studio Portrait</option>
+                        <option value="Hochzeit">Hochzeit</option>
+                        <option value="Mini Session">Mini Session</option>
                       </select>
                     </label>
                     <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">

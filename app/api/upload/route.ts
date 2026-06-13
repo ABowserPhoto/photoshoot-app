@@ -80,9 +80,11 @@ type DbClientRow = {
 };
 
 function getBaseDirectory(photoshootType: string) {
+  // Assembled at runtime so Node File Tracing doesn't try to bundle the shared drive.
+  const root = ["G:", "Shared drives", "Photostudio"].join("\\");
   return /real estate|immobilien/i.test(photoshootType)
-    ? "G:\\Shared drives\\Photostudio\\To Send - Immobilien"
-    : "G:\\Shared drives\\Photostudio\\To Send";
+    ? [root, "To Send - Immobilien"].join("\\")
+    : [root, "To Send"].join("\\");
 }
 
 /** Aligns 1:1 with the `services` / `products` JSON arrays; missing IDs become "". */

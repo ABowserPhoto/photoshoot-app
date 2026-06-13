@@ -13,18 +13,23 @@
 # testing
 /coverage
 
-# next.js
+# next.js — ensure Next.js cache is ignored
 /.next/
 /out/
 
-# production
-/build
-/dist-desktop/
-/dist/
-/out/
-/release/
+# Desktop Build Outputs
+dist-desktop/
+dist-*/
+release/
+out/
+build/
+electron-shell/
+electron/photoshoot-worker.package.json
 !build/icon.ico
 !build/icon.png
+
+# production (legacy paths)
+/dist/
 
 # misc
 .DS_Store

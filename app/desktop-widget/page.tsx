@@ -1,10 +1,11 @@
 "use client";
 
-import { createBrowserClient } from "@supabase/ssr";
 import { ExternalLink, Pause, Play, Plus, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { formatPlannerDuration, getPlannerElapsedSeconds } from "@/lib/plannerTimerUtils";
+import { supabase } from "@/lib/supabaseClient";
 
 type WidgetTaskStatus = "master" | "planning" | "processing" | "completed";
 
@@ -86,16 +87,7 @@ function getPrimaryAction(status: WidgetTaskStatus): { label: string; nextStatus
 }
 
 export default function DesktopWidgetPage() {
-  const widgetSupabase = useMemo(() => {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
-    if (!supabaseUrl || !supabaseAnonKey) {
-      return null;
-    }
-    return createBrowserClient(supabaseUrl, supabaseAnonKey);
-  }, []);
-  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
-  const [authReady, setAuthReady] = useState(false);
+  const { authenticated, isLoading: authLoading, refresh: refreshAuthRole } = useAuthRole();
   const [authMode, setAuthMode] = useState<"supabase" | "gatekeeper" | null>(null);
   const [activeTask, setActiveTask] = useState<WidgetTask | null>(null);
   const [topTasks, setTopTasks] = useState<WidgetTask[]>([]);
@@ -112,88 +104,6 @@ export default function DesktopWidgetPage() {
     ipc?.send(IPC_CHANNELS.REFRESH_MAIN);
   }, []);
 
-  useEffect(() => {
-    console.log("[Widget Auth] Context User ID:", null);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const authSubscriptionRef: MutableRefObject<{ unsubscribe: () => void } | null> = { current: null };
-
-    const initializeAndListen = async () => {
-      if (!widgetSupabase) {
-        console.log("[Widget Auth] Browser client unavailable (missing env vars).");
-        if (!cancelled) {
-          setAuthReady(true);
-        }
-        return;
-      }
-
-      try {
-        const { data } = await widgetSupabase.auth.getSession();
-        console.log("[Widget Auth] Initial session:", data.session);
-        if (!cancelled) {
-          const nextUserId = data.session?.user?.id ?? null;
-          setSessionUserId(nextUserId);
-          setAuthMode(nextUserId ? "supabase" : null);
-          setAuthReady(true);
-        }
-      } catch {
-        if (!cancelled) {
-          setSessionUserId(null);
-          setAuthReady(true);
-        }
-      }
-
-      if (cancelled) {
-        return;
-      }
-
-      const {
-        data: { subscription },
-      } = widgetSupabase.auth.onAuthStateChange((event, session) => {
-        console.log("[Widget Auth] Auth state changed:", event, session?.user?.id);
-        if (cancelled) {
-          return;
-        }
-        const nextUserId = session?.user?.id ?? null;
-        setSessionUserId(nextUserId);
-        setAuthMode(nextUserId ? "supabase" : null);
-        setAuthReady(true);
-      });
-      authSubscriptionRef.current = subscription;
-    };
-
-    void initializeAndListen();
-    return () => {
-      cancelled = true;
-      authSubscriptionRef.current?.unsubscribe();
-    };
-  }, [widgetSupabase]);
-
-  const resolveCurrentUserId = useCallback(async (): Promise<string | null> => {
-    if (sessionUserId) {
-      console.log("[Widget Auth] User source: session-state", sessionUserId);
-      return sessionUserId;
-    }
-
-    if (!widgetSupabase) {
-      console.log("[Widget Auth] User source: none (client unavailable)");
-      return null;
-    }
-
-    const { data: sessionData } = await widgetSupabase.auth.getSession();
-    const fromSession = sessionData.session?.user?.id ?? null;
-    if (fromSession) {
-      console.log("[Widget Auth] User source: getSession", fromSession);
-      return fromSession;
-    }
-
-    const { data: userData } = await widgetSupabase.auth.getUser();
-    const fromGetUser = userData.user?.id ?? null;
-    console.log("[Widget Auth] User source: getUser", fromGetUser);
-    return fromGetUser;
-  }, [sessionUserId, widgetSupabase]);
   const loadWidgetState = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -225,9 +135,6 @@ export default function DesktopWidgetPage() {
       setActiveTask(nextActive);
       setTopTasks((json.tasks ?? []).map(mapRowToTask));
 
-      if (nextMode === "gatekeeper") {
-        console.log("[Widget Auth] User source: gatekeeper-api", nextUserId);
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load widget tasks.");
     } finally {
@@ -258,38 +165,35 @@ export default function DesktopWidgetPage() {
   );
 
   useEffect(() => {
-    if (!widgetSupabase) {
+    if (!supabase) {
       return;
     }
 
     const handleFocus = () => {
-      void widgetSupabase.auth.getSession().then(({ data }) => {
-        const nextUserId = data.session?.user?.id ?? null;
-        console.log("[Widget Auth] Focus session sync:", nextUserId);
-        setSessionUserId(nextUserId);
-        setAuthReady(true);
-      });
+      refreshAuthRole();
     };
 
     const handleStorage = (event: StorageEvent) => {
       if (!event.key || !event.key.includes("auth-token")) {
         return;
       }
-      void widgetSupabase.auth.getSession().then(({ data }) => {
-        const nextUserId = data.session?.user?.id ?? null;
-        console.log("[Widget Auth] Storage session sync:", nextUserId);
-        setSessionUserId(nextUserId);
-        setAuthReady(true);
-      });
+      refreshAuthRole();
     };
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(() => {
+      refreshAuthRole();
+    });
 
     window.addEventListener("focus", handleFocus);
     window.addEventListener("storage", handleStorage);
     return () => {
+      subscription.unsubscribe();
       window.removeEventListener("focus", handleFocus);
       window.removeEventListener("storage", handleStorage);
     };
-  }, [widgetSupabase]);
+  }, [refreshAuthRole]);
 
   useEffect(() => {
     const tick = window.setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
@@ -297,41 +201,22 @@ export default function DesktopWidgetPage() {
   }, []);
 
   useEffect(() => {
-    if (!authReady) {
+    if (authLoading) {
       return;
     }
 
-    void (async () => {
-      await Promise.resolve();
-      const sessionUid = await resolveCurrentUserId();
-      if (sessionUid) {
-        setSessionUserId(sessionUid);
-      }
+    if (!authenticated) {
+      setUserId(null);
+      setActiveTask(null);
+      setTopTasks([]);
+      setLoading(false);
+      setError("Not signed in.");
+      return;
+    }
 
-      const sessionExists = Boolean(sessionUid || sessionUserId);
-      if (!sessionExists) {
-        const authRes = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" }).catch(
-          () => null
-        );
-        if (authRes?.ok) {
-          setAuthMode("gatekeeper");
-          await loadWidgetState();
-          return;
-        }
-      }
-
-      if (!sessionExists && authMode !== "gatekeeper") {
-        setUserId(null);
-        setActiveTask(null);
-        setTopTasks([]);
-        setLoading(false);
-        setError("Not signed in.");
-        return;
-      }
-
-      await loadWidgetState();
-    })();
-  }, [authReady, sessionUserId, authMode, resolveCurrentUserId, loadWidgetState]);
+    setError(null);
+    void loadWidgetState();
+  }, [authLoading, authenticated, loadWidgetState]);
 
   useEffect(() => {
     const ipc = getIpcRenderer();
@@ -340,7 +225,7 @@ export default function DesktopWidgetPage() {
     }
 
     const listener = () => {
-      if (!authReady) {
+      if (authLoading || !authenticated) {
         return;
       }
       void loadWidgetState();
@@ -349,7 +234,7 @@ export default function DesktopWidgetPage() {
     return () => {
       ipc.removeListener(IPC_CHANNELS.REFRESH_EVENT, listener);
     };
-  }, [authReady, loadWidgetState]);
+  }, [authLoading, authenticated, loadWidgetState]);
 
   const activeElapsed = useMemo(() => {
     if (!activeTask) {
@@ -513,7 +398,7 @@ export default function DesktopWidgetPage() {
     ipc?.send(IPC_CHANNELS.FOCUS_MAIN);
   };
 
-  if (!authReady) {
+  if (authLoading) {
     return (
       <main className="min-h-screen bg-transparent p-2 text-zinc-100">
         <section className="flex h-[434px] flex-col rounded-2xl border border-white/20 bg-zinc-950/85 px-3 py-3 shadow-2xl backdrop-blur-lg">
@@ -526,11 +411,6 @@ export default function DesktopWidgetPage() {
 
   return (
     <main className="min-h-screen bg-transparent p-2 text-zinc-100">
-      <style jsx global>{`
-        footer {
-          display: none !important;
-        }
-      `}</style>
       <section className="flex h-[434px] flex-col rounded-2xl border border-white/20 bg-zinc-950/85 shadow-2xl backdrop-blur-lg">
         <header
           className="flex items-center justify-between border-b border-white/10 px-3 py-2"
@@ -590,7 +470,7 @@ export default function DesktopWidgetPage() {
               <button
                 type="button"
                 onClick={() => void handleAddTask()}
-                disabled={!userId || busyTaskId === "new"}
+                disabled={!authenticated || busyTaskId === "new"}
                 className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-emerald-400/40 bg-emerald-500/15 px-2 text-xs font-semibold text-emerald-100 transition hover:border-emerald-300/70 hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-60"
                 style={{ WebkitAppRegion: "no-drag" }}
               >

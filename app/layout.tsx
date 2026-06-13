@@ -1,11 +1,7 @@
 import type { Metadata } from "next";
-import Image from "next/image";
 import { Geist, Geist_Mono } from "next/font/google";
-import { Suspense } from "react";
 
-import GlobalAppHeader from "@/app/components/GlobalAppHeader";
-import AutoLogout from "@/app/components/AutoLogout";
-import ClientPlannerShell from "@/app/ClientPlannerShell";
+import RootAppChrome from "@/app/components/RootAppChrome";
 import { AuthRoleProvider } from "@/app/contexts/AuthRoleContext";
 
 import "./globals.css";
@@ -41,28 +37,8 @@ export default function RootLayout({
     >
       <body className="flex min-h-full flex-col bg-black text-white">
         <AuthRoleProvider>
-          <AutoLogout />
-          <ClientPlannerShell>
-            <Suspense fallback={null}>
-              <GlobalAppHeader />
-            </Suspense>
-            <div className="flex min-h-0 flex-1 flex-col">{children}</div>
-          </ClientPlannerShell>
+          <RootAppChrome>{children}</RootAppChrome>
         </AuthRoleProvider>
-        <footer className="border-t border-zinc-800 bg-black px-4 py-8">
-          <div className="mx-auto flex max-w-[1800px] flex-col items-center justify-center gap-3">
-            <Image
-              src="/Logo_1024_white.webp"
-              alt="Aaron Bowser Photography"
-              width={480}
-              height={160}
-              className="h-32 w-auto opacity-90"
-            />
-            <p className="text-center text-xs text-zinc-500">
-              powered by Aaron Bowser Photography
-            </p>
-          </div>
-        </footer>
       </body>
     </html>
   );

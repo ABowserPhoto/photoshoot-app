@@ -806,6 +806,22 @@ export default function PlannerPage() {
     if ("total_fee" in sanitizedUpdates) {
       sanitizedUpdates.total_fee = normalizeTotalFeeInput(sanitizedUpdates.total_fee);
     }
+    if ("file_locations" in sanitizedUpdates) {
+      const locations = normalizeFileLocationsInput(
+        Array.isArray(sanitizedUpdates.file_locations)
+          ? (sanitizedUpdates.file_locations as string[])
+          : []
+      );
+      sanitizedUpdates.file_locations = locations.length > 0 ? locations : null;
+      if (!("file_path" in sanitizedUpdates)) {
+        sanitizedUpdates.file_path = locations[0] ?? null;
+      }
+    }
+    if ("file_path" in sanitizedUpdates) {
+      const filePath =
+        typeof sanitizedUpdates.file_path === "string" ? sanitizedUpdates.file_path.trim() : "";
+      sanitizedUpdates.file_path = filePath || null;
+    }
 
     let { error } = await supabase.from("studio_tasks").update(sanitizedUpdates).eq("id", taskId);
     if (error && "file_locations" in updates && isMissingFileLocationsColumnError(error)) {
@@ -1994,7 +2010,7 @@ export default function PlannerPage() {
           }))}
         />
 
-        <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
           <aside className="h-[70vh] rounded-xl border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Master To-Do List</h2>
@@ -2272,8 +2288,8 @@ export default function PlannerPage() {
             </div>
           </aside>
 
-          <div className="overflow-x-auto pb-3 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-black [&::-webkit-scrollbar-thumb]:bg-zinc-600">
-            <div className="flex min-w-max flex-nowrap gap-4">
+          <div className="min-w-0 overflow-x-auto pb-3 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-black [&::-webkit-scrollbar-thumb]:bg-zinc-600">
+            <div className="inline-flex min-w-max flex-nowrap gap-4">
               {COLUMN_CONFIG.map((column) => {
                 const isActive = activeDropColumn === column.id;
                 const isCollapsed = isColumnCollapsed(column.id);
@@ -2290,7 +2306,7 @@ export default function PlannerPage() {
                       handleDrop(column.id);
                     }}
                     className={`h-[70vh] shrink-0 rounded-xl border bg-white p-3 shadow-sm transition-all dark:bg-zinc-900 ${
-                      isCollapsed ? "w-12" : "w-[300px]"
+                      isCollapsed ? "w-12 min-w-[3rem]" : "min-w-[300px] w-[300px]"
                     } ${
                       isActive
                         ? "border-zinc-500 bg-zinc-100/80 dark:border-zinc-500 dark:bg-zinc-800/80"

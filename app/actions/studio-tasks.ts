@@ -49,6 +49,70 @@ async function getSessionUserId(): Promise<string | null> {
   return user?.id ?? null;
 }
 
+function isMissingColumnError(
+  error: { message?: string | null; code?: string | null } | null,
+  column: string
+): boolean {
+  if (!error) {
+    return false;
+  }
+  const message = String(error.message ?? "").toLowerCase();
+  const code = String(error.code ?? "").toLowerCase();
+  const columnNeedle = column.toLowerCase();
+  return message.includes(columnNeedle) && (message.includes("column") || code === "pgrst204");
+}
+
+function normalizePlannerFileLocations(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const normalized = value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const entry of normalized) {
+    if (seen.has(entry)) {
+      continue;
+    }
+    seen.add(entry);
+    unique.push(entry);
+  }
+  return unique.length > 0 ? unique : null;
+}
+
+function normalizePlannerFileFields(extra: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...extra };
+
+  const folderPath =
+    typeof next.folder_path === "string"
+      ? next.folder_path.trim()
+      : typeof next.location === "string"
+        ? next.location.trim()
+        : "";
+  delete next.folder_path;
+  delete next.location;
+
+  if (folderPath && next.file_path == null && next.file_locations == null) {
+    next.file_locations = [folderPath];
+    next.file_path = folderPath;
+  }
+
+  if ("file_locations" in next) {
+    next.file_locations = normalizePlannerFileLocations(next.file_locations);
+    if (next.file_path == null && Array.isArray(next.file_locations) && next.file_locations[0]) {
+      next.file_path = next.file_locations[0];
+    }
+  }
+
+  if ("file_path" in next) {
+    const trimmed = typeof next.file_path === "string" ? next.file_path.trim() : "";
+    next.file_path = trimmed || null;
+  }
+
+  return next;
+}
+
 export async function updateStudioTaskStatus(
   taskId: string,
   newStatus: string,
@@ -76,7 +140,7 @@ export async function updateStudioTaskStatus(
 
   let payload: Record<string, unknown> = {
     status,
-    ...(extra ?? {}),
+    ...normalizePlannerFileFields(extra ?? {}),
   };
 
   if (status.toLowerCase() === "completed") {
@@ -86,21 +150,20 @@ export async function updateStudioTaskStatus(
     }
   }
 
-  const isMissingFileLocationsColumnError = (error: { message?: string | null; code?: string | null } | null) => {
-    if (!error) {
-      return false;
-    }
-    const message = String(error.message ?? "").toLowerCase();
-    const code = String(error.code ?? "").toLowerCase();
-    return message.includes("file_locations") && (message.includes("column") || code === "pgrst204");
-  };
-
   let { error } = await sb.from("studio_tasks").update(payload).eq("id", id);
-  if (error && "file_locations" in payload && isMissingFileLocationsColumnError(error)) {
+  if (error) {
     const fallbackPayload = { ...payload };
-    delete fallbackPayload.file_locations;
-    const fallbackResult = await sb.from("studio_tasks").update(fallbackPayload).eq("id", id);
-    error = fallbackResult.error;
+    let changed = false;
+    for (const column of ["file_locations", "editor_id"] as const) {
+      if (column in fallbackPayload && isMissingColumnError(error, column)) {
+        delete fallbackPayload[column];
+        changed = true;
+      }
+    }
+    if (changed) {
+      const fallbackResult = await sb.from("studio_tasks").update(fallbackPayload).eq("id", id);
+      error = fallbackResult.error;
+    }
   }
   if (error) {
     console.error("[updateStudioTaskStatus]", error);

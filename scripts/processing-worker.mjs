@@ -29,13 +29,27 @@ const SELECTS_STABILITY_MAX_PASSES = readPositiveIntEnv("SELECTS_STABILITY_MAX_P
 const AWAITING_FOLDER_STATUS = "awaiting_folder_creation";
 const BOOKING_STATUS = "Booking";
 const SELECTION_AVAILABLE_STATUS = "Selection Available";
+const SELECTION_FAILED_STATUS = "Selection Failed";
 const SELECTION_SYNCING_STATUS = "syncing_selection";
+const SELECTION_SYNC_VALIDATION_ERROR_PATTERNS = [
+  /no selected_chunk_indices in gallery_selection/i,
+  /no selected raw files were copied to 2_selects/i,
+];
 
 const CLAIM_STATUS = "pending_processing";
 const ACTIVE_STATUS = "Processing";
 const READY_FOR_REVIEW_STATUS = "Ready for Review";
 const PREVIEW_DEBOUNCE_MS = 1500;
 const RAW_PREVIEW_EXTENSIONS = new Set([".nef", ".cr2", ".cr3", ".arw", ".dng", ".raf", ".rw2", ".orf"]);
+const SELECTS_TRIGGER_EXTENSIONS = new Set([".nef", ".dng"]);
+/** Capture One proxy/sidecar noise — never arm debounce for these. */
+const CHOKIDAR_IGNORED_PATTERNS = [
+  /(^|[\\/])\../,
+  /\.cop$/i,
+  /\.cof$/i,
+  /\.psd$/i,
+  /\.dng\.cop$/i,
+];
 const RAW_PREVIEW_TAGS = ["PreviewImage", "JpgFromRaw", "OtherImage", "ThumbnailImage"];
 
 const DEFAULT_PHOTOS_ROOT = "D:\\Photos_2026";
@@ -275,6 +289,31 @@ async function claimTask(supabase, taskId) {
   return claimTaskForStatus(supabase, taskId, CLAIM_STATUS, ACTIVE_STATUS);
 }
 
+function isSelectionSyncValidationError(err) {
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  return SELECTION_SYNC_VALIDATION_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+async function resolveSelectionSyncFailure(supabase, taskId, err) {
+  const validationError = isSelectionSyncValidationError(err);
+  const nextStatus = validationError ? SELECTION_FAILED_STATUS : SELECTION_AVAILABLE_STATUS;
+  const actionLabel = validationError ? "mark Selection Failed" : "restore Selection Available";
+
+  await withRetry(`${actionLabel} for task ${taskId}`, async () => {
+    const { error: updateError } = await supabase
+      .from("tasks")
+      .update({ status: nextStatus })
+      .eq("id", taskId);
+    if (updateError) {
+      throw new Error(updateError.message);
+    }
+  });
+
+  console.warn(
+    `[worker] Task ${taskId} set to ${nextStatus} after selection sync failure (${validationError ? "validation" : "transient"}).`
+  );
+}
+
 async function claimTaskForStatus(supabase, taskId, fromStatus, toStatus) {
   const { data, error } = await withRetry(
     `claim task ${taskId} (${fromStatus} -> ${toStatus})`,
@@ -323,6 +362,39 @@ function isPreviewSourceFile(fileName) {
     return false;
   }
   return isImageFile(normalized);
+}
+
+function isWatcherIgnoredPath(filePath) {
+  const normalized = String(filePath || "").replace(/\\/g, "/");
+  return CHOKIDAR_IGNORED_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function isSelectsWatcherTriggerFile(filePath) {
+  if (!filePath || isWatcherIgnoredPath(filePath)) {
+    return false;
+  }
+  const ext = path.extname(filePath).toLowerCase();
+  return SELECTS_TRIGGER_EXTENSIONS.has(ext);
+}
+
+function isRawWatcherTriggerFile(filePath) {
+  if (!filePath || isWatcherIgnoredPath(filePath)) {
+    return false;
+  }
+  const ext = path.extname(filePath).toLowerCase();
+  return RAW_PREVIEW_EXTENSIONS.has(ext);
+}
+
+function createShootFolderWatcherOptions() {
+  return {
+    ignoreInitial: false,
+    awaitWriteFinish: {
+      stabilityThreshold: 2500,
+      pollInterval: 100,
+    },
+    usePolling: true,
+    ignored: (watchedPath) => isWatcherIgnoredPath(watchedPath),
+  };
 }
 
 function normalizePreviewPreference(value) {
@@ -1009,6 +1081,10 @@ function scheduleSelectsProcessing(localFolderName, filePath, eventName) {
     return;
   }
 
+  if ((eventName === "add" || eventName === "change" || eventName === "unlink") && !isSelectsWatcherTriggerFile(filePath)) {
+    return;
+  }
+
   if (eventName === "add" || eventName === "change") {
     console.log("New file detected:", filePath);
   }
@@ -1069,16 +1145,18 @@ function startRawFolderWatcher() {
 
   const root = getShootFoldersRoot();
   const watcher = chokidar.watch(root, {
-    ignoreInitial: false,
+    ...createShootFolderWatcherOptions(),
     awaitWriteFinish: {
       stabilityThreshold: 2000,
       pollInterval: 100,
     },
-    usePolling: true,
   });
 
   watcher.on("all", (eventName, filePath) => {
     if (!["add", "change", "unlink", "addDir"].includes(eventName)) {
+      return;
+    }
+    if ((eventName === "add" || eventName === "change" || eventName === "unlink") && !isRawWatcherTriggerFile(filePath)) {
       return;
     }
     const localFolderName = localFolderNameFromRawPath(filePath);
@@ -1104,17 +1182,13 @@ function startSelectsFolderWatcher() {
   selectsWatcherStarted = true;
 
   const root = getShootFoldersRoot();
-  const watcher = chokidar.watch(root, {
-    ignoreInitial: false,
-    awaitWriteFinish: {
-      stabilityThreshold: 2500,
-      pollInterval: 100,
-    },
-    usePolling: true,
-  });
+  const watcher = chokidar.watch(root, createShootFolderWatcherOptions());
 
   watcher.on("all", (eventName, filePath) => {
     if (!["add", "change", "unlink", "addDir", "unlinkDir"].includes(eventName)) {
+      return;
+    }
+    if ((eventName === "add" || eventName === "change" || eventName === "unlink") && !isSelectsWatcherTriggerFile(filePath)) {
       return;
     }
     const localFolderName = localFolderNameFromSelectsPath(filePath);
@@ -1563,7 +1637,47 @@ async function processPendingProcessing(supabase) {
   }
 }
 
+async function recoverStaleSelectionSyncTasks(supabase) {
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("id, gallery_selection")
+    .eq("status", SELECTION_SYNCING_STATUS)
+    .order("id", { ascending: true })
+    .limit(20);
+
+  if (error) {
+    console.warn(`[worker] Stale selection-sync recovery query failed: ${error.message}`);
+    return;
+  }
+
+  for (const task of data ?? []) {
+    const taskId = String(task.id);
+    const { selectedChunkIndices } = parseSelectionPayload(task.gallery_selection);
+    if (selectedChunkIndices.length > 0) {
+      continue;
+    }
+
+    console.warn(
+      `[worker] Recovering task ${taskId} stuck in ${SELECTION_SYNCING_STATUS} with invalid gallery_selection.`
+    );
+    try {
+      await resolveSelectionSyncFailure(
+        supabase,
+        taskId,
+        new Error("No selected_chunk_indices in gallery_selection.")
+      );
+    } catch (statusErr) {
+      console.error(
+        `[worker] Could not recover stale selection sync for ${taskId}:`,
+        statusErr instanceof Error ? statusErr.message : statusErr
+      );
+    }
+  }
+}
+
 async function processSelectionAvailable(supabase) {
+  await recoverStaleSelectionSyncTasks(supabase);
+
   const { data, error } = await supabase
     .from("tasks")
     .select("id, local_folder_name, gallery_selection, status")
@@ -1628,19 +1742,11 @@ async function processSelectionAvailable(supabase) {
     } catch (err) {
       console.error(`[worker] Selection sync failed for task ${taskId}:`, err instanceof Error ? err.message : err);
       try {
-        await withRetry(`restore Selection Available for task ${taskId}`, async () => {
-          const { error: rollbackError } = await supabase
-            .from("tasks")
-            .update({ status: SELECTION_AVAILABLE_STATUS })
-            .eq("id", taskId);
-          if (rollbackError) {
-            throw new Error(rollbackError.message);
-          }
-        });
-      } catch (rollbackErr) {
+        await resolveSelectionSyncFailure(supabase, taskId, err);
+      } catch (statusErr) {
         console.error(
-          `[worker] Could not restore ${SELECTION_AVAILABLE_STATUS} for ${taskId}:`,
-          rollbackErr instanceof Error ? rollbackErr.message : rollbackErr
+          `[worker] Could not update task status after selection sync failure for ${taskId}:`,
+          statusErr instanceof Error ? statusErr.message : statusErr
         );
       }
     }

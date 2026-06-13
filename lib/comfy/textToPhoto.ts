@@ -4,8 +4,11 @@ import { randomUUID } from "node:crypto";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 const COMFY_BASE_URL = process.env.COMFYUI_BASE_URL?.trim() || "http://127.0.0.1:8188";
-const COMFY_DEFAULT_ROOT = process.env.COMFYUI_PATH?.trim() || "C:/ComfyUI_windows_portable/ComfyUI";
-const COMFY_OUTPUT_DIR = process.env.COMFYUI_OUTPUT_DIR?.trim() || path.join(COMFY_DEFAULT_ROOT, "output");
+// Assembled at runtime so Node File Tracing doesn't try to bundle the ComfyUI install.
+const COMFY_DEFAULT_ROOT =
+  process.env.COMFYUI_PATH?.trim() || ["C:", "ComfyUI_windows_portable", "ComfyUI"].join("/");
+const COMFY_OUTPUT_DIR =
+  process.env.COMFYUI_OUTPUT_DIR?.trim() || [COMFY_DEFAULT_ROOT, "output"].join("/");
 
 type WorkflowNode = {
   inputs?: Record<string, unknown>;
@@ -29,7 +32,8 @@ type ComfyHistoryEntry = {
 };
 
 function loadTextToPhotoWorkflowTemplate(): Record<string, WorkflowNode> {
-  const workflowPath = path.join(process.cwd(), "lib", "comfy", "Text_to_Image.json");
+  // [cwd].join("") keeps the path opaque to NFT so the project root isn't traced.
+  const workflowPath = path.join([process.cwd()].join(""), "lib", "comfy", "Text_to_Image.json");
   const raw = fs.readFileSync(workflowPath, "utf8");
   return JSON.parse(raw) as Record<string, WorkflowNode>;
 }
@@ -152,7 +156,7 @@ async function resolveComfyPreviewUrl(promptId: string): Promise<
     return { status: "processing" };
   }
 
-  const tempDir = path.join(process.cwd(), "public", "temp_ai");
+  const tempDir = path.join([process.cwd()].join(""), "public", "temp_ai");
   fs.mkdirSync(tempDir, { recursive: true });
   const copiedName = `${promptId}_${path.basename(outputImage.filename)}`;
   const destinationPath = path.join(tempDir, copiedName);

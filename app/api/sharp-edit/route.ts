@@ -13,8 +13,11 @@ export const dynamic = "force-dynamic";
 
 const execAsync = promisify(exec);
 
-const COMFY_DEFAULT_ROOT = process.env.COMFYUI_PATH?.trim() || "C:/ComfyUI_windows_portable/ComfyUI";
-const COMFY_OUTPUT_DIR = process.env.COMFYUI_OUTPUT_DIR?.trim() || path.join(COMFY_DEFAULT_ROOT, "output");
+// Assembled at runtime so Node File Tracing doesn't try to bundle the ComfyUI install.
+const COMFY_DEFAULT_ROOT =
+  process.env.COMFYUI_PATH?.trim() || ["C:", "ComfyUI_windows_portable", "ComfyUI"].join("/");
+const COMFY_OUTPUT_DIR =
+  process.env.COMFYUI_OUTPUT_DIR?.trim() || [COMFY_DEFAULT_ROOT, "output"].join("/");
 const SUPABASE_FINALS_BUCKET = process.env.SUPABASE_FINALS_BUCKET?.trim() || "finals";
 
 type AdjustmentOptions = {
@@ -64,7 +67,7 @@ function resolveLocalImagePathInput(rawPath: string): string {
     return resolveLocalImagePathInput(fromProxyUrl);
   }
 
-  const photosRoot = path.resolve(PHOTOS_ROOT);
+  const photosRoot = path.resolve([PHOTOS_ROOT].join(""));
   const directResolved = path.resolve(trimmed);
 
   if (isPathUnderRoot(directResolved, photosRoot)) {
@@ -91,7 +94,7 @@ async function tryMaterializeLocalImageFromSupabase(
     return false;
   }
 
-  const photosRoot = path.resolve(PHOTOS_ROOT);
+  const photosRoot = path.resolve([PHOTOS_ROOT].join(""));
   if (!isPathUnderRoot(resolvedPath, photosRoot)) {
     return false;
   }
@@ -138,7 +141,7 @@ async function resolveSourceImagePath(
   hints: { storagePath?: string | null; taskId?: string | null }
 ): Promise<string> {
   const resolved = resolveLocalImagePathInput(imagePath);
-  const rootResolved = path.resolve(PHOTOS_ROOT);
+  const rootResolved = path.resolve([PHOTOS_ROOT].join(""));
   if (!isPathUnderRoot(resolved, rootResolved)) {
     console.error("[sharp-edit] Failing because image path is outside PHOTOS_ROOT", {
       input: imagePath,
@@ -167,7 +170,10 @@ async function resolveSourceImagePath(
 
 function resolveAndValidateMaskPath(maskPath: string): string {
   const resolved = resolveLocalImagePathInput(maskPath);
-  const allowedRoots = [path.resolve(PHOTOS_ROOT), path.resolve(COMFY_OUTPUT_DIR)];
+  const allowedRoots = [
+    path.resolve([PHOTOS_ROOT].join("")),
+    path.resolve([COMFY_OUTPUT_DIR].join("")),
+  ];
   if (!allowedRoots.some((root) => isPathUnderRoot(resolved, root))) {
     console.error("[sharp-edit] Failing because mask path is outside allowed roots", {
       input: maskPath,

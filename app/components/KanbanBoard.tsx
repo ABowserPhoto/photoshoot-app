@@ -49,7 +49,15 @@ export type BoardTask = {
   taxPercentage: number;
   amountType: "Net" | "Gross";
   discount: number;
-  photoshootType: "Real Estate" | "Business Portraits" | "Food" | "Wedding";
+  photoshootType:
+    | "Immobilien"
+    | "Business Portraits"
+    | "Food"
+    | "Product"
+    | "Portrait Pro"
+    | "Studio Portrait"
+    | "Hochzeit"
+    | "Mini Session";
   shootLocation: string;
   photoshootDate: string;
   dueDate: string;
@@ -147,7 +155,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     taxPercentage: 19,
     amountType: "Net",
     discount: 0,
-    photoshootType: "Real Estate",
+    photoshootType: "Immobilien",
     shootLocation: "Munich",
     photoshootDate: "2026-10-27",
     dueDate: "",
@@ -243,7 +251,8 @@ function normalizeStatus(value: string | null): ColumnKey {
     normalized === "pending-processing" ||
     normalized === "pending_processing" ||
     normalized === "syncing-selection" ||
-    normalized === "syncing_selection"
+    normalized === "syncing_selection" ||
+    normalized === "selection-failed"
   ) {
     return "selection-available";
   }
@@ -490,13 +499,21 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
     photoshootType:
       row.photoshoot_type === "Business Portraits"
         ? "Business Portraits"
-        : row.photoshoot_type === "Real Estate"
-          ? "Real Estate"
+        : row.photoshoot_type === "Real Estate" || row.photoshoot_type === "Immobilien"
+          ? "Immobilien"
           : row.photoshoot_type === "Food"
             ? "Food"
-            : row.photoshoot_type === "Wedding"
-              ? "Wedding"
-          : (existing?.photoshootType ?? "Real Estate"),
+            : row.photoshoot_type === "Product"
+              ? "Product"
+              : row.photoshoot_type === "Portrait Pro"
+                ? "Portrait Pro"
+                : row.photoshoot_type === "Studio Portrait"
+                  ? "Studio Portrait"
+                  : row.photoshoot_type === "Wedding" || row.photoshoot_type === "Hochzeit"
+                    ? "Hochzeit"
+                    : row.photoshoot_type === "Mini Session"
+                      ? "Mini Session"
+                      : (existing?.photoshootType ?? "Immobilien"),
     shootLocation: typeof row.shoot_location === "string" ? row.shoot_location : (existing?.shootLocation ?? ""),
     photoshootDate,
     dueDate,
@@ -1352,7 +1369,7 @@ export default function KanbanBoard({
   };
 
   return (
-    <div className="relative w-full">
+    <div className="relative min-w-0 w-full max-w-full">
       {!showArchived ? <DailyStreakBadge count={dailyCompletionCount} /> : null}
       {previewRegenToast ? (
         <div
@@ -1387,7 +1404,7 @@ export default function KanbanBoard({
           </p>
         </div>
       ) : null}
-      <div className="overflow-x-auto pb-3 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-black">
+      <div className="w-full max-w-full overflow-x-auto pb-3 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-black">
         {showArchived ? (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {archivedTasks.map((task) => (
@@ -1435,7 +1452,7 @@ export default function KanbanBoard({
             ) : null}
           </div>
         ) : (
-          <div className="flex flex-nowrap gap-4 min-w-max">
+          <div className="inline-flex min-w-max flex-nowrap gap-4">
           {COLUMN_CONFIG.map((column) => {
             const isActive = activeDropColumn === column.id;
             const isCollapsed = isColumnCollapsed(column.id);

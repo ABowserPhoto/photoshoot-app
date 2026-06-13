@@ -13,7 +13,7 @@
     "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
     "dev:desktop": "concurrently \"npm run dev\" \"npm run dev:electron\"",
     "prepare:desktop-env": "node scripts/prepare-electron-env.mjs",
-    "build:desktop": "node -e \"require('fs').rmSync('dist-desktop',{recursive:true,force:true})\" && set CSC_IDENTITY_AUTO_DISCOVERY=false && npm run prepare:desktop-env && next build && node scripts/prepare-electron-standalone.mjs && electron-builder"
+    "build:desktop": "node scripts/clean-dist-desktop.mjs && set CSC_IDENTITY_AUTO_DISCOVERY=false && npm run prepare:desktop-env && next build && node scripts/prepare-electron-standalone.mjs && electron-builder"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -61,21 +61,19 @@
     "artifactName": "Studio-Workflow-Suite-${version}-${os}-${arch}.${ext}",
     "icon": "build/icon.ico",
     "asar": true,
+    "extraMetadata": {
+      "main": "main.js"
+    },
+    "beforeBuild": "scripts/electron-before-build.cjs",
     "directories": {
-      "output": "dist-desktop"
+      "app": "electron-shell",
+      "output": "dist-desktop",
+      "buildResources": "build"
     },
     "files": [
-      "main.js",
-      "electron/**/*",
-      "build/icon.ico",
       "package.json",
-      "!.env.local",
-      "!**/.env.local",
-      "!**/.env.development",
-      "!**/.env.development.local",
-      "!dist-desktop/**/*",
-      "!dist/**/*",
-      "!out/**/*"
+      "main.js",
+      "electron/**/*"
     ],
     "extraResources": [
       {
@@ -86,8 +84,45 @@
         "from": ".next/standalone",
         "to": "standalone",
         "filter": [
+          "**/*",
+          "!node_modules",
+          "!node_modules/**/*"
+        ]
+      },
+      {
+        "from": ".next/standalone/node_modules",
+        "to": "standalone/node_modules",
+        "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "scripts",
+        "to": "photoshoot-worker/scripts",
+        "filter": [
+          "processing-worker.mjs",
+          "localFolderName.mjs"
+        ]
+      },
+      {
+        "from": "lib",
+        "to": "photoshoot-worker/lib",
+        "filter": [
+          "bracketGrouping.mjs",
+          "sanitizeStoragePath.mjs",
+          "server/fetchWithTimeout.mjs"
+        ]
+      },
+      {
+        "from": "app/api/gallery",
+        "to": "photoshoot-worker/app/api/gallery",
+        "filter": [
+          "previewMagick.mjs"
+        ]
+      },
+      {
+        "from": "electron/photoshoot-worker.package.json",
+        "to": "photoshoot-worker/package.json"
       }
     ],
     "win": {
