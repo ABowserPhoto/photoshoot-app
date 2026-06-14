@@ -5,8 +5,8 @@ import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-/** Allow long batch HDR merges (up to 2 hours). */
-export const maxDuration = 7200;
+/** Vercel hobby cap is 300s; local desktop worker has no serverless limit. */
+export const maxDuration = 300;
 
 type ProcessTaskBody = {
   taskId?: string;
