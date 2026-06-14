@@ -71,9 +71,20 @@
       "buildResources": "build"
     },
     "files": [
-      "package.json",
-      "main.js",
-      "electron/**/*"
+      "**/*",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/node_modules/*.d.ts",
+      "!**/node_modules/.bin",
+      "!AIPhotos{,/**/*}",
+      "!ComfyUI{,/**/*}",
+      "!models{,/**/*}",
+      "!photos{,/**/*}",
+      "!*.safetensors",
+      "!*.ckpt",
+      "!dist-desktop{,/**/*}",
+      "!dist-desktop_*{,/**/*}",
+      "!dist-desktop-*{,/**/*}"
     ],
     "extraResources": [
       {
@@ -86,7 +97,21 @@
         "filter": [
           "**/*",
           "!node_modules",
-          "!node_modules/**/*"
+          "!node_modules/**/*",
+          "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+          "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+          "!**/node_modules/*.d.ts",
+          "!**/node_modules/.bin",
+          "!AIPhotos{,/**/*}",
+          "!ComfyUI{,/**/*}",
+          "!models{,/**/*}",
+          "!photos{,/**/*}",
+          "!*.safetensors",
+          "!*.ckpt",
+          "!dist-desktop{,/**/*}",
+          "!dist-desktop_*{,/**/*}",
+          "!dist-desktop-*{,/**/*}",
+          "!electron-shell{,/**/*}"
         ]
       },
       {
