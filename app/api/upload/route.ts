@@ -3,7 +3,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
-import { fetchWithTimeout, toFetchErrorMessage } from "@/lib/server/fetchWithTimeout";
 
 export const runtime = "nodejs";
 
@@ -85,44 +84,6 @@ function getBaseDirectory(photoshootType: string) {
   return /real estate|immobilien/i.test(photoshootType)
     ? [root, "To Send - Immobilien"].join("\\")
     : [root, "To Send"].join("\\");
-}
-
-/** Aligns 1:1 with the `services` / `products` JSON arrays; missing IDs become "". */
-function mapLexofficeIdsFromLineItems(items: unknown): string[] {
-  if (!Array.isArray(items)) return [];
-  return items.map((item) => {
-    if (!item || typeof item !== "object") return "";
-    const row = item as Record<string, unknown>;
-    const id = row.lexoffice_id;
-    if (typeof id === "string") return id;
-    if (id == null) return "";
-    return String(id);
-  });
-}
-
-function normalizeLineItems(items: unknown): Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }> {
-  if (!Array.isArray(items)) return [];
-  return items
-    .map((item) => {
-      if (!item || typeof item !== "object") return null;
-      const row = item as Record<string, unknown>;
-      const name = typeof row.name === "string" ? row.name.trim() : "";
-      if (!name) return null;
-      return {
-        name,
-        quantity: Number(row.quantity) || 1,
-        price: Number(row.price) || 0,
-        lexoffice_id: typeof row.lexoffice_id === "string" ? row.lexoffice_id : null,
-      };
-    })
-    .filter(
-      (item): item is { name: string; quantity: number; price: number; lexoffice_id: string | null } =>
-        Boolean(item)
-    );
-}
-
-function sumLineItems(items: Array<{ quantity: number; price: number }>): number {
-  return items.reduce((sum, item) => sum + item.quantity * item.price, 0);
 }
 
 function sanitizeFolderSegment(value: string): string {
@@ -292,152 +253,6 @@ export async function POST(request: Request) {
           localFolderName,
         },
         { status: 500 }
-      );
-    }
-
-    const servicesSource = dbServices !== undefined ? dbServices : taskData.services;
-    const productsSource = dbProducts !== undefined ? dbProducts : taskData.products;
-    const services = normalizeLineItems(servicesSource);
-    const products = normalizeLineItems(productsSource);
-    const servicePrices = services.map((item) => Number(item.price) || 0);
-    const productPrices = products.map((item) => Number(item.price) || 0);
-    const services_lexoffice_id =
-      dbServicesLexofficeIds.length > 0 ? dbServicesLexofficeIds : mapLexofficeIdsFromLineItems(services);
-    const products_lexoffice_id =
-      dbProductsLexofficeIds.length > 0 ? dbProductsLexofficeIds : mapLexofficeIdsFromLineItems(products);
-    const servicesSubtotal = sumLineItems(services);
-    const productsSubtotal = sumLineItems(products);
-    const subtotal = servicesSubtotal + productsSubtotal;
-    const discountValue = Number(dbDiscount || taskData.discount || 0);
-    const taxableTotal = Math.max(0, subtotal - discountValue);
-    const taxPercentage = Number(dbTaxPercentage || taskData.tax_percentage || 19);
-    const shootName = dbTitle || title || localFolderName;
-    const clientEmail =
-      dbEmail ||
-      (typeof taskData.email === "string" ? taskData.email.trim() : "") ||
-      "";
-    const clientNameFromContact = [dbContactFirstName, dbContactLastName]
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .join(" ")
-      .trim();
-    const clientName =
-      clientNameFromContact ||
-      dbCompanyName.trim() ||
-      [taskData.contact_first_name, taskData.contact_last_name]
-        .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
-        .join(" ")
-        .trim() ||
-      (typeof taskData.company_name === "string" ? taskData.company_name.trim() : "") ||
-      "Client";
-    const amountType =
-      dbAmountType || (typeof taskData.amount_type === "string" ? taskData.amount_type : "Net");
-    const invoiceTotal =
-      amountType === "Gross"
-        ? taxableTotal
-        : taxableTotal + taxableTotal * (Number.isFinite(taxPercentage) ? taxPercentage / 100 : 0);
-    const shootDate = dbPhotoshootDate || (typeof taskData.photoshoot_date === "string" ? taskData.photoshoot_date : "");
-    const dueDate = dbDueDate || (typeof taskData.due_date === "string" ? taskData.due_date : "");
-    const shootLocation =
-      dbShootLocation || (typeof taskData.shoot_location === "string" ? taskData.shoot_location : "");
-    const resolvedPhotoshootType =
-      dbPhotoshootType || (typeof taskData.photoshoot_type === "string" ? taskData.photoshoot_type : "");
-    const skipInvoiceFromPayload =
-      typeof taskData.skip_invoice === "boolean"
-        ? taskData.skip_invoice
-        : typeof taskData.skip_invoice === "string"
-          ? ["1", "true", "yes", "on"].includes(taskData.skip_invoice.trim().toLowerCase())
-          : typeof taskData.skip_invoice === "number"
-            ? taskData.skip_invoice !== 0
-            : false;
-    const skipInvoice = dbSkipInvoice || skipInvoiceFromPayload;
-
-    const zapierPayload = {
-      ...taskData,
-      id: taskId || taskData.id,
-      task_id: taskId || taskData.id || "",
-      shoot_name: shootName,
-      shoot_title: shootName,
-      shoot_date: shootDate,
-      shoot_location: shootLocation,
-      photoshoot_type: resolvedPhotoshootType,
-      due_date: dueDate || "",
-      local_folder_name: localFolderName,
-      bracket_size: dbBracketSize || Number(taskData.bracket_size ?? 3) || 3,
-      client_email: clientEmail,
-      client_name: clientName,
-      client: dbClient || clientName,
-      company_name:
-        dbCompanyName || (typeof taskData.company_name === "string" ? taskData.company_name : "") || "",
-      contact_first_name:
-        dbContactFirstName || (typeof taskData.contact_first_name === "string" ? taskData.contact_first_name : "") || "",
-      contact_last_name:
-        dbContactLastName || (typeof taskData.contact_last_name === "string" ? taskData.contact_last_name : "") || "",
-      email: clientEmail,
-      phone: dbPhone || (typeof taskData.phone === "string" ? taskData.phone : "") || "",
-      street: dbStreet || taskData.street || "",
-      zip_code: dbZipCode || taskData.zip_code || "",
-      city: dbCity || taskData.city || "",
-      country: dbCountry || (typeof taskData.country === "string" ? taskData.country : "") || "",
-      lexoffice_contact_id: dbLexofficeContactId || taskData.lexoffice_contact_id || "",
-      services,
-      products,
-      service_prices: servicePrices,
-      product_prices: productPrices,
-      services_lexoffice_id,
-      products_lexoffice_id,
-      services_count: services.length,
-      products_count: products.length,
-      invoice: {
-        subtotal_services: servicesSubtotal,
-        subtotal_products: productsSubtotal,
-        subtotal,
-        discount: discountValue,
-        taxable_total: taxableTotal,
-        tax_percentage: taxPercentage,
-        amount_type: amountType,
-        total: invoiceTotal,
-      },
-      tax_percentage: taxPercentage,
-      amount_type: amountType,
-      discount: discountValue,
-      total_price: invoiceTotal,
-      skip_invoice: skipInvoice,
-    };
-
-    console.log("ZAPIER PAYLOAD:", zapierPayload);
-    if (skipInvoice) {
-      return Response.json({
-        success: true,
-        folder: taskDirectory,
-        localFolder: localFinalDirectory,
-        files: files.map((file) => file.name),
-        skippedInvoice: true,
-      });
-    }
-    let webhookResponse: Response;
-    try {
-      webhookResponse = await fetchWithTimeout(
-        "https://hooks.zapier.com/hooks/catch/13609476/uv3pu5f/",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(zapierPayload),
-        },
-        10_000
-      );
-    } catch (error) {
-      return Response.json(
-        { error: toFetchErrorMessage(error, "Webhook request failed") },
-        { status: 502 }
-      );
-    }
-
-    if (!webhookResponse.ok) {
-      const webhookText = await webhookResponse.text();
-      return Response.json(
-        { error: `Webhook call failed: ${webhookResponse.status} ${webhookText}` },
-        { status: 502 }
       );
     }
 

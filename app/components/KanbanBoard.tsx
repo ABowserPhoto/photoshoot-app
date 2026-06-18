@@ -44,6 +44,7 @@ export type BoardTask = {
   zipCode: string;
   city: string;
   country: string;
+  addressSupplement: string;
   services: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
   products: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
   taxPercentage: number;
@@ -67,6 +68,8 @@ export type BoardTask = {
   /** Public Supabase Storage URL for Kanban card cover (set by local worker). */
   coverImageUrl: string | null;
   status: ColumnKey;
+  /** Raw Supabase `tasks.status` (e.g. pending_processing, Processing). */
+  workflowStatus: string;
   isArchived: boolean;
   completedAt: string | null;
   updatedAt: string | null;
@@ -115,6 +118,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     zipCode: "",
     city: "",
     country: "",
+    addressSupplement: "",
     services: [],
     products: [],
     taxPercentage: 19,
@@ -129,6 +133,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     totalEditingSeconds: 0,
     coverImageUrl: null,
     status: "booking",
+    workflowStatus: "Booking",
     isArchived: false,
     completedAt: null,
     updatedAt: null,
@@ -150,6 +155,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     zipCode: "",
     city: "",
     country: "",
+    addressSupplement: "",
     services: [],
     products: [],
     taxPercentage: 19,
@@ -164,6 +170,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     totalEditingSeconds: 0,
     coverImageUrl: null,
     status: "preview-sent",
+    workflowStatus: "Preview Sent",
     isArchived: false,
     completedAt: null,
     updatedAt: null,
@@ -184,6 +191,7 @@ type DbTask = {
   zip_code: string | null;
   city: string | null;
   country: string | null;
+  address_supplement: string | null;
   services: unknown;
   products: unknown;
   tax_percentage: number | null;
@@ -218,6 +226,128 @@ const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
   completed: "Completed",
 };
 
+const MERGE_PIPELINE_STATUSES = new Set([
+  "pending_processing",
+  "processing",
+  "syncing_selection",
+]);
+
+function isMergePipelineStatus(value: string | null | undefined): boolean {
+  const normalized = (value ?? "").trim().toLowerCase().replace(/\s+/g, "_");
+  return MERGE_PIPELINE_STATUSES.has(normalized);
+}
+
+function sumBoardLineItems(items: BoardTask["services"]): number {
+  return items.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.price) || 0), 0);
+}
+
+function buildShootDisplayName(task: BoardTask): string {
+  return (
+    task.taskTitle.trim() ||
+    [task.photoshootType, task.companyName, task.shootLocation].filter(Boolean).join(" - ") ||
+    task.localFolderName.trim() ||
+    "Photoshoot"
+  );
+}
+
+function buildContactPersonName(task: BoardTask): string {
+  return [task.contactFirstName, task.contactLastName]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function resolveCountryCode(country: string): string {
+  const trimmed = country.trim();
+  if (!trimmed) {
+    return "DE";
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower === "germany" || lower === "deutschland" || lower === "de") {
+    return "DE";
+  }
+  if (trimmed.length === 2) {
+    return trimmed.toUpperCase();
+  }
+  return "DE";
+}
+
+function calculateTaskInvoiceNetPrice(task: BoardTask): number {
+  const subtotal = sumBoardLineItems(task.services) + sumBoardLineItems(task.products);
+  return Math.max(0, subtotal - (Number(task.discount) || 0));
+}
+
+function buildTaskLineItems(task: BoardTask): Array<{
+  name: string;
+  quantity: number;
+  price: number;
+  taxRate: number;
+}> {
+  const taxRate = Number.isFinite(task.taxPercentage) ? task.taxPercentage : 19;
+  const items = [...task.services, ...task.products]
+    .map((item) => {
+      const name = item.name.trim();
+      if (!name) {
+        return null;
+      }
+      return {
+        name,
+        quantity: Number(item.quantity) || 1,
+        price: Number(item.price) || 0,
+        taxRate,
+      };
+    })
+    .filter((item): item is { name: string; quantity: number; price: number; taxRate: number } => Boolean(item));
+
+  if (task.discount > 0) {
+    items.push({
+      name: "Discount",
+      quantity: 1,
+      price: -Math.abs(Number(task.discount) || 0),
+      taxRate,
+    });
+  }
+
+  if (items.length > 0) {
+    return items;
+  }
+
+  return [
+    {
+      name: `Photoshoot: ${buildShootDisplayName(task)}`,
+      quantity: 1,
+      price: calculateTaskInvoiceNetPrice(task),
+      taxRate,
+    },
+  ];
+}
+
+function buildFinalizeShootPayload(task: BoardTask) {
+  const invoiceName = task.companyName.trim();
+  const contactPerson = buildContactPersonName(task);
+
+  return {
+    taskId: task.id,
+    shootName: buildShootDisplayName(task),
+    invoiceName,
+    clientName: contactPerson || invoiceName || "Client",
+    clientEmail: task.email.trim(),
+    photoshootType: task.photoshootType,
+    shootLocation: task.shootLocation.trim(),
+    ...(task.addressSupplement.trim() ? { addressSupplement: task.addressSupplement.trim() } : {}),
+    clientAddress: {
+      street: task.street.trim() || undefined,
+      zip: task.zipCode.trim() || undefined,
+      city: task.city.trim() || undefined,
+      country: task.country.trim() || undefined,
+      countryCode: resolveCountryCode(task.country),
+    },
+    lineItems: buildTaskLineItems(task),
+    taxRate: Number.isFinite(task.taxPercentage) ? task.taxPercentage : 19,
+    ...(task.lexofficeContactId.trim() ? { lexofficeContactId: task.lexofficeContactId.trim() } : {}),
+  };
+}
+
 function createEmptyBoard(): BoardState {
   return {
     "awaiting-folders": [],
@@ -241,7 +371,12 @@ function normalizeStatus(value: string | null): ColumnKey {
   if (normalized === "awaiting-folder-creation" || normalized === "awaiting_folder_creation") {
     return "awaiting-folders";
   }
-  if (normalized === "invoice" || normalized === "email-sent" || normalized === "send-email") {
+  if (
+    normalized === "invoice" ||
+    normalized === "email-sent" ||
+    normalized === "send-email" ||
+    normalized === "invoice-sent"
+  ) {
     return "send-email";
   }
   if (normalized === "processing") {
@@ -490,6 +625,10 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
     zipCode: typeof row.zip_code === "string" ? row.zip_code : (existing?.zipCode ?? ""),
     city: typeof row.city === "string" ? row.city : (existing?.city ?? ""),
     country: typeof row.country === "string" ? row.country : (existing?.country ?? ""),
+    addressSupplement:
+      typeof row.address_supplement === "string"
+        ? row.address_supplement
+        : (existing?.addressSupplement ?? ""),
     services: safeLineItems(row.services ?? existing?.services),
     products: safeLineItems(row.products ?? existing?.products),
     taxPercentage: Number(row.tax_percentage ?? existing?.taxPercentage ?? 19),
@@ -527,6 +666,7 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
     totalEditingSeconds: Number(row.total_editing_seconds ?? existing?.totalEditingSeconds ?? 0),
     coverImageUrl,
     status: normalizeStatus(statusValue),
+    workflowStatus: statusValue.trim() || (existing?.workflowStatus ?? ""),
     isArchived: typeof row.is_archived === "boolean" ? row.is_archived : (existing?.isArchived ?? false),
     completedAt:
       typeof row.completed_at === "string"
@@ -575,6 +715,10 @@ export default function KanbanBoard({
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [previewRegenToast, setPreviewRegenToast] = useState<string | null>(null);
   const [mergeNowToast, setMergeNowToast] = useState<string | null>(null);
+  const [workflowToast, setWorkflowToast] = useState<{
+    message: string;
+    variant: "loading" | "success" | "error";
+  } | null>(null);
   const { isAdmin, isLoading: authRoleLoading } = useAuthRole();
   const boardRef = useRef(board);
   const archivedTasksRef = useRef(archivedTasks);
@@ -623,6 +767,18 @@ export default function KanbanBoard({
   }, [mergeNowToast]);
 
   useEffect(() => {
+    if (!workflowToast || workflowToast.variant === "loading") {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setWorkflowToast(null);
+    }, 5000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [workflowToast]);
+
+  useEffect(() => {
     if (mergingTaskIds.size === 0) {
       return;
     }
@@ -643,9 +799,12 @@ export default function KanbanBoard({
       let changed = false;
       for (const taskId of prev) {
         let column: ColumnKey | null = null;
+        let task: BoardTask | null = null;
         for (const config of COLUMN_CONFIG) {
-          if (board[config.id].some((row) => row.id === taskId)) {
+          const match = board[config.id].find((row) => row.id === taskId);
+          if (match) {
             column = config.id;
+            task = match;
             break;
           }
         }
@@ -654,6 +813,12 @@ export default function KanbanBoard({
           mergePrevColumnRef.current.set(taskId, column);
         }
         if (!column || column === "ready-for-review" || column === "completed") {
+          next.delete(taskId);
+          mergePrevColumnRef.current.delete(taskId);
+          changed = true;
+          continue;
+        }
+        if (task && !isMergePipelineStatus(task.workflowStatus)) {
           next.delete(taskId);
           mergePrevColumnRef.current.delete(taskId);
           changed = true;
@@ -1125,6 +1290,96 @@ export default function KanbanBoard({
       return;
     }
 
+    if (targetColumn === "send-email" && !dragged.task.skipInvoice) {
+      if (!dragged.task.email.trim()) {
+        setBoard(previousBoard);
+        setWorkflowToast({
+          message: "Cannot generate invoice: client email is missing on this task.",
+          variant: "error",
+        });
+        return;
+      }
+
+      setWorkflowToast({
+        message: "Generating Invoice & Folders...",
+        variant: "loading",
+      });
+
+      try {
+        const response = await fetch("/api/workflows/finalize-shoot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildFinalizeShootPayload(dragged.task)),
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | {
+              error?: unknown;
+              step?: string;
+              success?: boolean;
+            }
+          | null;
+
+        if (!response.ok || !payload?.success) {
+          const detail = toErrorString(payload?.error, `Finalize shoot failed (${response.status}).`);
+          const step = typeof payload?.step === "string" ? payload.step : "";
+          throw new Error(step ? `${detail} (step: ${step})` : detail);
+        }
+
+        const finalizedTask: BoardTask = {
+          ...movedTask,
+          workflowStatus: "Invoice Sent",
+          updatedAt: new Date().toISOString(),
+        };
+
+        setBoard((prev) =>
+          sanitizeBoardState({
+            ...prev,
+            "send-email": sortTasksByShootDateAsc(
+              dedupeTasksById([
+                ...prev["send-email"].filter((task) => task.id !== finalizedTask.id),
+                finalizedTask,
+              ])
+            ),
+          })
+        );
+
+        setWorkflowToast({
+          message: "Invoice created & draft saved!",
+          variant: "success",
+        });
+        setStatusMessage(null);
+
+        const editorUpdate = await updateTaskStatus(dragged.task.id, "Invoice Sent", {
+          editing_started_at: nextEditingStartedAt,
+          total_editing_seconds: nextTotalEditingSeconds,
+        });
+        if (!editorUpdate.ok) {
+          console.warn("[KanbanBoard] editor_id update after finalize-shoot:", editorUpdate.error);
+        }
+
+        void syncKanbanPhotoshootStatus({
+          photoshootId: dragged.task.id,
+          newStatusLabel: "Invoice Sent",
+          photoshootDisplayName: buildShootDisplayName(dragged.task),
+        }).then((res) => {
+          if (!res.ok) {
+            console.warn("[KanbanBoard] agency sync:", res.error);
+          }
+        });
+
+        onTaskMoved?.(finalizedTask, sourceColumn, targetColumn);
+        return;
+      } catch (error) {
+        setBoard(previousBoard);
+        setWorkflowToast({
+          message: toErrorString(error, "Invoice workflow failed."),
+          variant: "error",
+        });
+        setStatusMessage(null);
+        return;
+      }
+    }
+
     const statusLabel = COLUMN_LABEL_BY_KEY[targetColumn];
     const updateRes = await updateTaskStatus(dragged.task.id, statusLabel, {
       editing_started_at: nextEditingStartedAt,
@@ -1390,6 +1645,25 @@ export default function KanbanBoard({
         >
           <p className="rounded-xl border border-amber-400/50 bg-amber-100/95 px-5 py-3 text-center text-sm font-semibold text-amber-900 shadow-2xl dark:border-amber-500/40 dark:bg-amber-950/95 dark:text-amber-100">
             {mergeNowToast}
+          </p>
+        </div>
+      ) : null}
+      {workflowToast ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed left-1/2 top-6 z-[100] w-full max-w-md -translate-x-1/2 px-4"
+        >
+          <p
+            className={`rounded-xl px-5 py-3 text-center text-sm font-semibold shadow-2xl ${
+              workflowToast.variant === "loading"
+                ? "border border-violet-400/50 bg-violet-100/95 text-violet-900 dark:border-violet-500/40 dark:bg-violet-950/95 dark:text-violet-100"
+                : workflowToast.variant === "success"
+                  ? "border border-emerald-400/50 bg-emerald-100/95 text-emerald-900 dark:border-emerald-500/40 dark:bg-emerald-950/95 dark:text-emerald-100"
+                  : "border border-red-400/50 bg-red-100/95 text-red-900 dark:border-red-500/40 dark:bg-red-950/95 dark:text-red-100"
+            }`}
+          >
+            {workflowToast.message}
           </p>
         </div>
       ) : null}

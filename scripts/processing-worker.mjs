@@ -124,6 +124,19 @@ let lastSelectsTriggerAtMs = null;
 let processingPipelineInFlight = false;
 let activeMergeTaskId = null;
 let activeMergeLocalFolder = null;
+let activeMergePhase = null;
+
+function setActiveMergeContext(taskId, localFolderName, phase) {
+  activeMergeTaskId = taskId;
+  activeMergeLocalFolder = localFolderName;
+  activeMergePhase = phase;
+}
+
+function clearActiveMergeContext() {
+  activeMergeTaskId = null;
+  activeMergeLocalFolder = null;
+  activeMergePhase = null;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1034,7 +1047,7 @@ function isMergePipelineBusy() {
 async function runProcessingPipeline(supabase, { reason = "poll" } = {}) {
   if (processingPipelineInFlight) {
     console.info(
-      `[worker] Skipping processing pipeline (${reason}): active merge in progress for task ${activeMergeTaskId ?? "unknown"} (${activeMergeLocalFolder ?? "unknown folder"}).`
+      `[worker] Skipping processing pipeline (${reason}): active merge in progress for task ${activeMergeTaskId ?? "unknown"} (${activeMergeLocalFolder ?? "unknown folder"}, phase=${activeMergePhase ?? "unknown"}).`
     );
     return false;
   }
@@ -1052,8 +1065,7 @@ async function runProcessingPipeline(supabase, { reason = "poll" } = {}) {
     return false;
   } finally {
     processingPipelineInFlight = false;
-    activeMergeTaskId = null;
-    activeMergeLocalFolder = null;
+    clearActiveMergeContext();
   }
 }
 
@@ -1129,7 +1141,7 @@ function startWorkerHeartbeat() {
       ? new Date(lastSelectsTriggerAtMs).toISOString()
       : "never";
     const activeMerge = processingPipelineInFlight
-      ? `task=${activeMergeTaskId ?? "unknown"} folder=${activeMergeLocalFolder ?? "unknown"}`
+      ? `task=${activeMergeTaskId ?? "unknown"} folder=${activeMergeLocalFolder ?? "unknown"} phase=${activeMergePhase ?? "unknown"}`
       : "idle";
     console.info(
       `[Heartbeat] Watcher armed | Debounce queue: ${queueSize} | Last trigger: ${lastTrigger} | Merge pipeline: ${activeMerge}`
@@ -1550,8 +1562,7 @@ async function processPendingProcessing(supabase) {
       }
 
       console.info(`[worker] Processing task ${taskId}...`);
-      activeMergeTaskId = taskId;
-      activeMergeLocalFolder = localFolderName;
+      setActiveMergeContext(taskId, localFolderName, "merge");
       const processingResult = await processTaskLocally({ id: taskId, local_folder_name: localFolderName });
       console.info(
         `[worker] Local Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}, processed=${processingResult.processedItems}/${processingResult.totalItems}, failedItems=${processingResult.failedItems}`
@@ -1633,6 +1644,67 @@ async function processPendingProcessing(supabase) {
       }
       // Continue processing the remaining queue items even when one item fails.
       continue;
+    } finally {
+      if (activeMergeTaskId === taskId) {
+        clearActiveMergeContext();
+      }
+    }
+  }
+}
+
+async function recoverOrphanedWorkerTasksOnStartup(supabase) {
+  const { data: processingTasks, error: processingError } = await supabase
+    .from("tasks")
+    .select("id, local_folder_name")
+    .eq("status", ACTIVE_STATUS)
+    .order("id", { ascending: true })
+    .limit(50);
+
+  if (processingError) {
+    console.warn(`[worker] Orphaned ${ACTIVE_STATUS} recovery query failed: ${processingError.message}`);
+  } else {
+    for (const task of processingTasks ?? []) {
+      const taskId = String(task.id);
+      const localFolderName = String(task.local_folder_name ?? "").trim();
+      const { error } = await supabase.from("tasks").update({ status: CLAIM_STATUS }).eq("id", taskId);
+      if (error) {
+        console.error(`[worker] Could not recover orphaned ${ACTIVE_STATUS} task ${taskId}:`, error.message);
+        continue;
+      }
+      console.warn(
+        `[worker] Recovered orphaned ${ACTIVE_STATUS} task ${taskId}${localFolderName ? ` (${localFolderName})` : ""} -> ${CLAIM_STATUS}.`
+      );
+    }
+  }
+
+  const { data: syncingTasks, error: syncingError } = await supabase
+    .from("tasks")
+    .select("id, local_folder_name, gallery_selection")
+    .eq("status", SELECTION_SYNCING_STATUS)
+    .order("id", { ascending: true })
+    .limit(50);
+
+  if (syncingError) {
+    console.warn(`[worker] Orphaned ${SELECTION_SYNCING_STATUS} recovery query failed: ${syncingError.message}`);
+  } else {
+    for (const task of syncingTasks ?? []) {
+      const taskId = String(task.id);
+      const localFolderName = String(task.local_folder_name ?? "").trim();
+      const { selectedChunkIndices } = parseSelectionPayload(task.gallery_selection);
+      if (selectedChunkIndices.length === 0) {
+        continue;
+      }
+      const { error } = await supabase
+        .from("tasks")
+        .update({ status: SELECTION_AVAILABLE_STATUS })
+        .eq("id", taskId);
+      if (error) {
+        console.error(`[worker] Could not recover orphaned ${SELECTION_SYNCING_STATUS} task ${taskId}:`, error.message);
+        continue;
+      }
+      console.warn(
+        `[worker] Recovered orphaned ${SELECTION_SYNCING_STATUS} task ${taskId}${localFolderName ? ` (${localFolderName})` : ""} -> ${SELECTION_AVAILABLE_STATUS}.`
+      );
     }
   }
 }
@@ -1704,18 +1776,20 @@ async function processSelectionAvailable(supabase) {
       continue;
     }
 
-    try {
-      const claimed = await claimTaskForStatus(
-        supabase,
-        taskId,
-        SELECTION_AVAILABLE_STATUS,
-        SELECTION_SYNCING_STATUS
-      );
-      if (!claimed) {
-        console.info(`[worker] Task ${taskId} selection sync already claimed by another worker.`);
-        continue;
-      }
+    const claimed = await claimTaskForStatus(
+      supabase,
+      taskId,
+      SELECTION_AVAILABLE_STATUS,
+      SELECTION_SYNCING_STATUS
+    );
+    if (!claimed) {
+      console.info(`[worker] Task ${taskId} selection sync already claimed by another worker.`);
+      continue;
+    }
 
+    setActiveMergeContext(taskId, localFolderName, "selection-sync");
+
+    try {
       const syncResult = await syncSelectedRawFilesToSelects(localFolderName, task.gallery_selection);
       await withRetry(`set pending_processing after selection sync for task ${taskId}`, async () => {
         const { error: updateError } = await supabase
@@ -1748,6 +1822,10 @@ async function processSelectionAvailable(supabase) {
           `[worker] Could not update task status after selection sync failure for ${taskId}:`,
           statusErr instanceof Error ? statusErr.message : statusErr
         );
+      }
+    } finally {
+      if (activeMergeTaskId === taskId) {
+        clearActiveMergeContext();
       }
     }
   }
@@ -1792,7 +1870,15 @@ async function main() {
     });
   }, FOLDER_POLL_INTERVAL_MS);
 
-  await runProcessingPipeline(getSupabaseClient(), { reason: "startup" }).catch((err) => {
+  const supabase = getSupabaseClient();
+  await recoverOrphanedWorkerTasksOnStartup(supabase).catch((err) => {
+    console.error(
+      "[worker] Orphaned worker task recovery failed:",
+      err instanceof Error ? err.message : err
+    );
+  });
+
+  await runProcessingPipeline(supabase, { reason: "startup" }).catch((err) => {
     console.error("[worker] Initial processing run failed:", err instanceof Error ? err.message : err);
   });
 

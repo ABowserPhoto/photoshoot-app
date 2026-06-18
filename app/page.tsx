@@ -28,6 +28,20 @@ type PhotoshootType =
 type ItemType = "Service" | "Product";
 type PreviewPreference = "first" | "middle" | "last";
 
+function splitContactPerson(fullName: string): { firstName: string; lastName: string } {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) {
+    return { firstName: "", lastName: "" };
+  }
+  if (parts.length === 1) {
+    return { firstName: "", lastName: parts[0] };
+  }
+  return {
+    firstName: parts.slice(0, -1).join(" "),
+    lastName: parts[parts.length - 1],
+  };
+}
+
 type LineItem = {
   name: string;
   quantity: number;
@@ -90,6 +104,7 @@ type TaskSupabasePayload = {
   city: string;
   lexoffice_contact_id: string | null;
   country: string;
+  address_supplement: string;
   email: string;
   phone: string;
   services: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
@@ -242,11 +257,11 @@ function HomeContent() {
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const [companyName, setCompanyName] = useState("");
-  const [contactFirstName, setContactFirstName] = useState("");
-  const [contactLastName, setContactLastName] = useState("");
+  const [contactPerson, setContactPerson] = useState("");
   const [street, setStreet] = useState("");
   const [zipCode, setZipCode] = useState("");
   const [city, setCity] = useState("");
+  const [addressSupplement, setAddressSupplement] = useState("");
   const [lexofficeContactId, setLexofficeContactId] = useState("");
   const [country, setCountry] = useState("");
   const [email, setEmail] = useState("");
@@ -508,11 +523,11 @@ function HomeContent() {
     setSaveAsNewClient(false);
     setSaveToClientAddressBook(false);
     setCompanyName("");
-    setContactFirstName("");
-    setContactLastName("");
+    setContactPerson("");
     setStreet("");
     setZipCode("");
     setCity("");
+    setAddressSupplement("");
     setLexofficeContactId("");
     setCountry("");
     setEmail("");
@@ -569,11 +584,13 @@ function HomeContent() {
     setFormError(null);
     setSaveAsNewClient(false);
     setCompanyName(task.companyName);
-    setContactFirstName(task.contactFirstName);
-    setContactLastName(task.contactLastName);
+    setContactPerson(
+      [task.contactFirstName, task.contactLastName].filter(Boolean).join(" ").trim()
+    );
     setStreet(task.street);
     setZipCode(task.zipCode);
     setCity(task.city);
+    setAddressSupplement(task.addressSupplement ?? "");
     setLexofficeContactId(task.lexofficeContactId ?? "");
     setCountry(task.country);
     setEmail(task.email);
@@ -726,10 +743,12 @@ function HomeContent() {
       return;
     }
 
-    if (isAdmin && (!contactFirstName.trim() || !contactLastName.trim())) {
-      setFormError("Contact first name and last name are required.");
+    if (isAdmin && !companyName.trim()) {
+      setFormError("Invoice Name / Billing Entity is required.");
       return;
     }
+
+    const { firstName: contactFirstName, lastName: contactLastName } = splitContactPerson(contactPerson);
 
     setIsSubmitting(true);
 
@@ -742,7 +761,7 @@ function HomeContent() {
         due_date: dueDate || null,
         title:
           preservedTaskTitle.trim() ||
-          `${photoshootType} - ${companyName.trim() || [contactFirstName, contactLastName].filter(Boolean).join(" ").trim() || "Client"} - ${shootLocation}`,
+          `${photoshootType} - ${companyName.trim() || contactPerson.trim() || "Client"} - ${shootLocation}`,
         status: {
           "awaiting-folders": "awaiting_folder_creation",
           booking: "Booking",
@@ -792,10 +811,7 @@ function HomeContent() {
       }));
     const servicesLexofficeIds = selectedServices.map((service) => service.lexoffice_id ?? "");
     const productsLexofficeIds = selectedProducts.map((product) => product.lexoffice_id ?? "");
-    const displayClientLabel =
-      companyName.trim() ||
-      [contactFirstName, contactLastName].filter(Boolean).join(" ").trim() ||
-      "Client";
+    const displayClientLabel = companyName.trim() || contactPerson.trim() || "Client";
     const generatedTitle = `${photoshootType} - ${displayClientLabel} - ${shootLocation}`;
 
     if (isAdmin && saveAsNewClient && !editingTaskId) {
@@ -823,6 +839,7 @@ function HomeContent() {
       city,
       lexoffice_contact_id: lexofficeContactId || null,
       country,
+      address_supplement: addressSupplement,
       email,
       phone,
       services: selectedServices,
@@ -1098,34 +1115,13 @@ function HomeContent() {
                 {openSections.client ? (
                   <div className="space-y-4 bg-white px-4 py-4 dark:bg-zinc-900">
                     <div className="grid gap-4 sm:grid-cols-2">
-                      <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Contact First Name
-                        <input
-                          required
-                          value={contactFirstName}
-                          onChange={(event) => setContactFirstName(event.target.value)}
-                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                        />
-                      </label>
-                      <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Contact Last Name
-                        <input
-                          required
-                          value={contactLastName}
-                          onChange={(event) => setContactLastName(event.target.value)}
-                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                        />
-                      </label>
                       <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Client/Business Name <span className="font-normal text-zinc-500">(optional)</span>
-                        <CreatableSelect<ClientNameOption, false>
-                          isClearable
-                          options={clientNameOptions}
-                          value={selectedClientNameOption}
-                          onChange={handleClientNameChange}
-                          placeholder="Search or create a client"
-                          formatCreateLabel={(inputValue) => `Create "${inputValue}"`}
-                          classNames={clientNameSelectClassNames}
+                        Contact Person <span className="font-normal text-zinc-500">(optional)</span>
+                        <input
+                          value={contactPerson}
+                          onChange={(event) => setContactPerson(event.target.value)}
+                          placeholder="e.g. Alex Jordan"
+                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
                       <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
@@ -1183,11 +1179,32 @@ function HomeContent() {
                 {openSections.invoice ? (
                   <div className="space-y-4 bg-white px-4 py-4 dark:bg-zinc-900">
                     <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Invoice Name / Billing Entity
+                        <CreatableSelect<ClientNameOption, false>
+                          isClearable
+                          options={clientNameOptions}
+                          value={selectedClientNameOption}
+                          onChange={handleClientNameChange}
+                          placeholder="Who should be billed on the invoice?"
+                          formatCreateLabel={(inputValue) => `Create "${inputValue}"`}
+                          classNames={clientNameSelectClassNames}
+                        />
+                      </label>
                       <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
                         Street
                         <input
                           value={street}
                           onChange={(event) => setStreet(event.target.value)}
+                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        />
+                      </label>
+                      <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Addresszusatz <span className="font-normal text-zinc-500">(optional)</span>
+                        <input
+                          value={addressSupplement}
+                          onChange={(event) => setAddressSupplement(event.target.value)}
+                          placeholder="z. B. Gebäude, Etage, c/o"
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
@@ -1229,7 +1246,7 @@ function HomeContent() {
                           checked={skipInvoice}
                           onChange={(event) => setSkipInvoice(event.target.checked)}
                         />
-                        No Invoice (skip Zapier/Lexoffice invoice trigger)
+                        No Invoice (skip Lexoffice invoice workflow)
                       </label>
                     </div>
                     <div className="space-y-3">

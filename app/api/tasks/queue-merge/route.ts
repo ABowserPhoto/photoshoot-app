@@ -129,7 +129,13 @@ export async function POST(request: Request) {
   };
 
   let nextStatus = status;
-  if (status === "Selection Available" && hasSelects) {
+  if (status === "Processing") {
+    updates.status = "pending_processing";
+    nextStatus = "pending_processing";
+  } else if (status === "syncing_selection") {
+    updates.status = hasSelects ? "pending_processing" : "Selection Available";
+    nextStatus = updates.status as string;
+  } else if (status === "Selection Available" && hasSelects) {
     updates.status = "pending_processing";
     nextStatus = "pending_processing";
   } else if (status === "Selection Available") {

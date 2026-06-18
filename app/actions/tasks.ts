@@ -6,7 +6,7 @@ import { cookies } from "next/headers";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
 
-const KANBAN_COMPLETION_STATUSES = new Set(["edited", "send email", "completed"]);
+const KANBAN_COMPLETION_STATUSES = new Set(["edited", "send email", "invoice sent", "completed"]);
 
 function serviceSupabase() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
