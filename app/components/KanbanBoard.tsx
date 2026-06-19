@@ -344,6 +344,7 @@ function buildFinalizeShootPayload(task: BoardTask) {
     },
     lineItems: buildTaskLineItems(task),
     taxRate: Number.isFinite(task.taxPercentage) ? task.taxPercentage : 19,
+    skipInvoice: task.skipInvoice,
     ...(task.lexofficeContactId.trim() ? { lexofficeContactId: task.lexofficeContactId.trim() } : {}),
   };
 }
@@ -1290,18 +1291,20 @@ export default function KanbanBoard({
       return;
     }
 
-    if (targetColumn === "send-email" && !dragged.task.skipInvoice) {
+    if (targetColumn === "send-email") {
       if (!dragged.task.email.trim()) {
         setBoard(previousBoard);
         setWorkflowToast({
-          message: "Cannot generate invoice: client email is missing on this task.",
+          message: "Cannot create email draft: client email is missing on this task.",
           variant: "error",
         });
         return;
       }
 
       setWorkflowToast({
-        message: "Generating Invoice & Folders...",
+        message: dragged.task.skipInvoice
+          ? "Creating Drive folder & email draft..."
+          : "Generating Invoice & Folders...",
         variant: "loading",
       });
 
@@ -1316,6 +1319,8 @@ export default function KanbanBoard({
               error?: unknown;
               step?: string;
               success?: boolean;
+              skippedInvoice?: boolean;
+              status?: string;
             }
           | null;
 
@@ -1325,9 +1330,16 @@ export default function KanbanBoard({
           throw new Error(step ? `${detail} (step: ${step})` : detail);
         }
 
+        const workflowStatus =
+          typeof payload.status === "string" && payload.status.trim()
+            ? payload.status.trim()
+            : payload.skippedInvoice
+              ? "Send Email"
+              : "Invoice Sent";
+
         const finalizedTask: BoardTask = {
           ...movedTask,
-          workflowStatus: "Invoice Sent",
+          workflowStatus,
           updatedAt: new Date().toISOString(),
         };
 
@@ -1344,12 +1356,14 @@ export default function KanbanBoard({
         );
 
         setWorkflowToast({
-          message: "Invoice created & draft saved!",
+          message: payload.skippedInvoice
+            ? "Drive folder created & draft saved (no invoice)."
+            : "Invoice created & draft saved!",
           variant: "success",
         });
         setStatusMessage(null);
 
-        const editorUpdate = await updateTaskStatus(dragged.task.id, "Invoice Sent", {
+        const editorUpdate = await updateTaskStatus(dragged.task.id, workflowStatus, {
           editing_started_at: nextEditingStartedAt,
           total_editing_seconds: nextTotalEditingSeconds,
         });
@@ -1359,7 +1373,7 @@ export default function KanbanBoard({
 
         void syncKanbanPhotoshootStatus({
           photoshootId: dragged.task.id,
-          newStatusLabel: "Invoice Sent",
+          newStatusLabel: workflowStatus,
           photoshootDisplayName: buildShootDisplayName(dragged.task),
         }).then((res) => {
           if (!res.ok) {

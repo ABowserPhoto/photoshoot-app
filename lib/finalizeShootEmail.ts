@@ -28,8 +28,13 @@ export function buildFinalizeShootEmailSubject(input: {
 
 export function buildFinalizeShootEmailHtml(input: {
   googleDriveLink: string;
+  includeInvoiceNote?: boolean;
 }): string {
   const driveLink = escapeHtml(input.googleDriveLink.trim());
+  const bodyText =
+    input.includeInvoiceNote === false
+      ? "Ich habe gute Nachrichten! Deine Fotos kannst du hier herunterladen."
+      : "Ich habe gute Nachrichten! Deine Fotos kannst du hier herunterladen, und deine Rechnung ist dieser E-Mail beigefügt.";
 
   return `<html>
 <head></head>
@@ -63,7 +68,7 @@ export function buildFinalizeShootEmailHtml(input: {
                         <tr>
                           <td align="center" style="padding:18px 40px 0px;">
                             <div style="font-family:arial,sans-serif;font-size:15px;line-height:1.4;color:rgb(95,99,104)">
-                              Ich habe gute Nachrichten! Deine Fotos kannst du hier herunterladen, und deine Rechnung ist dieser E-Mail beigefügt.
+                              ${bodyText}
                             </div>
                           </td>
                         </tr>
@@ -117,11 +122,17 @@ export function buildFinalizeShootEmailHtml(input: {
 
 export function buildFinalizeShootEmailPlainText(input: {
   googleDriveLink: string;
+  includeInvoiceNote?: boolean;
 }): string {
+  const bodyText =
+    input.includeInvoiceNote === false
+      ? "Ich habe gute Nachrichten! Deine Fotos kannst du hier herunterladen."
+      : "Ich habe gute Nachrichten! Deine Fotos kannst du hier herunterladen, und deine Rechnung ist dieser E-Mail beigefügt.";
+
   const lines = [
     "Ihre Fotos sind da!",
     "",
-    "Ich habe gute Nachrichten! Deine Fotos kannst du hier herunterladen, und deine Rechnung ist dieser E-Mail beigefügt.",
+    bodyText,
     "",
     `Download Fotos: ${input.googleDriveLink}`,
     "",

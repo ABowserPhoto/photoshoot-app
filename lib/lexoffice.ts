@@ -1,5 +1,12 @@
 const LEXOFFICE_API_BASE_URL = "https://api.lexoffice.io/v1";
 const DEFAULT_LEXOFFICE_APP_BASE_URL = "https://app.lexware.de";
+const LEXOFFICE_API_DELAY_MS = 600;
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function afterLexofficeApiCall(): Promise<void> {
+  await delay(LEXOFFICE_API_DELAY_MS);
+}
 
 export interface LexofficeClientDetails {
   /** Exact billing name printed on the invoice address block. */
@@ -226,6 +233,7 @@ export async function findLexofficeContactByEmail(email: string): Promise<string
   const payload = (await response.json()) as LexofficeContactListResponse;
   const firstMatch = Array.isArray(payload.content) ? payload.content[0] : undefined;
   const id = typeof firstMatch?.id === "string" ? firstMatch.id.trim() : "";
+  await afterLexofficeApiCall();
   return id || null;
 }
 
@@ -233,11 +241,6 @@ export async function createLexofficeContact(data: CreateLexofficeContactData): 
   const email = data.email.trim();
   if (!email) {
     throw new Error("Contact email is required.");
-  }
-
-  const existingId = await findLexofficeContactByEmail(email);
-  if (existingId) {
-    return existingId;
   }
 
   const invoiceName = data.invoiceName?.trim();
@@ -311,6 +314,7 @@ export async function createLexofficeContact(data: CreateLexofficeContactData): 
     throw new Error("Lexoffice contact creation succeeded but no contact id was returned.");
   }
 
+  await afterLexofficeApiCall();
   return id;
 }
 
@@ -457,6 +461,7 @@ async function fetchInvoiceDocumentFileId(apiKey: string, invoiceId: string): Pr
 
   const payload = (await response.json()) as LexofficeDocumentResponse;
   const documentFileId = typeof payload.documentFileId === "string" ? payload.documentFileId.trim() : "";
+  await afterLexofficeApiCall();
   return documentFileId || null;
 }
 
@@ -489,6 +494,8 @@ export async function createLexofficeInvoice(
   if (!id) {
     throw new Error("Lexoffice invoice creation succeeded but no invoice id was returned.");
   }
+
+  await afterLexofficeApiCall();
 
   const resourceUri =
     typeof created.resourceUri === "string" && created.resourceUri.trim() ? created.resourceUri.trim() : null;
@@ -539,5 +546,6 @@ export async function getLexofficePdfBuffer(documentFileId: string): Promise<Buf
     throw new Error("Lexoffice PDF download returned an empty file.");
   }
 
+  await afterLexofficeApiCall();
   return buffer;
 }

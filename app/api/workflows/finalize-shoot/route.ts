@@ -16,6 +16,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const INVOICE_SENT_STATUS = "Invoice Sent";
+const SEND_EMAIL_STATUS = "Send Email";
 const DEFAULT_TAX_RATE = 19;
 
 type ClientAddressInput =
@@ -35,6 +36,16 @@ type FinalizeShootLineItemInput = {
   taxRate?: number;
 };
 
+function parseSkipInvoice(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+  }
+  return false;
+}
+
 type FinalizeShootBody = {
   taskId?: string;
   shootName?: string;
@@ -48,6 +59,7 @@ type FinalizeShootBody = {
   lineItems?: FinalizeShootLineItemInput[];
   taxRate?: number;
   lexofficeContactId?: string;
+  skipInvoice?: boolean | string | number | null;
 };
 
 function getSupabaseAdmin() {
@@ -148,6 +160,7 @@ function parseRequestBody(body: FinalizeShootBody) {
   const taxRate = Number.isFinite(Number(body.taxRate)) ? Number(body.taxRate) : DEFAULT_TAX_RATE;
   const lexofficeContactId =
     typeof body.lexofficeContactId === "string" ? body.lexofficeContactId.trim() : "";
+  const skipInvoice = parseSkipInvoice(body.skipInvoice);
 
   if (!taskId) {
     throw new Error("taskId is required.");
@@ -155,7 +168,7 @@ function parseRequestBody(body: FinalizeShootBody) {
   if (!shootName) {
     throw new Error("shootName is required.");
   }
-  if (!invoiceName) {
+  if (!skipInvoice && !invoiceName) {
     throw new Error("invoiceName is required.");
   }
   if (!clientEmail) {
@@ -175,6 +188,7 @@ function parseRequestBody(body: FinalizeShootBody) {
     lineItems: parseLineItems(body.lineItems, taxRate, shootName),
     taxRate,
     lexofficeContactId,
+    skipInvoice,
   };
 }
 
@@ -211,37 +225,51 @@ export async function POST(request: Request) {
 
   try {
     currentStep = "google-drive-create-folder";
-    console.info(`[finalize-shoot] Step 1/5: Creating Drive folder for task ${input.taskId}`);
+    console.info(`[finalize-shoot] Step 1: Creating Drive folder for task ${input.taskId}`);
     const driveFolder = await createDriveFolder(input.shootName, parentFolderId);
     const googleDriveLink = driveFolder.webViewLink ?? `https://drive.google.com/drive/folders/${driveFolder.id}`;
 
-    currentStep = "lexoffice-create-invoice";
-    console.info(`[finalize-shoot] Step 2/5: Creating Lexoffice invoice for task ${input.taskId}`);
-    const invoice = await createLexofficeInvoice({
-      client: {
-        invoiceName: input.invoiceName,
-        email: input.clientEmail,
-        contactPersonName: input.clientName || undefined,
-        addressSupplement: input.addressSupplement || undefined,
-        ...input.clientAddress,
-        ...(input.lexofficeContactId ? { contactId: input.lexofficeContactId } : {}),
-      },
-      lineItems: input.lineItems,
-      taxType: "net",
-      finalize: true,
-      introduction: `Rechnung für ${input.shootName}`,
-    });
+    let pdfBuffer: Buffer | undefined;
+    let invoice:
+      | {
+          id: string;
+          documentFileId: string | null;
+          resourceUri: string | null;
+          invoiceViewUrl: string;
+        }
+      | undefined;
 
-    if (!invoice.documentFileId) {
-      throw new Error("Lexoffice invoice was created but no documentFileId was returned.");
+    if (!input.skipInvoice) {
+      currentStep = "lexoffice-create-invoice";
+      console.info(`[finalize-shoot] Step 2: Creating Lexoffice invoice for task ${input.taskId}`);
+      invoice = await createLexofficeInvoice({
+        client: {
+          invoiceName: input.invoiceName,
+          email: input.clientEmail,
+          contactPersonName: input.clientName || undefined,
+          addressSupplement: input.addressSupplement || undefined,
+          ...input.clientAddress,
+          ...(input.lexofficeContactId ? { contactId: input.lexofficeContactId } : {}),
+        },
+        lineItems: input.lineItems,
+        taxType: "net",
+        finalize: true,
+        introduction: `Rechnung für ${input.shootName}`,
+      });
+
+      if (!invoice.documentFileId) {
+        throw new Error("Lexoffice invoice was created but no documentFileId was returned.");
+      }
+
+      currentStep = "lexoffice-download-pdf";
+      console.info(`[finalize-shoot] Step 3: Downloading Lexoffice PDF for task ${input.taskId}`);
+      pdfBuffer = await getLexofficePdfBuffer(invoice.documentFileId);
+    } else {
+      console.info(`[finalize-shoot] Skipping Lexoffice steps for task ${input.taskId} (skipInvoice=true)`);
     }
 
-    currentStep = "lexoffice-download-pdf";
-    console.info(`[finalize-shoot] Step 3/5: Downloading Lexoffice PDF for task ${input.taskId}`);
-    const pdfBuffer = await getLexofficePdfBuffer(invoice.documentFileId);
-
     currentStep = "gmail-create-draft";
-    console.info(`[finalize-shoot] Step 4/5: Creating Gmail draft for task ${input.taskId}`);
+    console.info(`[finalize-shoot] Creating Gmail draft for task ${input.taskId}`);
     const subject = buildFinalizeShootEmailSubject({
       photoshootType: input.photoshootType,
       companyName: input.invoiceName,
@@ -250,27 +278,31 @@ export async function POST(request: Request) {
     });
     const htmlBody = buildFinalizeShootEmailHtml({
       googleDriveLink,
+      includeInvoiceNote: !input.skipInvoice,
     });
     const plainTextFallback = buildFinalizeShootEmailPlainText({
       googleDriveLink,
+      includeInvoiceNote: !input.skipInvoice,
     });
     const gmailDraft = await createGmailDraft(
       input.clientEmail,
       subject,
       htmlBody,
       pdfBuffer,
-      `Invoice-${sanitizeFileName(input.shootName)}.pdf`,
+      pdfBuffer ? `Invoice-${sanitizeFileName(input.shootName)}.pdf` : undefined,
       { plainTextFallback }
     );
 
+    const nextStatus = input.skipInvoice ? SEND_EMAIL_STATUS : INVOICE_SENT_STATUS;
+
     currentStep = "supabase-update-task";
-    console.info(`[finalize-shoot] Step 5/5: Updating task ${input.taskId} in Supabase`);
+    console.info(`[finalize-shoot] Updating task ${input.taskId} in Supabase`);
     const { error: updateError } = await supabase
       .from("tasks")
       .update({
-        lexoffice_invoice_id: invoice.id,
+        ...(invoice?.id ? { lexoffice_invoice_id: invoice.id } : {}),
         google_drive_link: googleDriveLink,
-        status: INVOICE_SENT_STATUS,
+        status: nextStatus,
         updated_at: new Date().toISOString(),
       })
       .eq("id", input.taskId);
@@ -282,13 +314,14 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       taskId: input.taskId,
-      status: INVOICE_SENT_STATUS,
+      status: nextStatus,
+      skippedInvoice: input.skipInvoice,
       googleDriveFolderId: driveFolder.id,
       googleDriveLink,
-      lexofficeInvoiceId: invoice.id,
-      lexofficeDocumentFileId: invoice.documentFileId,
-      lexofficeResourceUri: invoice.resourceUri,
-      lexofficeInvoiceViewUrl: invoice.invoiceViewUrl,
+      lexofficeInvoiceId: invoice?.id ?? null,
+      lexofficeDocumentFileId: invoice?.documentFileId ?? null,
+      lexofficeResourceUri: invoice?.resourceUri ?? null,
+      lexofficeInvoiceViewUrl: invoice?.invoiceViewUrl ?? null,
       gmailDraftId: gmailDraft.id,
     });
   } catch (error) {
