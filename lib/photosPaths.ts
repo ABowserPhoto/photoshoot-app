@@ -30,3 +30,12 @@ export function getPhotosRoot(): string {
 }
 
 export const PHOTOS_ROOT = getPhotosRoot();
+
+/** Absolute path to edited deliverables (`4_Final`) for a shoot folder segment. */
+export function resolveDeliverablesPath(localFolderName: string): string {
+  const segment = localFolderName.trim();
+  if (!segment) {
+    throw new Error("localFolderName is required.");
+  }
+  return path.join(getPhotosRoot(), segment, "4_Final");
+}

@@ -74,6 +74,9 @@ export type BoardTask = {
   completedAt: string | null;
   updatedAt: string | null;
   skipInvoice: boolean;
+  isCreditNote: boolean;
+  expectedRevenue: number;
+  isPaid: boolean;
 };
 
 type BoardState = Record<ColumnKey, BoardTask[]>;
@@ -138,6 +141,9 @@ const FALLBACK_TASKS: BoardTask[] = [
     completedAt: null,
     updatedAt: null,
     skipInvoice: false,
+    isCreditNote: false,
+    expectedRevenue: 0,
+    isPaid: false,
   },
   {
     id: "fallback-2",
@@ -175,6 +181,9 @@ const FALLBACK_TASKS: BoardTask[] = [
     completedAt: null,
     updatedAt: null,
     skipInvoice: false,
+    isCreditNote: false,
+    expectedRevenue: 0,
+    isPaid: false,
   },
 ];
 
@@ -212,6 +221,9 @@ type DbTask = {
   completed_at: string | null;
   updated_at: string | null;
   skip_invoice?: boolean | null;
+  is_credit_note?: boolean | null;
+  expected_revenue?: number | null;
+  is_paid?: boolean | null;
 };
 
 const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
@@ -345,6 +357,7 @@ function buildFinalizeShootPayload(task: BoardTask) {
     lineItems: buildTaskLineItems(task),
     taxRate: Number.isFinite(task.taxPercentage) ? task.taxPercentage : 19,
     skipInvoice: task.skipInvoice,
+    localFolderName: task.localFolderName.trim(),
     ...(task.lexofficeContactId.trim() ? { lexofficeContactId: task.lexofficeContactId.trim() } : {}),
   };
 }
@@ -687,6 +700,24 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
         : row.skip_invoice == null
           ? (existing?.skipInvoice ?? false)
           : Boolean(row.skip_invoice),
+    isCreditNote:
+      typeof row.is_credit_note === "boolean"
+        ? row.is_credit_note
+        : row.is_credit_note == null
+          ? (existing?.isCreditNote ?? false)
+          : Boolean(row.is_credit_note),
+    expectedRevenue:
+      typeof row.expected_revenue === "number" && Number.isFinite(row.expected_revenue)
+        ? row.expected_revenue
+        : row.expected_revenue == null
+          ? (existing?.expectedRevenue ?? 0)
+          : Number(row.expected_revenue) || 0,
+    isPaid:
+      typeof row.is_paid === "boolean"
+        ? row.is_paid
+        : row.is_paid == null
+          ? (existing?.isPaid ?? false)
+          : Boolean(row.is_paid),
   };
 }
 
@@ -1301,10 +1332,20 @@ export default function KanbanBoard({
         return;
       }
 
+      if (!dragged.task.localFolderName.trim()) {
+        setBoard(previousBoard);
+        setWorkflowToast({
+          message:
+            "Cannot upload photos: no local folder is set for this task. Ensure the PC worker has created shoot folders.",
+          variant: "error",
+        });
+        return;
+      }
+
       setWorkflowToast({
         message: dragged.task.skipInvoice
-          ? "Creating Drive folder & email draft..."
-          : "Generating Invoice & Folders...",
+          ? "Uploading photos, creating Drive folder & email draft..."
+          : "Uploading photos, generating invoice & folders...",
         variant: "loading",
       });
 

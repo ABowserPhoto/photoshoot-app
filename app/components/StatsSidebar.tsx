@@ -3,9 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { formatDurationLong, formatEuro } from "@/lib/adminStatsFormat";
+import { buildAdminStatsQuery } from "@/lib/reportingPeriod";
 import { supabase } from "@/lib/supabaseClient";
-
-type TimeframeKey = "week" | "month" | "year" | "lastYear";
 
 type StatsMetrics = {
   averageEditTimeMinutes: number;
@@ -17,31 +16,33 @@ type StatsMetrics = {
 
 type StatsResponse = {
   generatedAt: string;
-  labels: Record<TimeframeKey, string>;
-  ranges: Record<
-    TimeframeKey,
-    {
-      start: string;
-      end: string;
-      subtitle: string;
-    }
-  >;
-  metrics: Record<TimeframeKey, StatsMetrics>;
+  range: {
+    start: string;
+    end: string;
+    subtitle: string;
+    label: string;
+  };
+  metrics: StatsMetrics;
 };
-
-const TIMEFRAME_ORDER: TimeframeKey[] = ["week", "month", "year", "lastYear"];
 
 type StatsSidebarProps = {
   refreshSignal?: number;
 };
 
 export default function StatsSidebar({ refreshSignal = 0 }: StatsSidebarProps) {
-  const [activeFrame, setActiveFrame] = useState<TimeframeKey>("week");
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const isMountedRef = useRef(true);
   const realtimeRefreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const currentMonthQuery = useMemo(() => {
+    const now = new Date();
+    return buildAdminStatsQuery({
+      timeframe: "month",
+      selectedMonthValue: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`,
+    });
+  }, []);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -62,7 +63,7 @@ export default function StatsSidebar({ refreshSignal = 0 }: StatsSidebarProps) {
       setError(null);
     }
     try {
-      const response = await fetch("/api/admin-stats", { cache: "no-store" });
+      const response = await fetch(`/api/admin-stats${currentMonthQuery}`, { cache: "no-store" });
       const payload = (await response.json().catch(() => null)) as
         | StatsResponse
         | {
@@ -84,7 +85,7 @@ export default function StatsSidebar({ refreshSignal = 0 }: StatsSidebarProps) {
         setLoading(false);
       }
     }
-  }, []);
+  }, [currentMonthQuery]);
 
   const scheduleRealtimeRefresh = useCallback(() => {
     if (realtimeRefreshTimeoutRef.current) {
@@ -137,8 +138,8 @@ export default function StatsSidebar({ refreshSignal = 0 }: StatsSidebarProps) {
         totalTaxes: 0,
       };
     }
-    return stats.metrics[activeFrame];
-  }, [activeFrame, stats]);
+    return stats.metrics;
+  }, [stats]);
 
   return (
     <aside className="rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
@@ -147,37 +148,8 @@ export default function StatsSidebar({ refreshSignal = 0 }: StatsSidebarProps) {
           Business Statistics
         </h2>
         <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-          Admin view: efficiency and financial health.
+          {stats?.range.label ? `Current month: ${stats.range.label}` : "Current month overview"}
         </p>
-      </div>
-
-      <div className="mb-3 grid grid-cols-1 gap-1.5">
-        {TIMEFRAME_ORDER.map((key) => {
-          const label = stats?.labels[key] ?? key;
-          const subtitle = stats?.ranges?.[key]?.subtitle ?? "";
-          const active = key === activeFrame;
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setActiveFrame(key)}
-              className={`w-full rounded-md border px-1.5 py-1 text-left text-[11px] transition ${
-                active
-                  ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
-                  : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
-              }`}
-            >
-              <span className="block font-medium leading-tight">{label}</span>
-              <span
-                className={`block text-[9px] leading-tight ${
-                  active ? "text-zinc-200 dark:text-zinc-700" : "text-zinc-500 dark:text-zinc-400"
-                }`}
-              >
-                {subtitle}
-              </span>
-            </button>
-          );
-        })}
       </div>
 
       {loading ? (

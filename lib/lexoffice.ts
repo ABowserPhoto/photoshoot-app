@@ -1,11 +1,49 @@
 const LEXOFFICE_API_BASE_URL = "https://api.lexoffice.io/v1";
 const DEFAULT_LEXOFFICE_APP_BASE_URL = "https://app.lexware.de";
-const LEXOFFICE_API_DELAY_MS = 600;
+const LEXOFFICE_INTER_REQUEST_DELAY_MS = 250;
+const LEXOFFICE_RATE_LIMIT_RETRY_MS = [1000, 2000, 4000] as const;
+const LEXOFFICE_MAX_RETRIES = 3;
 
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-async function afterLexofficeApiCall(): Promise<void> {
-  await delay(LEXOFFICE_API_DELAY_MS);
+let lexofficeRequestChain: Promise<unknown> = Promise.resolve();
+
+function enqueueLexofficeRequest<T>(operation: () => Promise<T>): Promise<T> {
+  const next = lexofficeRequestChain
+    .then(() => sleep(LEXOFFICE_INTER_REQUEST_DELAY_MS))
+    .then(operation);
+  lexofficeRequestChain = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
+
+async function lexofficeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return enqueueLexofficeRequest(async () => {
+    let lastResponse: Response | undefined;
+
+    for (let attempt = 0; attempt <= LEXOFFICE_MAX_RETRIES; attempt += 1) {
+      if (attempt > 0) {
+        const backoffMs = LEXOFFICE_RATE_LIMIT_RETRY_MS[attempt - 1] ?? 4000;
+        await sleep(backoffMs);
+      }
+
+      const response = await fetch(input, init);
+      if (response.status !== 429) {
+        return response;
+      }
+
+      lastResponse = response;
+      await response.text().catch(() => "");
+    }
+
+    if (!lastResponse) {
+      throw new Error("Lexoffice request failed without a response.");
+    }
+
+    return lastResponse;
+  });
 }
 
 export interface LexofficeClientDetails {
@@ -65,6 +103,31 @@ export interface CreateLexofficeInvoiceResult {
   invoiceViewUrl: string;
 }
 
+export interface LexofficeInvoiceDetails {
+  id: string;
+  voucherNumber: string | null;
+  voucherDate: string | null;
+  voucherStatus: string | null;
+  documentFileId: string | null;
+  contactId: string | null;
+  contactName: string | null;
+}
+
+export interface LexofficeVoucherListItem {
+  id: string;
+  voucherType: string;
+  voucherStatus: string;
+  voucherNumber: string | null;
+  voucherDate: string | null;
+  dueDate: string | null;
+  contactId: string | null;
+  contactName: string | null;
+  openAmount: number | null;
+  totalAmount: number | null;
+  currency: string | null;
+  archived: boolean;
+}
+
 interface LexofficeCreateResourceResponse {
   id?: string;
   resourceUri?: string;
@@ -77,8 +140,176 @@ interface LexofficeDocumentResponse {
   documentFileId?: string;
 }
 
+interface LexofficeContactResponse {
+  emailAddresses?: {
+    business?: string[];
+    office?: string[];
+    private?: string[];
+    other?: string[];
+  };
+  company?: {
+    contactPersons?: Array<{ emailAddress?: string; primary?: boolean }>;
+  };
+  person?: {
+    emailAddress?: string;
+  };
+}
+
+interface LexofficeVoucherListResponse {
+  content?: LexofficeVoucherListItem[];
+  last?: boolean;
+}
+
+const UNPAID_SALES_VOUCHER_TYPES = ["invoice", "salesinvoice", "downpaymentinvoice"] as const;
+
 interface LexofficeContactListResponse {
   content?: Array<{ id?: string }>;
+}
+
+function pickFirstEmail(values: string[] | undefined): string | null {
+  if (!Array.isArray(values)) {
+    return null;
+  }
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return null;
+}
+
+function parseVoucherListItem(raw: Record<string, unknown>): LexofficeVoucherListItem | null {
+  const id = typeof raw.id === "string" ? raw.id.trim() : "";
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    voucherType: typeof raw.voucherType === "string" ? raw.voucherType.trim() : "",
+    voucherStatus: typeof raw.voucherStatus === "string" ? raw.voucherStatus.trim() : "",
+    voucherNumber: typeof raw.voucherNumber === "string" ? raw.voucherNumber.trim() : null,
+    voucherDate: typeof raw.voucherDate === "string" ? raw.voucherDate.trim() : null,
+    dueDate: typeof raw.dueDate === "string" ? raw.dueDate.trim() : null,
+    contactId: typeof raw.contactId === "string" ? raw.contactId.trim() : null,
+    contactName: typeof raw.contactName === "string" ? raw.contactName.trim() : null,
+    openAmount: typeof raw.openAmount === "number" && Number.isFinite(raw.openAmount) ? raw.openAmount : null,
+    totalAmount: typeof raw.totalAmount === "number" && Number.isFinite(raw.totalAmount) ? raw.totalAmount : null,
+    currency: typeof raw.currency === "string" ? raw.currency.trim() : null,
+    archived: raw.archived === true,
+  };
+}
+
+async function fetchLexofficeVoucherListPage(params: {
+  voucherStatus: "open" | "overdue";
+  page: number;
+  size?: number;
+}): Promise<LexofficeVoucherListItem[]> {
+  const apiKey = getLexofficeApiKey();
+  const searchParams = new URLSearchParams({
+    voucherType: UNPAID_SALES_VOUCHER_TYPES.join(","),
+    voucherStatus: params.voucherStatus,
+    archived: "false",
+    page: String(params.page),
+    size: String(params.size ?? 250),
+    sort: "voucherDate,ASC",
+  });
+
+  const response = await lexofficeFetch(`${LEXOFFICE_API_BASE_URL}/voucherlist?${searchParams.toString()}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await readLexofficeError(response);
+    throw new Error(`Lexoffice voucherlist failed (${response.status} ${response.statusText}): ${detail}`);
+  }
+
+  const payload = (await response.json()) as LexofficeVoucherListResponse;
+
+  const content = Array.isArray(payload.content) ? payload.content : [];
+  return content
+    .map((item) => parseVoucherListItem(item as Record<string, unknown>))
+    .filter((item): item is LexofficeVoucherListItem => item !== null);
+}
+
+async function fetchAllLexofficeVoucherListPages(voucherStatus: "open" | "overdue"): Promise<LexofficeVoucherListItem[]> {
+  const items: LexofficeVoucherListItem[] = [];
+  let page = 0;
+
+  while (true) {
+    const pageItems = await fetchLexofficeVoucherListPage({ voucherStatus, page, size: 250 });
+    items.push(...pageItems);
+    if (pageItems.length < 250) {
+      break;
+    }
+    page += 1;
+  }
+
+  return items;
+}
+
+/** Fetch all open and overdue outgoing sales invoices directly from Lexoffice. */
+export async function listLexofficeUnpaidSalesInvoices(): Promise<LexofficeVoucherListItem[]> {
+  const openItems = await fetchAllLexofficeVoucherListPages("open");
+  const overdueItems = await fetchAllLexofficeVoucherListPages("overdue");
+
+  const byId = new Map<string, LexofficeVoucherListItem>();
+  for (const item of [...openItems, ...overdueItems]) {
+    byId.set(item.id, item);
+  }
+  return Array.from(byId.values());
+}
+
+const lexofficeContactEmailCache = new Map<string, string | null>();
+
+export async function getLexofficeContactEmail(contactId: string): Promise<string | null> {
+  const trimmedId = contactId.trim();
+  if (!trimmedId) {
+    return null;
+  }
+
+  const cached = lexofficeContactEmailCache.get(trimmedId);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const apiKey = getLexofficeApiKey();
+  const response = await lexofficeFetch(`${LEXOFFICE_API_BASE_URL}/contacts/${encodeURIComponent(trimmedId)}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await readLexofficeError(response);
+    throw new Error(`Lexoffice contact lookup failed (${response.status} ${response.statusText}): ${detail}`);
+  }
+
+  const payload = (await response.json()) as LexofficeContactResponse;
+
+  const businessEmail = pickFirstEmail(payload.emailAddresses?.business);
+  const contactPersons = payload.company?.contactPersons ?? [];
+  const primaryPerson = contactPersons.find((person) => person.primary === true) ?? contactPersons[0];
+  const personEmail = primaryPerson?.emailAddress?.trim();
+
+  const email =
+    businessEmail ??
+    personEmail ??
+    pickFirstEmail(payload.emailAddresses?.office) ??
+    pickFirstEmail(payload.emailAddresses?.private) ??
+    pickFirstEmail(payload.emailAddresses?.other) ??
+    payload.person?.emailAddress?.trim() ??
+    null;
+
+  lexofficeContactEmailCache.set(trimmedId, email);
+  return email;
 }
 
 function requiredEnv(name: string): string {
@@ -214,7 +445,7 @@ export async function findLexofficeContactByEmail(email: string): Promise<string
   }
 
   const apiKey = getLexofficeApiKey();
-  const response = await fetch(
+  const response = await lexofficeFetch(
     `${LEXOFFICE_API_BASE_URL}/contacts?email=${encodeURIComponent(trimmedEmail)}&customer=true`,
     {
       method: "GET",
@@ -233,7 +464,6 @@ export async function findLexofficeContactByEmail(email: string): Promise<string
   const payload = (await response.json()) as LexofficeContactListResponse;
   const firstMatch = Array.isArray(payload.content) ? payload.content[0] : undefined;
   const id = typeof firstMatch?.id === "string" ? firstMatch.id.trim() : "";
-  await afterLexofficeApiCall();
   return id || null;
 }
 
@@ -293,7 +523,7 @@ export async function createLexofficeContact(data: CreateLexofficeContactData): 
       };
 
   const apiKey = getLexofficeApiKey();
-  const response = await fetch(`${LEXOFFICE_API_BASE_URL}/contacts`, {
+  const response = await lexofficeFetch(`${LEXOFFICE_API_BASE_URL}/contacts`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -314,7 +544,6 @@ export async function createLexofficeContact(data: CreateLexofficeContactData): 
     throw new Error("Lexoffice contact creation succeeded but no contact id was returned.");
   }
 
-  await afterLexofficeApiCall();
   return id;
 }
 
@@ -442,7 +671,7 @@ function buildLexofficeInvoicePayload(invoiceData: CreateLexofficeInvoiceData, c
 }
 
 async function fetchInvoiceDocumentFileId(apiKey: string, invoiceId: string): Promise<string | null> {
-  const response = await fetch(`${LEXOFFICE_API_BASE_URL}/invoices/${encodeURIComponent(invoiceId)}/document`, {
+  const response = await lexofficeFetch(`${LEXOFFICE_API_BASE_URL}/invoices/${encodeURIComponent(invoiceId)}/document`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -461,7 +690,6 @@ async function fetchInvoiceDocumentFileId(apiKey: string, invoiceId: string): Pr
 
   const payload = (await response.json()) as LexofficeDocumentResponse;
   const documentFileId = typeof payload.documentFileId === "string" ? payload.documentFileId.trim() : "";
-  await afterLexofficeApiCall();
   return documentFileId || null;
 }
 
@@ -474,7 +702,7 @@ export async function createLexofficeInvoice(
   const requestUrl = `${LEXOFFICE_API_BASE_URL}/invoices${finalize ? "?finalize=true" : ""}`;
   const requestBody = buildLexofficeInvoicePayload(invoiceData, contactId);
 
-  const response = await fetch(requestUrl, {
+  const response = await lexofficeFetch(requestUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -495,8 +723,6 @@ export async function createLexofficeInvoice(
     throw new Error("Lexoffice invoice creation succeeded but no invoice id was returned.");
   }
 
-  await afterLexofficeApiCall();
-
   const resourceUri =
     typeof created.resourceUri === "string" && created.resourceUri.trim() ? created.resourceUri.trim() : null;
   const invoiceViewUrl = buildLexofficeInvoiceViewUrl(id);
@@ -515,6 +741,69 @@ export async function createLexofficeInvoice(
   return { id, documentFileId, resourceUri, invoiceViewUrl };
 }
 
+export function isLexofficeInvoicePaid(voucherStatus: string | null | undefined): boolean {
+  const normalized = voucherStatus?.trim().toLowerCase() ?? "";
+  return normalized === "paid" || normalized === "paidoff";
+}
+
+export function isLexofficeInvoiceReminderEligible(voucherStatus: string | null | undefined): boolean {
+  const normalized = voucherStatus?.trim().toLowerCase() ?? "";
+  return normalized === "open" || normalized === "overdue";
+}
+
+export async function getLexofficeInvoice(invoiceId: string): Promise<LexofficeInvoiceDetails> {
+  const trimmedId = invoiceId.trim();
+  if (!trimmedId) {
+    throw new Error("invoiceId is required.");
+  }
+
+  const apiKey = getLexofficeApiKey();
+  const response = await lexofficeFetch(`${LEXOFFICE_API_BASE_URL}/invoices/${encodeURIComponent(trimmedId)}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const detail = await readLexofficeError(response);
+    throw new Error(`Lexoffice invoice lookup failed (${response.status} ${response.statusText}): ${detail}`);
+  }
+
+  const payload = (await response.json()) as {
+    id?: string;
+    voucherNumber?: string;
+    voucherDate?: string;
+    voucherStatus?: string;
+    address?: {
+      contactId?: string | null;
+      name?: string;
+    };
+  };
+
+  let documentFileId: string | null = null;
+  try {
+    documentFileId = await fetchInvoiceDocumentFileId(apiKey, trimmedId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[lexoffice] Invoice ${trimmedId} loaded, but documentFileId lookup failed: ${message}`);
+  }
+
+  return {
+    id: typeof payload.id === "string" && payload.id.trim() ? payload.id.trim() : trimmedId,
+    voucherNumber: typeof payload.voucherNumber === "string" ? payload.voucherNumber.trim() : null,
+    voucherDate: typeof payload.voucherDate === "string" ? payload.voucherDate.trim() : null,
+    voucherStatus: typeof payload.voucherStatus === "string" ? payload.voucherStatus.trim() : null,
+    documentFileId,
+    contactId:
+      typeof payload.address?.contactId === "string" && payload.address.contactId.trim()
+        ? payload.address.contactId.trim()
+        : null,
+    contactName: typeof payload.address?.name === "string" ? payload.address.name.trim() : null,
+  };
+}
+
 export async function getLexofficePdfBuffer(documentFileId: string): Promise<Buffer> {
   const trimmedId = documentFileId.trim();
   if (!trimmedId) {
@@ -522,7 +811,7 @@ export async function getLexofficePdfBuffer(documentFileId: string): Promise<Buf
   }
 
   const apiKey = getLexofficeApiKey();
-  const response = await fetch(
+  const response = await lexofficeFetch(
     `${LEXOFFICE_API_BASE_URL}/files/${encodeURIComponent(trimmedId)}`,
     {
       method: "GET",
@@ -546,6 +835,5 @@ export async function getLexofficePdfBuffer(documentFileId: string): Promise<Buf
     throw new Error("Lexoffice PDF download returned an empty file.");
   }
 
-  await afterLexofficeApiCall();
   return buffer;
 }

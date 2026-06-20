@@ -1,7 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
-import { createDriveFolder, createGmailDraft } from "@/lib/google";
+import { createDriveFolder, createGmailDraft, uploadFilesToDrive } from "@/lib/google";
 import {
   buildFinalizeShootEmailHtml,
   buildFinalizeShootEmailPlainText,
@@ -9,6 +9,7 @@ import {
 } from "@/lib/finalizeShootEmail";
 import { createLexofficeInvoice, getLexofficePdfBuffer } from "@/lib/lexoffice";
 import type { LexofficeInvoiceLineItem } from "@/lib/lexoffice";
+import { resolveDeliverablesPath } from "@/lib/photosPaths";
 import { getAuthRole } from "@/lib/server/getAuthRole";
 
 export const runtime = "nodejs";
@@ -60,6 +61,7 @@ type FinalizeShootBody = {
   taxRate?: number;
   lexofficeContactId?: string;
   skipInvoice?: boolean | string | number | null;
+  localFolderName?: string;
 };
 
 function getSupabaseAdmin() {
@@ -161,12 +163,17 @@ function parseRequestBody(body: FinalizeShootBody) {
   const lexofficeContactId =
     typeof body.lexofficeContactId === "string" ? body.lexofficeContactId.trim() : "";
   const skipInvoice = parseSkipInvoice(body.skipInvoice);
+  const localFolderName =
+    typeof body.localFolderName === "string" ? body.localFolderName.trim() : "";
 
   if (!taskId) {
     throw new Error("taskId is required.");
   }
   if (!shootName) {
     throw new Error("shootName is required.");
+  }
+  if (!localFolderName) {
+    throw new Error("localFolderName is required.");
   }
   if (!skipInvoice && !invoiceName) {
     throw new Error("invoiceName is required.");
@@ -189,6 +196,8 @@ function parseRequestBody(body: FinalizeShootBody) {
     taxRate,
     lexofficeContactId,
     skipInvoice,
+    localFolderName,
+    deliverablesPath: resolveDeliverablesPath(localFolderName),
   };
 }
 
@@ -228,6 +237,15 @@ export async function POST(request: Request) {
     console.info(`[finalize-shoot] Step 1: Creating Drive folder for task ${input.taskId}`);
     const driveFolder = await createDriveFolder(input.shootName, parentFolderId);
     const googleDriveLink = driveFolder.webViewLink ?? `https://drive.google.com/drive/folders/${driveFolder.id}`;
+
+    currentStep = "google-drive-upload-photos";
+    console.info(
+      `[finalize-shoot] Uploading deliverables from ${input.deliverablesPath} to Drive folder ${driveFolder.id} for task ${input.taskId}`
+    );
+    const driveUpload = await uploadFilesToDrive(driveFolder.id, input.deliverablesPath);
+    console.info(
+      `[finalize-shoot] Uploaded ${driveUpload.uploadedCount} file(s) to Drive for task ${input.taskId}`
+    );
 
     let pdfBuffer: Buffer | undefined;
     let invoice:
@@ -300,7 +318,15 @@ export async function POST(request: Request) {
     const { error: updateError } = await supabase
       .from("tasks")
       .update({
-        ...(invoice?.id ? { lexoffice_invoice_id: invoice.id } : {}),
+        ...(invoice?.id
+          ? {
+              lexoffice_invoice_id: invoice.id,
+              lexoffice_document_file_id: invoice.documentFileId ?? null,
+              invoice_date: new Date().toISOString(),
+              invoice_paid: false,
+              is_paid: false,
+            }
+          : {}),
         google_drive_link: googleDriveLink,
         status: nextStatus,
         updated_at: new Date().toISOString(),
@@ -318,6 +344,8 @@ export async function POST(request: Request) {
       skippedInvoice: input.skipInvoice,
       googleDriveFolderId: driveFolder.id,
       googleDriveLink,
+      driveUploadedCount: driveUpload.uploadedCount,
+      driveUploadedFiles: driveUpload.fileNames,
       lexofficeInvoiceId: invoice?.id ?? null,
       lexofficeDocumentFileId: invoice?.documentFileId ?? null,
       lexofficeResourceUri: invoice?.resourceUri ?? null,

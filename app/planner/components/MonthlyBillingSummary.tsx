@@ -2,21 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { getCreditNoteBillingSummary, type CreditNoteBillingClientGroup } from "@/app/actions/statistics";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
-
-type BillingTaskRow = {
-  id: string;
-  client_name: string | null;
-  total_fee: number | null;
-  completed_at: string | null;
-  status: string | null;
-};
-
-const PINNED_CLIENTS = ["Wolt", "Real Estate"];
-
-function monthKey(date: Date): string {
-  return `${date.getFullYear()}-${date.getMonth()}`;
-}
+import { formatReportingPeriodLabel, type ReportingPeriodInput } from "@/lib/reportingPeriod";
 
 function euro(value: number): string {
   return new Intl.NumberFormat("de-DE", {
@@ -26,27 +14,17 @@ function euro(value: number): string {
   }).format(value);
 }
 
-function isCompletedLikeStatus(status: string | null | undefined): boolean {
-  const raw = (status ?? "").trim().toLowerCase().replace(/\s+/g, "-");
-  return (
-    raw === "completed" ||
-    raw === "ready-for-review" ||
-    raw === "ready_for_review" ||
-    raw === "send-email" ||
-    raw === "send_email"
-  );
-}
+type BillingSummaryProps = ReportingPeriodInput;
 
-type MonthlyBillingSummaryProps = {
-  /** `YYYY-MM` value from the statistics month selector. Defaults to current month. */
-  monthValue?: string;
-};
-
-export default function MonthlyBillingSummary({ monthValue }: MonthlyBillingSummaryProps) {
+export default function MonthlyBillingSummary(props: BillingSummaryProps) {
   const { authenticated, isAdmin, isLoading } = useAuthRole();
-  const [rows, setRows] = useState<BillingTaskRow[]>([]);
+  const [groups, setGroups] = useState<CreditNoteBillingClientGroup[]>([]);
+  const [totalExpected, setTotalExpected] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const periodLabel = useMemo(() => formatReportingPeriodLabel(props), [props]);
+  const periodKey = useMemo(() => JSON.stringify(props), [props]);
 
   useEffect(() => {
     if (isLoading || !authenticated || !isAdmin) {
@@ -58,17 +36,22 @@ export default function MonthlyBillingSummary({ monthValue }: MonthlyBillingSumm
       setLoading(true);
       setError(null);
       try {
-        const response = await fetch("/api/planner/tasks", { cache: "no-store", credentials: "include" });
-        const json = (await response.json().catch(() => null)) as { data?: BillingTaskRow[]; error?: string } | null;
-        if (!response.ok) {
-          throw new Error(json?.error ?? `Failed to load billing tasks (${response.status})`);
-        }
+        const result = await getCreditNoteBillingSummary(props);
         if (!cancelled) {
-          setRows(json?.data ?? []);
+          if (!result.ok) {
+            setError(result.error);
+            setGroups([]);
+            setTotalExpected(0);
+          } else {
+            setGroups(result.groups);
+            setTotalExpected(result.totalExpected);
+          }
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load billing tasks.");
+          setError(err instanceof Error ? err.message : "Failed to load billing summary.");
+          setGroups([]);
+          setTotalExpected(0);
         }
       } finally {
         if (!cancelled) {
@@ -81,55 +64,7 @@ export default function MonthlyBillingSummary({ monthValue }: MonthlyBillingSumm
     return () => {
       cancelled = true;
     };
-  }, [authenticated, isAdmin, isLoading]);
-
-  const selectedMonthKey = useMemo(() => {
-    if (monthValue && /^\d{4}-\d{2}$/.test(monthValue)) {
-      const [year, month] = monthValue.split("-").map(Number);
-      return monthKey(new Date(year, month - 1, 1));
-    }
-    return monthKey(new Date());
-  }, [monthValue]);
-
-  const selectedMonthLabel = useMemo(() => {
-    if (monthValue && /^\d{4}-\d{2}$/.test(monthValue)) {
-      const [year, month] = monthValue.split("-").map(Number);
-      return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(
-        new Date(year, month - 1, 1)
-      );
-    }
-    return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(new Date());
-  }, [monthValue]);
-
-  const { entries, total } = useMemo(() => {
-    const grouped = new Map<string, number>();
-
-    for (const row of rows) {
-      if (!isCompletedLikeStatus(row.status) || !row.completed_at) {
-        continue;
-      }
-      const completedDate = new Date(row.completed_at);
-      if (Number.isNaN(completedDate.getTime())) {
-        continue;
-      }
-      if (monthKey(completedDate) !== selectedMonthKey) {
-        continue;
-      }
-      const fee = typeof row.total_fee === "number" && Number.isFinite(row.total_fee) ? row.total_fee : 0;
-      const client = row.client_name?.trim() || "Unknown";
-      grouped.set(client, (grouped.get(client) ?? 0) + fee);
-    }
-
-    for (const pinnedClient of PINNED_CLIENTS) {
-      if (!grouped.has(pinnedClient)) {
-        grouped.set(pinnedClient, 0);
-      }
-    }
-
-    const sortedEntries = [...grouped.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    const totalRevenue = sortedEntries.reduce((acc, [, value]) => acc + value, 0);
-    return { entries: sortedEntries, total: totalRevenue };
-  }, [rows, selectedMonthKey]);
+  }, [authenticated, isAdmin, isLoading, periodKey, props]);
 
   if (isLoading || !authenticated || !isAdmin) {
     return null;
@@ -138,35 +73,36 @@ export default function MonthlyBillingSummary({ monthValue }: MonthlyBillingSumm
   if (loading) {
     return (
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
-        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Monthly Billing Summary</p>
-        <p className="mt-2 text-sm text-zinc-400">Loading monthly revenue…</p>
+        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Billing summary</p>
+        <p className="mt-2 text-sm text-zinc-400">Loading credit note revenue for {periodLabel}…</p>
       </section>
     );
   }
 
   return (
     <section id="monthly-billing" className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
-      <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
-        Monthly Billing Summary
-      </p>
-      <p className="mt-1 text-sm text-zinc-400">{selectedMonthLabel}</p>
-      <p className="mt-2 text-xl font-semibold text-white">Month Revenue: {euro(total)}</p>
-      {error ? (
-        <p className="mt-2 text-xs text-red-300">{error}</p>
-      ) : null}
-      <div className="mt-3 flex flex-wrap gap-2">
-        {entries.map(([client, amount]) => (
-          <span
-            key={client}
-            className="inline-flex rounded-full border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-100"
-          >
-            {client}: {euro(amount)}
-          </span>
+      <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Billing summary</p>
+      <p className="mt-1 text-sm text-zinc-400">Credit note shoots for {periodLabel}</p>
+      <p className="mt-2 text-xl font-semibold text-white">Total expected: {euro(totalExpected)}</p>
+      {error ? <p className="mt-2 text-xs text-red-300">{error}</p> : null}
+      <div className="mt-4 space-y-4">
+        {groups.map((group) => (
+          <div key={group.clientName} className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
+            <p className="text-sm font-semibold text-zinc-100">
+              {group.clientName} — Total expected: {euro(group.totalExpected)}
+            </p>
+            <ul className="mt-2 space-y-1">
+              {group.jobs.map((job) => (
+                <li key={job.id} className="text-sm text-zinc-400">
+                  <span className="text-zinc-300">{job.jobDateLabel}:</span> {job.jobName} —{" "}
+                  <span className="text-zinc-200">{euro(job.expectedRevenue)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
         ))}
-        {entries.length === 0 ? (
-          <span className="inline-flex rounded-full border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-400">
-            No completed billing tasks for this month.
-          </span>
+        {groups.length === 0 && !error ? (
+          <p className="text-sm text-zinc-500">No credit note shoots for {periodLabel}.</p>
         ) : null}
       </div>
     </section>

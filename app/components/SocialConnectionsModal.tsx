@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   disconnectInstagram,
@@ -9,6 +9,7 @@ import {
 } from "@/app/actions/social-profiles";
 import InstagramAccountSelector from "@/app/components/InstagramAccountSelector";
 import type { SchedulerSocialProfileRow } from "@/lib/schedulerSocialProfile";
+import { openExternalUrl } from "@/lib/openExternalUrl";
 
 type SocialConnectionsModalProps = {
   open: boolean;
@@ -48,6 +49,21 @@ export default function SocialConnectionsModal({
   onProfilesPatched,
 }: SocialConnectionsModalProps) {
   const [busy, setBusy] = useState<"ig" | "tt" | null>(null);
+  const onConnectionsChangedRef = useRef(onConnectionsChanged);
+  onConnectionsChangedRef.current = onConnectionsChanged;
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const refreshOnFocus = () => {
+      onConnectionsChangedRef.current();
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    return () => {
+      window.removeEventListener("focus", refreshOnFocus);
+    };
+  }, [open]);
 
   if (!open) {
     return null;
@@ -109,6 +125,21 @@ export default function SocialConnectionsModal({
     })();
   };
 
+  const handleConnectInstagram = () => {
+    if (!metaOAuthHref) {
+      return;
+    }
+    openExternalUrl(metaOAuthHref);
+  };
+
+  const handleConnectTikTok = () => {
+    if (!activeProfileId || typeof window === "undefined") {
+      return;
+    }
+    const initUrl = `${window.location.origin}/api/auth/tiktok/init?profileId=${encodeURIComponent(activeProfileId)}`;
+    openExternalUrl(initUrl);
+  };
+
   return (
     <>
       <div
@@ -127,6 +158,10 @@ export default function SocialConnectionsModal({
           </h2>
           <p className="mt-1 text-xs text-zinc-400">
             Instagram and TikTok links for the selected profile ({activeProfileId ?? "—"}).
+          </p>
+          <p className="mt-2 rounded-md border border-zinc-700/80 bg-zinc-800/40 px-2.5 py-2 text-[11px] leading-relaxed text-zinc-400">
+            Sign-in opens in your default browser. When finished, return to this app — connections refresh
+            automatically.
           </p>
 
           {!hasSupabase || !activeProfileId ? (
@@ -153,12 +188,13 @@ export default function SocialConnectionsModal({
                   ) : !process.env.NEXT_PUBLIC_META_CLIENT_ID?.trim() ? (
                     <span className="text-[10px] text-amber-200/80">Set META / env client id</span>
                   ) : metaOAuthHref ? (
-                    <a
-                      href={metaOAuthHref}
+                    <button
+                      type="button"
+                      onClick={handleConnectInstagram}
                       className="rounded-md border border-pink-500/50 bg-pink-500/15 px-2 py-1 text-[11px] font-semibold text-pink-100 hover:bg-pink-500/25"
                     >
                       Connect
-                    </a>
+                    </button>
                   ) : (
                     <span className="text-[10px] text-zinc-500">Preparing…</span>
                   )}
@@ -183,12 +219,13 @@ export default function SocialConnectionsModal({
                   ) : !process.env.NEXT_PUBLIC_TIKTOK_CLIENT_KEY?.trim() ? (
                     <span className="text-[10px] text-amber-200/80">Set TikTok client key</span>
                   ) : (
-                    <a
-                      href={`/api/auth/tiktok/init?profileId=${encodeURIComponent(activeProfileId)}`}
+                    <button
+                      type="button"
+                      onClick={handleConnectTikTok}
                       className="rounded-md border border-cyan-500/50 bg-cyan-500/15 px-2 py-1 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-500/25"
                     >
                       Connect
-                    </a>
+                    </button>
                   )}
                 </div>
               </div>

@@ -2,9 +2,15 @@
 
 import { createClient } from "@supabase/supabase-js";
 
-import { getAuthRole } from "@/lib/server/getAuthRole";
+import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
+import {
+  isDateWithinReportingRange,
+  resolveReportingRange,
+  type ReportingPeriodInput,
+} from "@/lib/reportingPeriod";
+import { isTestTaskRow } from "@/lib/testTaskFilter";
 
-export type ProductivityTimeframe = "day" | "week" | "month" | "year";
+export type ProductivityTimeframe = "day" | "month" | "year" | "custom";
 
 export type ProductivityBucket = {
   key: string;
@@ -196,6 +202,63 @@ function resolveReferenceDate(month?: number, year?: number): Date {
   return now;
 }
 
+function parseDateInput(value: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+  const [year, month, day] = value.split("-").map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+  const parsed = new Date(year, month - 1, day, 12, 0, 0, 0);
+  if (
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+function buildCustomTimeSlots(
+  customStartDate: string,
+  customEndDate: string
+): { rangeStart: Date; rangeEnd: Date; slots: TimeSlot[] } | null {
+  const startAnchor = parseDateInput(customStartDate);
+  const endAnchor = parseDateInput(customEndDate);
+  if (!startAnchor || !endAnchor) {
+    return null;
+  }
+
+  const rangeStart = new Date(startAnchor);
+  rangeStart.setHours(0, 0, 0, 0);
+  const rangeEnd = new Date(endAnchor);
+  rangeEnd.setHours(23, 59, 59, 999);
+
+  if (rangeStart.getTime() > rangeEnd.getTime()) {
+    return null;
+  }
+
+  const slots: TimeSlot[] = [];
+  const cursor = new Date(rangeStart);
+  while (cursor <= rangeEnd) {
+    const start = new Date(cursor);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setHours(23, 59, 59, 999);
+    slots.push({
+      key: dateKey(start),
+      label: new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short" }).format(start),
+      start,
+      end,
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return { rangeStart, rangeEnd, slots };
+}
+
 function buildTimeSlots(timeframe: ProductivityTimeframe, now = new Date()): {
   rangeStart: Date;
   rangeEnd: Date;
@@ -215,31 +278,6 @@ function buildTimeSlots(timeframe: ProductivityTimeframe, now = new Date()): {
       slots.push({
         key: `hour-${hour}`,
         label: `${String(hour).padStart(2, "0")}:00`,
-        start,
-        end,
-      });
-    }
-    return { rangeStart, rangeEnd, slots };
-  }
-
-  if (timeframe === "week") {
-    const rangeEnd = new Date(now);
-    rangeEnd.setHours(23, 59, 59, 999);
-    const rangeStart = new Date(now);
-    rangeStart.setDate(rangeStart.getDate() - 6);
-    rangeStart.setHours(0, 0, 0, 0);
-    const slots: TimeSlot[] = [];
-    for (let i = 0; i < 7; i += 1) {
-      const start = new Date(rangeStart);
-      start.setDate(rangeStart.getDate() + i);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(start);
-      end.setHours(23, 59, 59, 999);
-      slots.push({
-        key: dateKey(start),
-        label: new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "2-digit", month: "short" }).format(
-          start
-        ),
         start,
         end,
       });
@@ -310,7 +348,7 @@ function isWithinShift(at: Date | null, shift: ShiftRow): at is Date {
 }
 
 async function assertAdmin(): Promise<{ ok: true } | { ok: false; error: string }> {
-  const auth = await getAuthRole();
+  const auth = await getAdminAreaAuth();
   if (!auth.authenticated || !auth.isAdmin) {
     return { ok: false, error: "Forbidden" };
   }
@@ -369,7 +407,10 @@ export async function getProductivityStats(
   timeframe: ProductivityTimeframe,
   userId?: string,
   month?: number,
-  year?: number
+  year?: number,
+  customStartDate?: string,
+  customEndDate?: string,
+  selectedDayDate?: string
 ): Promise<
   | {
       ok: true;
@@ -389,8 +430,37 @@ export async function getProductivityStats(
     return { ok: false, error: "Database is not configured." };
   }
 
-  const referenceDate = resolveReferenceDate(month, year);
-  const { rangeStart, rangeEnd, slots } = buildTimeSlots(timeframe, referenceDate);
+  let rangeStart: Date;
+  let rangeEnd: Date;
+  let slots: TimeSlot[];
+
+  if (timeframe === "day") {
+    const dayAnchor = parseDateInput(selectedDayDate?.trim() ?? "") ?? new Date();
+    const built = buildTimeSlots("day", dayAnchor);
+    rangeStart = built.rangeStart;
+    rangeEnd = built.rangeEnd;
+    slots = built.slots;
+  } else if (timeframe === "custom") {
+    const start = customStartDate?.trim() ?? "";
+    const end = customEndDate?.trim() ?? "";
+    if (!start || !end) {
+      return { ok: false, error: "Custom timeframe requires a start date and end date." };
+    }
+    const customRange = buildCustomTimeSlots(start, end);
+    if (!customRange) {
+      return { ok: false, error: "Invalid custom date range. Use YYYY-MM-DD with start on or before end." };
+    }
+    rangeStart = customRange.rangeStart;
+    rangeEnd = customRange.rangeEnd;
+    slots = customRange.slots;
+  } else {
+    const referenceDate = resolveReferenceDate(month, year);
+    const built = buildTimeSlots(timeframe, referenceDate);
+    rangeStart = built.rangeStart;
+    rangeEnd = built.rangeEnd;
+    slots = built.slots;
+  }
+
   const filterUserId = userId?.trim() || null;
 
   let shiftsQuery = sb
@@ -609,4 +679,137 @@ export async function getProductivityStats(
     });
 
   return { ok: true, summary, buckets, dailyLogs };
+}
+
+export type CreditNoteBillingJob = {
+  id: string;
+  clientName: string;
+  jobName: string;
+  jobDate: string;
+  jobDateLabel: string;
+  expectedRevenue: number;
+};
+
+export type CreditNoteBillingClientGroup = {
+  clientName: string;
+  totalExpected: number;
+  jobs: CreditNoteBillingJob[];
+};
+
+function formatCreditNoteJobDateLabel(value: string): string {
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const parsed = new Date(trimmed);
+    if (Number.isNaN(parsed.getTime())) {
+      return "—";
+    }
+    return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short" }).format(parsed);
+  }
+  const [year, month, day] = trimmed.split("-").map(Number);
+  const parsed = new Date(year, month - 1, day, 12, 0, 0, 0);
+  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short" }).format(parsed);
+}
+
+function resolveCreditNoteClientName(row: Record<string, unknown>): string {
+  const company = typeof row.company_name === "string" ? row.company_name.trim() : "";
+  if (company) {
+    return company;
+  }
+  const client = typeof row.client === "string" ? row.client.trim() : "";
+  if (client) {
+    return client;
+  }
+  const contact = [row.contact_first_name, row.contact_last_name]
+    .map((part) => (typeof part === "string" ? part.trim() : ""))
+    .filter(Boolean)
+    .join(" ");
+  return contact || "Unknown client";
+}
+
+function resolveCreditNoteJobName(row: Record<string, unknown>): string {
+  const title = typeof row.title === "string" ? row.title.trim() : "";
+  if (title) {
+    return title;
+  }
+  const photoshootType = typeof row.photoshoot_type === "string" ? row.photoshoot_type.trim() : "";
+  return photoshootType || "Photoshoot";
+}
+
+export async function getCreditNoteBillingSummary(
+  reportingPeriod: ReportingPeriodInput
+): Promise<
+  | { ok: true; groups: CreditNoteBillingClientGroup[]; totalExpected: number }
+  | { ok: false; error: string }
+> {
+  const admin = await assertAdmin();
+  if (!admin.ok) {
+    return admin;
+  }
+
+  const range = resolveReportingRange(reportingPeriod);
+  if (!range) {
+    return { ok: false, error: "Invalid reporting period." };
+  }
+
+  const sb = serviceSupabase();
+  if (!sb) {
+    return { ok: false, error: "Database is not configured." };
+  }
+
+  const { data, error } = await sb
+    .from("tasks")
+    .select(
+      "id, title, company_name, client, contact_first_name, contact_last_name, photoshoot_type, photoshoot_date, expected_revenue, is_credit_note"
+    )
+    .eq("is_credit_note", true);
+
+  if (error) {
+    return { ok: false, error: error.message };
+  }
+
+  const jobs: CreditNoteBillingJob[] = [];
+  for (const row of data ?? []) {
+    const record = row as Record<string, unknown>;
+    if (isTestTaskRow(record)) {
+      continue;
+    }
+
+    const shootDateRaw =
+      typeof record.photoshoot_date === "string"
+        ? record.photoshoot_date.trim()
+        : record.photoshoot_date != null
+          ? String(record.photoshoot_date).trim()
+          : "";
+    if (!shootDateRaw || !isDateWithinReportingRange(shootDateRaw, range)) {
+      continue;
+    }
+
+    const expectedRevenue = Number(record.expected_revenue);
+    jobs.push({
+      id: String(record.id ?? ""),
+      clientName: resolveCreditNoteClientName(record),
+      jobName: resolveCreditNoteJobName(record),
+      jobDate: shootDateRaw,
+      jobDateLabel: formatCreditNoteJobDateLabel(shootDateRaw),
+      expectedRevenue: Number.isFinite(expectedRevenue) ? expectedRevenue : 0,
+    });
+  }
+
+  const grouped = new Map<string, CreditNoteBillingJob[]>();
+  for (const job of jobs) {
+    const existing = grouped.get(job.clientName) ?? [];
+    existing.push(job);
+    grouped.set(job.clientName, existing);
+  }
+
+  const groups: CreditNoteBillingClientGroup[] = [...grouped.entries()]
+    .map(([clientName, clientJobs]) => {
+      const sortedJobs = [...clientJobs].sort((a, b) => a.jobDate.localeCompare(b.jobDate));
+      const totalExpected = sortedJobs.reduce((sum, job) => sum + job.expectedRevenue, 0);
+      return { clientName, totalExpected, jobs: sortedJobs };
+    })
+    .sort((a, b) => b.totalExpected - a.totalExpected || a.clientName.localeCompare(b.clientName));
+
+  const totalExpected = groups.reduce((sum, group) => sum + group.totalExpected, 0);
+  return { ok: true, groups, totalExpected };
 }

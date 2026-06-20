@@ -1,11 +1,14 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
-import { getAuthRole } from "@/lib/server/getAuthRole";
+import {
+  type ReportingTimeframe,
+  resolveReportingRange,
+} from "@/lib/reportingPeriod";
+import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
+import { isTestTaskRow } from "@/lib/testTaskFilter";
 
 export const dynamic = "force-dynamic";
-
-type TimeframeKey = "week" | "month" | "year" | "lastYear";
 
 type TaskRow = Record<string, unknown>;
 
@@ -15,12 +18,6 @@ type Metrics = {
   totalBookings: number;
   totalNetRevenue: number;
   totalTaxes: number;
-};
-
-type DateRangePayload = {
-  start: string;
-  end: string;
-  subtitle: string;
 };
 
 function toNumber(value: unknown): number | null {
@@ -40,110 +37,6 @@ function parseDate(value: unknown): Date | null {
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function startOfWeek(date: Date): Date {
-  const result = new Date(date);
-  const day = result.getDay();
-  const diffToMonday = (day + 6) % 7;
-  result.setHours(0, 0, 0, 0);
-  result.setDate(result.getDate() - diffToMonday);
-  return result;
-}
-
-function endOfWeek(date: Date): Date {
-  const start = startOfWeek(date);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 6);
-  end.setHours(23, 59, 59, 999);
-  return end;
-}
-
-function startOfMonth(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth(), 1, 0, 0, 0, 0);
-}
-
-function endOfMonth(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59, 999);
-}
-
-function startOfYear(year: number): Date {
-  return new Date(year, 0, 1, 0, 0, 0, 0);
-}
-
-function endOfYear(year: number): Date {
-  return new Date(year, 11, 31, 23, 59, 59, 999);
-}
-
-function formatShortRange(start: Date, end: Date, key: TimeframeKey): string {
-  if (key === "month") {
-    return new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" }).format(start);
-  }
-  if (key === "year" || key === "lastYear") {
-    return `Jan-Dec ${start.getFullYear()}`;
-  }
-
-  const sameMonthAndYear =
-    start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth();
-  if (sameMonthAndYear) {
-    const monthLabel = new Intl.DateTimeFormat("en-GB", { month: "short" }).format(start);
-    return `${String(start.getDate()).padStart(2, "0")}-${String(end.getDate()).padStart(2, "0")} ${monthLabel}`;
-  }
-  const startLabel = new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short" }).format(start);
-  const endLabel = new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short" }).format(end);
-  return `${startLabel}-${endLabel}`;
-}
-
-function buildRangePayload(start: Date, end: Date, key: TimeframeKey): DateRangePayload {
-  return {
-    start: start.toISOString(),
-    end: end.toISOString(),
-    subtitle: formatShortRange(start, end, key),
-  };
-}
-
-function parseMonthYearParams(
-  monthParam: string | null,
-  yearParam: string | null
-): { month: number; year: number } | null {
-  const month = Number(monthParam);
-  const year = Number(yearParam);
-  if (!Number.isInteger(month) || month < 1 || month > 12) {
-    return null;
-  }
-  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
-    return null;
-  }
-  return { month, year };
-}
-
-function resolveReferenceDate(monthParam: string | null, yearParam: string | null): Date {
-  const parsed = parseMonthYearParams(monthParam, yearParam);
-  if (parsed) {
-    return new Date(parsed.year, parsed.month - 1, 1, 12, 0, 0, 0);
-  }
-  return new Date();
-}
-
-function isInReferenceWeek(shootDate: Date, reference: Date): boolean {
-  const weekStart = startOfWeek(reference);
-  const weekEnd = new Date(weekStart);
-  weekEnd.setDate(weekEnd.getDate() + 7);
-  return shootDate >= weekStart && shootDate < weekEnd;
-}
-
-function isInReferenceMonth(shootDate: Date, reference: Date): boolean {
-  return (
-    shootDate.getFullYear() === reference.getFullYear() && shootDate.getMonth() === reference.getMonth()
-  );
-}
-
-function isInReferenceYear(shootDate: Date, reference: Date): boolean {
-  return shootDate.getFullYear() === reference.getFullYear();
-}
-
-function isInYearBeforeReference(shootDate: Date, reference: Date): boolean {
-  return shootDate.getFullYear() === reference.getFullYear() - 1;
 }
 
 function parseLineItems(value: unknown): Array<{ quantity: number; price: number }> {
@@ -221,16 +114,6 @@ function deriveTotalMinutes(row: TaskRow): number | null {
   return (completedAt.getTime() - startedAt.getTime()) / 60000;
 }
 
-function emptyMetrics(): Metrics {
-  return {
-    averageEditTimeMinutes: 0,
-    averageTotalTimeMinutes: 0,
-    totalBookings: 0,
-    totalNetRevenue: 0,
-    totalTaxes: 0,
-  };
-}
-
 function average(values: number[]): number {
   if (values.length === 0) {
     return 0;
@@ -238,17 +121,52 @@ function average(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+function parseTimeframe(value: string | null): ReportingTimeframe | null {
+  if (value === "day" || value === "month" || value === "year" || value === "custom") {
+    return value;
+  }
+  return null;
+}
+
+function buildMetrics(rows: TaskRow[]): Metrics {
+  const editMinutes = rows.map(deriveEditMinutes).filter((value): value is number => value !== null);
+  const totalMinutes = rows.map(deriveTotalMinutes).filter((value): value is number => value !== null);
+  const financials = rows.map(deriveFinancials);
+  return {
+    averageEditTimeMinutes: average(editMinutes),
+    averageTotalTimeMinutes: average(totalMinutes),
+    totalBookings: rows.length,
+    totalNetRevenue: financials.reduce((sum, value) => sum + value.net, 0),
+    totalTaxes: financials.reduce((sum, value) => sum + value.tax, 0),
+  };
+}
+
 export async function GET(request: Request) {
-  const auth = await getAuthRole();
+  const auth = await getAdminAreaAuth();
   if (!auth.authenticated || !auth.isAdmin) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const { searchParams } = new URL(request.url);
+  const timeframe = parseTimeframe(searchParams.get("timeframe")) ?? "month";
   const monthParam = searchParams.get("month");
   const yearParam = searchParams.get("year");
-  const selectedPeriod = parseMonthYearParams(monthParam, yearParam);
-  const referenceDate = resolveReferenceDate(monthParam, yearParam);
+  const selectedMonthValue =
+    monthParam && yearParam && Number.isInteger(Number(monthParam)) && Number.isInteger(Number(yearParam))
+      ? `${yearParam}-${String(Number(monthParam)).padStart(2, "0")}`
+      : undefined;
+
+  const range = resolveReportingRange({
+    timeframe,
+    selectedDayDate: searchParams.get("dayDate") ?? undefined,
+    selectedMonthValue,
+    customStartDate: searchParams.get("customStartDate") ?? undefined,
+    customEndDate: searchParams.get("customEndDate") ?? undefined,
+  });
+
+  if (!range) {
+    return NextResponse.json({ error: "Invalid reporting period parameters." }, { status: 400 });
+  }
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
   const key =
@@ -260,86 +178,31 @@ export async function GET(request: Request) {
   const supabase = createClient(url, key, { auth: { persistSession: false } });
   const { data, error } = await supabase
     .from("tasks")
-    .select("*")
-    .not("title", "ilike", "%test%")
-    .not("company_name", "ilike", "%test%")
-    .not("client", "ilike", "%test%");
+    .select("*");
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
 
-  const rows = (data ?? []) as TaskRow[];
-  const referenceYear = referenceDate.getFullYear();
-  const ranges: Record<TimeframeKey, DateRangePayload> = {
-    week: buildRangePayload(startOfWeek(referenceDate), endOfWeek(referenceDate), "week"),
-    month: buildRangePayload(startOfMonth(referenceDate), endOfMonth(referenceDate), "month"),
-    year: buildRangePayload(startOfYear(referenceYear), endOfYear(referenceYear), "year"),
-    lastYear: buildRangePayload(
-      startOfYear(referenceYear - 1),
-      endOfYear(referenceYear - 1),
-      "lastYear"
-    ),
-  };
-  const buckets: Record<TimeframeKey, TaskRow[]> = {
-    week: [],
-    month: [],
-    year: [],
-    lastYear: [],
-  };
-
-  for (const row of rows) {
+  const rows = ((data ?? []) as TaskRow[]).filter((row) => {
+    if (isTestTaskRow(row)) {
+      return false;
+    }
     const shootDate = parseDate(row.photoshoot_date);
     if (!shootDate) {
-      continue;
+      return false;
     }
-    if (isInReferenceWeek(shootDate, referenceDate)) buckets.week.push(row);
-    if (isInReferenceMonth(shootDate, referenceDate)) buckets.month.push(row);
-    if (isInReferenceYear(shootDate, referenceDate)) buckets.year.push(row);
-    if (isInYearBeforeReference(shootDate, referenceDate)) buckets.lastYear.push(row);
-  }
-
-  const metricsByBucket = (Object.keys(buckets) as TimeframeKey[]).reduce<Record<TimeframeKey, Metrics>>(
-    (acc, key) => {
-      const bucketRows = buckets[key];
-      const editMinutes = bucketRows.map(deriveEditMinutes).filter((value): value is number => value !== null);
-      const totalMinutes = bucketRows.map(deriveTotalMinutes).filter((value): value is number => value !== null);
-      const financials = bucketRows.map(deriveFinancials);
-      acc[key] = {
-        averageEditTimeMinutes: average(editMinutes),
-        averageTotalTimeMinutes: average(totalMinutes),
-        totalBookings: bucketRows.length,
-        totalNetRevenue: financials.reduce((sum, value) => sum + value.net, 0),
-        totalTaxes: financials.reduce((sum, value) => sum + value.tax, 0),
-      };
-      return acc;
-    },
-    {
-      week: emptyMetrics(),
-      month: emptyMetrics(),
-      year: emptyMetrics(),
-      lastYear: emptyMetrics(),
-    }
-  );
-
-  const monthLabel = new Intl.DateTimeFormat("en-GB", {
-    month: "long",
-    year: "numeric",
-  }).format(referenceDate);
-  const isCurrentMonth =
-    referenceDate.getFullYear() === new Date().getFullYear() &&
-    referenceDate.getMonth() === new Date().getMonth();
+    return shootDate >= range.start && shootDate <= range.end;
+  });
 
   return NextResponse.json({
     generatedAt: new Date().toISOString(),
-    selectedMonth: selectedPeriod?.month ?? referenceDate.getMonth() + 1,
-    selectedYear: selectedPeriod?.year ?? referenceYear,
-    labels: {
-      week: isCurrentMonth ? "This Week" : `Week of ${ranges.week.subtitle}`,
-      month: isCurrentMonth ? "This Month" : monthLabel,
-      year: String(referenceYear),
-      lastYear: String(referenceYear - 1),
+    timeframe,
+    range: {
+      start: range.start.toISOString(),
+      end: range.end.toISOString(),
+      subtitle: range.subtitle,
+      label: range.label,
     },
-    ranges,
-    metrics: metricsByBucket,
+    metrics: buildMetrics(rows),
   });
 }

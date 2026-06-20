@@ -123,6 +123,9 @@ type TaskSupabasePayload = {
   title: string;
   client: string;
   skip_invoice: boolean;
+  is_credit_note: boolean;
+  expected_revenue: number;
+  is_paid: boolean;
 };
 
 const selectStyles = {
@@ -237,6 +240,7 @@ function HomeContent() {
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
   const [accessNotice, setAccessNotice] = useState<string | null>(null);
@@ -277,6 +281,9 @@ function HomeContent() {
   const [dueDate, setDueDate] = useState("");
   const [discount, setDiscount] = useState(0);
   const [skipInvoice, setSkipInvoice] = useState(false);
+  const [isCreditNote, setIsCreditNote] = useState(false);
+  const [expectedRevenue, setExpectedRevenue] = useState(0);
+  const [isPaid, setIsPaid] = useState(false);
   const [currentTaskStatus, setCurrentTaskStatus] = useState<BoardTask["status"]>("booking");
   const [localFolderNameDisplay, setLocalFolderNameDisplay] = useState("");
   const [openSections, setOpenSections] = useState({
@@ -543,6 +550,9 @@ function HomeContent() {
     setDueDate("");
     setDiscount(0);
     setSkipInvoice(false);
+    setIsCreditNote(false);
+    setExpectedRevenue(0);
+    setIsPaid(false);
     setCurrentTaskStatus("booking");
     setLocalFolderNameDisplay("");
     setPreservedTaskTitle("");
@@ -552,6 +562,7 @@ function HomeContent() {
   const closeModal = () => {
     setShowBookingModal(false);
     setEditingTaskId(null);
+    setIsDeleting(false);
     setOpenSections({ client: true, invoice: false, info: false });
     resetForm();
   };
@@ -614,6 +625,9 @@ function HomeContent() {
     setDueDate(task.dueDate);
     setDiscount(task.discount);
     setSkipInvoice(task.skipInvoice ?? false);
+    setIsCreditNote(task.isCreditNote ?? false);
+    setExpectedRevenue(task.expectedRevenue ?? 0);
+    setIsPaid(task.isPaid ?? false);
     setCurrentTaskStatus(task.status);
     setLocalFolderNameDisplay(task.localFolderName ?? "");
     setPreservedTaskTitle(task.taskTitle?.trim() ?? "");
@@ -717,6 +731,42 @@ function HomeContent() {
     setShowCatalogModal(false);
   };
 
+  const handleDelete = async () => {
+    if (!editingTaskId || isDeleting || isSubmitting) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Are you sure you want to permanently delete this booking? This cannot be undone."
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setIsDeleting(true);
+    setFormError(null);
+
+    try {
+      const response = await fetch("/api/tasks", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ taskId: editingTaskId }),
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Failed to delete booking (HTTP ${response.status}).`);
+      }
+
+      closeModal();
+      setRefreshSignal((prev) => prev + 1);
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : "Failed to delete booking.");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFormError(null);
@@ -814,22 +864,6 @@ function HomeContent() {
     const displayClientLabel = companyName.trim() || contactPerson.trim() || "Client";
     const generatedTitle = `${photoshootType} - ${displayClientLabel} - ${shootLocation}`;
 
-    if (isAdmin && saveAsNewClient && !editingTaskId) {
-      const { error: clientError } = await supabase.from("clients").insert({
-        company_name: companyName.trim(),
-        street,
-        zip_code: zipCode,
-        city,
-        lexoffice_contact_id: lexofficeContactId || null,
-      });
-
-      if (clientError) {
-        setIsSubmitting(false);
-        setFormError(`Failed to save client: ${clientError.message}`);
-        return;
-      }
-    }
-
     const payload: TaskSupabasePayload = {
       company_name: companyName.trim(),
       contact_first_name: contactFirstName.trim(),
@@ -870,14 +904,23 @@ function HomeContent() {
       title: generatedTitle,
       client: displayClientLabel,
       skip_invoice: skipInvoice,
+      is_credit_note: isCreditNote,
+      expected_revenue: isCreditNote ? Number(expectedRevenue) || 0 : 0,
+      is_paid: isPaid,
     };
 
     if (editingTaskId) {
-      const { error } = await supabase.from("tasks").update(payload).eq("id", editingTaskId);
+      const updateResponse = await fetch("/api/tasks/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ id: editingTaskId, ...payload }),
+      });
       setIsSubmitting(false);
 
-      if (error) {
-        setFormError(error.message);
+      const updateBody = (await updateResponse.json().catch(() => null)) as { error?: string } | null;
+      if (!updateResponse.ok) {
+        setFormError(updateBody?.error ?? `Could not update booking (HTTP ${updateResponse.status}).`);
         return;
       }
     } else {
@@ -892,21 +935,6 @@ function HomeContent() {
       const createBody = (await createResponse.json().catch(() => null)) as { error?: string; id?: string } | null;
       if (!createResponse.ok) {
         setFormError(createBody?.error ?? `Could not create booking (HTTP ${createResponse.status}).`);
-        return;
-      }
-    }
-
-    if (isAdmin && editingTaskId && saveToClientAddressBook) {
-      const { error: clientInsertError } = await supabase.from("clients").insert({
-        company_name: companyName.trim(),
-        street,
-        zip_code: zipCode,
-        city,
-        lexoffice_contact_id: lexofficeContactId || null,
-      });
-
-      if (clientInsertError) {
-        setFormError(`Task updated, but client save failed: ${clientInsertError.message}`);
         return;
       }
     }
@@ -1248,6 +1276,41 @@ function HomeContent() {
                         />
                         No Invoice (skip Lexoffice invoice workflow)
                       </label>
+                      <label className="sm:col-span-2 inline-flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={isCreditNote}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            setIsCreditNote(checked);
+                            if (!checked) {
+                              setExpectedRevenue(0);
+                            }
+                          }}
+                        />
+                        Credit Note (self-billing / expected fee tracking)
+                      </label>
+                      {isCreditNote ? (
+                        <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                          Expected Fee (€)
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={expectedRevenue}
+                            onChange={(event) => setExpectedRevenue(Number(event.target.value) || 0)}
+                            className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                          />
+                        </label>
+                      ) : null}
+                      <label className={`inline-flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 ${isCreditNote ? "" : "sm:col-span-2"}`}>
+                        <input
+                          type="checkbox"
+                          checked={isPaid}
+                          onChange={(event) => setIsPaid(event.target.checked)}
+                        />
+                        Is Paid
+                      </label>
                     </div>
                     <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
@@ -1546,21 +1609,36 @@ function HomeContent() {
 
               {formError ? <p className="text-sm text-red-600 dark:text-red-400">{formError}</p> : null}
 
-              <div className="flex justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={closeModal}
-                  className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-300 px-4 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmitting || authRoleLoading}
-                  className="inline-flex h-10 items-center justify-center rounded-lg bg-zinc-900 px-4 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-                >
-                  {isSubmitting ? "Saving..." : editingTaskId ? "Save Changes" : "Create Booking"}
-                </button>
+              <div className="flex items-center justify-between gap-3 pt-2">
+                {editingTaskId && isAdmin ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleDelete()}
+                    disabled={isDeleting || isSubmitting || authRoleLoading}
+                    className="inline-flex h-10 items-center justify-center rounded-lg border border-red-300 px-4 text-sm font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/40"
+                  >
+                    {isDeleting ? "Deleting..." : "Delete Booking"}
+                  </button>
+                ) : (
+                  <span />
+                )}
+                <div className="flex justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={closeModal}
+                    disabled={isDeleting}
+                    className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-300 px-4 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmitting || isDeleting || authRoleLoading}
+                    className="inline-flex h-10 items-center justify-center rounded-lg bg-zinc-900 px-4 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                  >
+                    {isSubmitting ? "Saving..." : editingTaskId ? "Save Changes" : "Create Booking"}
+                  </button>
+                </div>
               </div>
             </form>
           </div>

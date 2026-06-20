@@ -355,6 +355,10 @@ export default function SchedulerPage() {
     accounts: MetaIgAccountOption[];
   } | null>(null);
   const [socialConnectionsOpen, setSocialConnectionsOpen] = useState(false);
+  const [isAddProfileModalOpen, setIsAddProfileModalOpen] = useState(false);
+  const [newPlatform, setNewPlatform] = useState<Platform>("instagram");
+  const [newProfileHandle, setNewProfileHandle] = useState("");
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const syncingFromDbRef = useRef(false);
@@ -1214,32 +1218,54 @@ export default function SchedulerPage() {
     if (!activeClientId) {
       return;
     }
-    const platformInput = window.prompt("Enter platform (e.g., Instagram, TikTok):")?.trim();
-    if (!platformInput) {
+    setNewPlatform("instagram");
+    setNewProfileHandle("");
+    setIsAddProfileModalOpen(true);
+  };
+
+  const closeAddProfileModal = () => {
+    if (isSavingProfile) {
       return;
     }
-    const handleInput = window.prompt("Enter account handle (e.g., @mybrand):")?.trim();
+    setIsAddProfileModalOpen(false);
+    setNewPlatform("instagram");
+    setNewProfileHandle("");
+  };
+
+  const submitNewProfile = async () => {
+    if (!activeClientId || isSavingProfile) {
+      return;
+    }
+
+    const handleInput = newProfileHandle.trim();
     if (!handleInput) {
+      setPersistenceError("Account handle is required.");
       return;
     }
 
-    const normalizedPlatform = toDisplayPlatform(platformInput).toLowerCase();
-    if (!supabase) {
-      const localProfileId = `${activeClientId}-${Date.now()}`;
-      const localProfile = {
-        id: localProfileId,
-        client_id: activeClientId,
-        platform: normalizedPlatform,
-        handle: handleInput,
-      };
-      setProfiles((prev) => [...prev, localProfile]);
-      setAppState((prev) => ({ ...prev, [localProfileId]: createClientData() }));
-      setActiveProfileId(localProfileId);
-      setCurrentBoardIndex(0);
-      return;
-    }
+    const normalizedPlatform = newPlatform;
+    setIsSavingProfile(true);
+    setPersistenceError(null);
 
-    void (async () => {
+    try {
+      if (!supabase) {
+        const localProfileId = `${activeClientId}-${Date.now()}`;
+        const localProfile = {
+          id: localProfileId,
+          client_id: activeClientId,
+          platform: normalizedPlatform,
+          handle: handleInput,
+        };
+        setProfiles((prev) => [...prev, localProfile]);
+        setAppState((prev) => ({ ...prev, [localProfileId]: createClientData() }));
+        setActiveProfileId(localProfileId);
+        setCurrentBoardIndex(0);
+        setIsAddProfileModalOpen(false);
+        setNewPlatform("instagram");
+        setNewProfileHandle("");
+        return;
+      }
+
       const inserted = await supabase
         .from("social_profiles")
         .insert({
@@ -1249,16 +1275,23 @@ export default function SchedulerPage() {
         })
         .select("*")
         .single();
+
       if (inserted.error || !inserted.data) {
         setPersistenceError(`Could not add account profile: ${inserted.error?.message ?? "Unknown error"}`);
         return;
       }
+
       const row = inserted.data as SocialProfileRow;
       setProfiles((prev) => [...prev, row]);
       setAppState((prev) => ({ ...prev, [row.id]: prev[row.id] ?? createClientData() }));
       setActiveProfileId(row.id);
       setCurrentBoardIndex(0);
-    })();
+      setIsAddProfileModalOpen(false);
+      setNewPlatform("instagram");
+      setNewProfileHandle("");
+    } finally {
+      setIsSavingProfile(false);
+    }
   };
 
   return (
@@ -1743,6 +1776,70 @@ export default function SchedulerPage() {
                   Save Caption
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isAddProfileModalOpen ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-profile-title"
+            className="w-full max-w-md rounded-xl border border-white/10 bg-zinc-900 p-6 shadow-2xl"
+          >
+            <h3 id="add-profile-title" className="text-lg font-semibold text-zinc-100">
+              Add Social Profile
+            </h3>
+            <p className="mt-1 text-sm text-zinc-400">
+              Link a social account to {activeClientName}.
+            </p>
+
+            <div className="mt-5 space-y-4">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                Platform
+                <select
+                  value={newPlatform}
+                  onChange={(event) => setNewPlatform(event.target.value as Platform)}
+                  disabled={isSavingProfile}
+                  className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none ring-zinc-500 focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <option value="instagram">Instagram</option>
+                  <option value="tiktok">TikTok</option>
+                </select>
+              </label>
+
+              <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                Account Handle
+                <input
+                  type="text"
+                  value={newProfileHandle}
+                  onChange={(event) => setNewProfileHandle(event.target.value)}
+                  placeholder="@mybrand"
+                  disabled={isSavingProfile}
+                  className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none ring-zinc-500 focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60"
+                />
+              </label>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeAddProfileModal}
+                disabled={isSavingProfile}
+                className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-semibold text-zinc-300 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitNewProfile()}
+                disabled={isSavingProfile}
+                className="rounded-lg border border-zinc-200 bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSavingProfile ? "Saving..." : "Save"}
+              </button>
             </div>
           </div>
         </div>

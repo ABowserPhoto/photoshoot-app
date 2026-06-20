@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage } = require("electron");
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -706,6 +706,45 @@ function stopProductionServer() {
   }, 5000);
 }
 
+function configureExternalLinks(webContents, appOrigin) {
+  webContents.setWindowOpenHandler(({ url }) => {
+    if (url) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
+
+  webContents.on("will-navigate", (event, url) => {
+    if (shouldOpenInSystemBrowser(url, appOrigin)) {
+      event.preventDefault();
+      void shell.openExternal(url);
+    }
+  });
+}
+
+function shouldOpenInSystemBrowser(url, appOrigin) {
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return true;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    const oauthHosts = ["facebook.com", "tiktok.com", "instagram.com", "google.com"];
+    if (oauthHosts.some((oauthHost) => host === oauthHost || host.endsWith(`.${oauthHost}`))) {
+      return true;
+    }
+
+    if (parsed.origin === appOrigin) {
+      return false;
+    }
+
+    return host !== "localhost" && host !== "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
 function createWindow(loadUrl = serverUrl) {
   const appIconPath = resolveAppIconPath();
   mainWindow = new BrowserWindow({
@@ -721,6 +760,7 @@ function createWindow(loadUrl = serverUrl) {
   });
 
   mainWindow.loadURL(loadUrl);
+  configureExternalLinks(mainWindow.webContents, new URL(loadUrl).origin);
   if (isDev) {
     mainWindow.webContents.openDevTools();
   }
@@ -768,6 +808,7 @@ function createFloatingWidget(loadUrl = serverUrl) {
   });
 
   widgetWindow.loadURL(`${loadUrl}/desktop-widget`);
+  configureExternalLinks(widgetWindow.webContents, new URL(loadUrl).origin);
 
   widgetWindow.on("close", (event) => {
     if (!app.isQuitting) {

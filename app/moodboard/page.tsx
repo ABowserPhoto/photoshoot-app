@@ -29,6 +29,7 @@ import {
   type MoodboardSummary,
 } from "@/app/actions/moodboard";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
+import { getSafePosition } from "@/lib/moodboardPlacement";
 
 const ReactPlayer = dynamic(() => import("react-player").then((m) => m.default), {
   ssr: false,
@@ -1263,14 +1264,26 @@ function MoodboardPageContent() {
     };
   }, []);
 
+  const resolveSafeElementPosition = useCallback(
+    (width: number, height: number) => {
+      const center = calculateVisibleCenterCoord();
+      const existingItems = elementsRef.current.map((el) => ({
+        x: el.x,
+        y: el.y,
+        width: el.width,
+        height: el.height,
+      }));
+      return getSafePosition({ width, height }, existingItems, center.x, center.y);
+    },
+    [calculateVisibleCenterCoord]
+  );
+
   const handleAdd = async (type: ElementTypeKey) => {
     if (!moodboard?.id) {
       return;
     }
     const { w, h } = ELEMENT_DEFAULT_SIZE[type];
-    const center = calculateVisibleCenterCoord();
-    const x = Math.max(16, Math.round(center.x - w / 2));
-    const y = Math.max(16, Math.round(center.y - h / 2));
+    const { x, y } = resolveSafeElementPosition(w, h);
     const res = await createElement({
       moodboardId: moodboard.id,
       type,
@@ -1381,9 +1394,7 @@ function MoodboardPageContent() {
     }
     const imgW = 320;
     const imgH = 220;
-    const center = calculateVisibleCenterCoord();
-    const x = Math.max(16, Math.round(center.x - imgW / 2));
-    const y = Math.max(16, Math.round(center.y - imgH / 2));
+    const { x, y } = resolveSafeElementPosition(imgW, imgH);
     const res = await createElement({
       moodboardId: moodboard.id,
       type: "image",

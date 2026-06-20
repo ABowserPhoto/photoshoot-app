@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
+import { attachClientIdToTaskPayload } from "@/lib/resolveTaskClientId";
 
 export const dynamic = "force-dynamic";
 
@@ -59,6 +60,27 @@ export async function POST(request: Request) {
         ? ["1", "true", "yes", "on"].includes(skipInvoiceRaw.trim().toLowerCase())
         : false;
 
+  const creditNoteRaw = insertRow.is_credit_note;
+  insertRow.is_credit_note =
+    typeof creditNoteRaw === "boolean"
+      ? creditNoteRaw
+      : typeof creditNoteRaw === "string"
+        ? ["1", "true", "yes", "on"].includes(creditNoteRaw.trim().toLowerCase())
+        : false;
+
+  const expectedRevenueRaw = insertRow.expected_revenue;
+  const parsedExpectedRevenue = Number(expectedRevenueRaw);
+  insertRow.expected_revenue =
+    insertRow.is_credit_note && Number.isFinite(parsedExpectedRevenue) ? parsedExpectedRevenue : 0;
+
+  const isPaidRaw = insertRow.is_paid;
+  insertRow.is_paid =
+    typeof isPaidRaw === "boolean"
+      ? isPaidRaw
+      : typeof isPaidRaw === "string"
+        ? ["1", "true", "yes", "on"].includes(isPaidRaw.trim().toLowerCase())
+        : false;
+
   const cookieStore = await cookies();
   const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
@@ -77,9 +99,19 @@ export async function POST(request: Request) {
     },
   });
 
+  let payloadWithClient: Record<string, unknown>;
+  try {
+    payloadWithClient = await attachClientIdToTaskPayload({ ...insertRow, bracket_size });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to resolve CRM client." },
+      { status: 500 }
+    );
+  }
+
   const { data, error } = await supabase
     .from("tasks")
-    .insert({ ...insertRow, bracket_size })
+    .insert(payloadWithClient)
     .select("id")
     .single();
 

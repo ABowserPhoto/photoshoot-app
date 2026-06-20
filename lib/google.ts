@@ -1,3 +1,7 @@
+import { createReadStream } from "node:fs";
+import fs from "node:fs";
+import path from "node:path";
+
 import { google } from "googleapis";
 import type { JWT } from "google-auth-library";
 
@@ -14,6 +18,16 @@ export interface CreateDriveFolderResult {
 export interface CreateGmailDraftResult {
   id: string;
 }
+
+export interface UploadFilesToDriveResult {
+  uploadedCount: number;
+  fileNames: string[];
+}
+
+const GOOGLE_DRIVE_UPLOAD_DELAY_MS = 300;
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".tif", ".tiff"]);
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let jwtClient: JWT | null = null;
 
@@ -217,6 +231,42 @@ function extractGoogleApiError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function guessImageMimeType(fileName: string): string {
+  const ext = path.extname(fileName).toLowerCase();
+  switch (ext) {
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".tif":
+    case ".tiff":
+      return "image/tiff";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function listDeliverableImageFiles(localFolderPath: string): string[] {
+  const trimmedPath = localFolderPath.trim();
+  if (!fs.existsSync(trimmedPath)) {
+    throw new Error(`Deliverables folder does not exist: ${trimmedPath}`);
+  }
+
+  const stats = fs.statSync(trimmedPath);
+  if (!stats.isDirectory()) {
+    throw new Error(`Deliverables path is not a directory: ${trimmedPath}`);
+  }
+
+  return fs
+    .readdirSync(trimmedPath, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => !name.startsWith("."))
+    .filter((name) => IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase()))
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
 export async function createDriveFolder(
   folderName: string,
   parentFolderId?: string
@@ -253,6 +303,55 @@ export async function createDriveFolder(
   } catch (error) {
     throw new Error(`Google Drive folder creation failed: ${extractGoogleApiError(error)}`);
   }
+}
+
+export async function uploadFilesToDrive(
+  folderId: string,
+  localFolderPath: string
+): Promise<UploadFilesToDriveResult> {
+  const trimmedFolderId = folderId.trim();
+  if (!trimmedFolderId) {
+    throw new Error("folderId is required.");
+  }
+
+  const imageFiles = listDeliverableImageFiles(localFolderPath);
+  if (imageFiles.length === 0) {
+    throw new Error(`No image files found in deliverables folder: ${localFolderPath.trim()}`);
+  }
+
+  const { drive } = await getGoogleClients();
+  const uploadedFileNames: string[] = [];
+
+  for (let index = 0; index < imageFiles.length; index += 1) {
+    const fileName = imageFiles[index];
+    const filePath = path.join(localFolderPath.trim(), fileName);
+
+    try {
+      await drive.files.create({
+        requestBody: {
+          name: fileName,
+          parents: [trimmedFolderId],
+        },
+        media: {
+          mimeType: guessImageMimeType(fileName),
+          body: createReadStream(filePath),
+        },
+        fields: "id",
+      });
+      uploadedFileNames.push(fileName);
+    } catch (error) {
+      throw new Error(`Google Drive upload failed for "${fileName}": ${extractGoogleApiError(error)}`);
+    }
+
+    if (index < imageFiles.length - 1) {
+      await delay(GOOGLE_DRIVE_UPLOAD_DELAY_MS);
+    }
+  }
+
+  return {
+    uploadedCount: uploadedFileNames.length,
+    fileNames: uploadedFileNames,
+  };
 }
 
 export async function createGmailDraft(
