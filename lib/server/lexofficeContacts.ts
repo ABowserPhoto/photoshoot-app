@@ -219,7 +219,6 @@ export async function syncLexofficeContactsToClients(): Promise<LexofficeSyncRes
       {
         company_name: companyName,
         lexoffice_id: id,
-        lexoffice_contact_id: id,
         email: email || null,
         phone: phone || null,
         billing_address: billingAddress || null,
