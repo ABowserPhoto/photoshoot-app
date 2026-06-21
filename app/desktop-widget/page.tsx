@@ -2,10 +2,17 @@
 
 import { ExternalLink, Pause, Play, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { formatPlannerDuration, getPlannerElapsedSeconds } from "@/lib/plannerTimerUtils";
 import { supabase } from "@/lib/supabaseClient";
+
+/** Electron-specific CSS property — not in the standard React types. */
+type ElectronCSS = CSSProperties & { WebkitAppRegion?: "drag" | "no-drag" };
+
+const dragStyle: ElectronCSS = { WebkitAppRegion: "drag" };
+const noDragStyle: ElectronCSS = { WebkitAppRegion: "no-drag" };
 
 type WidgetTaskStatus = "master" | "planning" | "processing" | "completed";
 
@@ -414,10 +421,10 @@ export default function DesktopWidgetPage() {
       <section className="flex h-[434px] flex-col rounded-2xl border border-white/20 bg-zinc-950/85 shadow-2xl backdrop-blur-lg">
         <header
           className="flex items-center justify-between border-b border-white/10 px-3 py-2"
-          style={{ WebkitAppRegion: "drag" }}
+          style={dragStyle}
         >
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-300">Studio Widget</p>
-          <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" }}>
+          <div className="flex items-center gap-1" style={noDragStyle}>
             <button
               type="button"
               onClick={handleOpenMainApp}
@@ -453,7 +460,7 @@ export default function DesktopWidgetPage() {
                   onClick={() => void handlePauseResume()}
                   disabled={busyTaskId === activeTask.id}
                   className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-amber-400/40 bg-amber-500/15 text-sm font-semibold text-amber-100 transition hover:border-amber-300/70 hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-60"
-                  style={{ WebkitAppRegion: "no-drag" }}
+                  style={noDragStyle}
                 >
                   {activeTask.isPaused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
                   {activeTask.isPaused ? "Resume" : "Pause"}
@@ -472,7 +479,7 @@ export default function DesktopWidgetPage() {
                 onClick={() => void handleAddTask()}
                 disabled={!authenticated || busyTaskId === "new"}
                 className="inline-flex h-7 items-center justify-center gap-1 rounded-md border border-emerald-400/40 bg-emerald-500/15 px-2 text-xs font-semibold text-emerald-100 transition hover:border-emerald-300/70 hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-60"
-                style={{ WebkitAppRegion: "no-drag" }}
+                style={noDragStyle}
               >
                 <Plus className="h-3.5 w-3.5" />
                 Add Task
@@ -494,7 +501,7 @@ export default function DesktopWidgetPage() {
                         onClick={() => void handleAdvanceTask(task)}
                         disabled={busyTaskId === task.id}
                         className="mt-2 inline-flex h-8 w-full items-center justify-center rounded-md border border-zinc-700 bg-zinc-800 text-[11px] font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
-                        style={{ WebkitAppRegion: "no-drag" }}
+                        style={noDragStyle}
                       >
                         {action.label}
                       </button>
@@ -512,7 +519,7 @@ export default function DesktopWidgetPage() {
       </section>
 
       {showTaskPrompt ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" style={{ WebkitAppRegion: "no-drag" }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" style={noDragStyle}>
           <div className="w-full max-w-sm rounded-xl border border-zinc-700 bg-zinc-900 p-3 shadow-2xl">
             <p className="text-sm font-semibold text-zinc-100">Add Task</p>
             <input

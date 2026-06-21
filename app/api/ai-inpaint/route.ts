@@ -137,7 +137,7 @@ function patchWorkflowImageNodes(
 
 async function uploadImageToComfy(buffer: Buffer, filename: string): Promise<string> {
   const formData = new FormData();
-  const blob = new Blob([buffer], { type: "application/octet-stream" });
+  const blob = new Blob([new Uint8Array(buffer)], { type: "application/octet-stream" });
   formData.append("image", blob, filename);
   formData.append("overwrite", "true");
   formData.append("type", "input");
@@ -306,17 +306,18 @@ export async function POST(request: Request) {
     );
 
     const promptText = await promptResponse.text();
-    let promptPayload: {
-      prompt_id?: string;
-      error?: unknown;
-      detail?: unknown;
-      message?: unknown;
-    } | null = null;
-    try {
-      promptPayload = JSON.parse(promptText) as typeof promptPayload;
-    } catch {
-      promptPayload = null;
-    }
+    const promptPayload = (() => {
+      try {
+        return JSON.parse(promptText) as {
+          prompt_id?: string;
+          error?: unknown;
+          detail?: unknown;
+          message?: unknown;
+        } | null;
+      } catch {
+        return null;
+      }
+    })();
 
     if (!promptResponse.ok) {
       return NextResponse.json(

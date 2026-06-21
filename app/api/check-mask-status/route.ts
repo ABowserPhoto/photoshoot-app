@@ -58,7 +58,7 @@ export async function GET(request: Request) {
     const saveImageOutput = entry.outputs[MASK_SAVE_IMAGE_NODE_ID];
     const outputImage = saveImageOutput?.images?.[0];
     const filename = outputImage?.filename?.trim() ?? "";
-    if (!filename) {
+    if (!filename || !outputImage) {
       return NextResponse.json({ status: "processing" });
     }
 

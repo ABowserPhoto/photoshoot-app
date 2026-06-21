@@ -171,10 +171,10 @@ const MaskingCanvas = forwardRef<MaskingCanvasHandle, MaskingCanvasProps>(functi
     await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
     await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
     try {
-      const blob = await stageRef.current.toBlob({
+      const blob = (await stageRef.current.toBlob({
         mimeType: "image/png",
         pixelRatio: 1,
-      });
+      })) as Blob | null;
       if (!blob) {
         return null;
       }

@@ -77,6 +77,10 @@ export type BoardTask = {
   isCreditNote: boolean;
   expectedRevenue: number;
   isPaid: boolean;
+  /** UUID of a linked task/photoshoot booking (tasks.linked_item_id). */
+  linkedItemId: string | null;
+  /** Full local/network path for opening the shoot in external software (e.g. Z:\Shoots\Smith). */
+  localOpenPath: string;
 };
 
 type BoardState = Record<ColumnKey, BoardTask[]>;
@@ -144,6 +148,8 @@ const FALLBACK_TASKS: BoardTask[] = [
     isCreditNote: false,
     expectedRevenue: 0,
     isPaid: false,
+    linkedItemId: null,
+    localOpenPath: "",
   },
   {
     id: "fallback-2",
@@ -184,6 +190,8 @@ const FALLBACK_TASKS: BoardTask[] = [
     isCreditNote: false,
     expectedRevenue: 0,
     isPaid: false,
+    linkedItemId: null,
+    localOpenPath: "",
   },
 ];
 
@@ -224,6 +232,8 @@ type DbTask = {
   is_credit_note?: boolean | null;
   expected_revenue?: number | null;
   is_paid?: boolean | null;
+  linked_item_id?: string | null;
+  local_open_path?: string | null;
 };
 
 const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
@@ -579,6 +589,8 @@ type KanbanBoardProps = {
   onTaskClick?: (task: BoardTask) => void;
   onTaskMoved?: (task: BoardTask, from: ColumnKey, to: ColumnKey) => void;
   showArchived?: boolean;
+  /** Called whenever the flat board task list changes (e.g. after load or status update). */
+  onBoardChange?: (tasks: BoardTask[]) => void;
 };
 
 function safeLineItems(value: unknown): Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }> {
@@ -718,6 +730,14 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
         : row.is_paid == null
           ? (existing?.isPaid ?? false)
           : Boolean(row.is_paid),
+    linkedItemId:
+      typeof row.linked_item_id === "string"
+        ? row.linked_item_id
+        : row.linked_item_id === null
+          ? null
+          : (existing?.linkedItemId ?? null),
+    localOpenPath:
+      typeof row.local_open_path === "string" ? row.local_open_path : (existing?.localOpenPath ?? ""),
   };
 }
 
@@ -726,6 +746,7 @@ export default function KanbanBoard({
   onTaskClick,
   onTaskMoved,
   showArchived = false,
+  onBoardChange,
 }: KanbanBoardProps) {
   const [board, setBoard] = useState<BoardState>(INITIAL_BOARD);
   const [ipcRefreshSignal, setIpcRefreshSignal] = useState(0);
@@ -963,6 +984,10 @@ export default function KanbanBoard({
         setBoard(sanitizeBoardState(grouped));
         setArchivedTasks(dedupeTasksById(archived));
         setStaleDataBanner(json.meta?.stale ? (json.warning ?? "Showing cached task data.") : null);
+        if (onBoardChange) {
+          const flat = COLUMN_CONFIG.flatMap((col) => sanitizeBoardState(grouped)[col.id] ?? []);
+          onBoardChange(flat);
+        }
       } catch {
         if (isMounted) {
           setStatusMessage(
@@ -1052,7 +1077,7 @@ export default function KanbanBoard({
       .subscribe();
 
     return () => {
-      void supabase.removeChannel(channel);
+      void supabase?.removeChannel(channel);
     };
   }, []);
 
@@ -1850,6 +1875,22 @@ export default function KanbanBoard({
                           <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                             {task.formattedPhotoshootDate || "No date"}
                           </p>
+                          {task.linkedItemId ? (() => {
+                            const linkedTask = COLUMN_CONFIG.flatMap((col) => board[col.id]).find((t) => t.id === task.linkedItemId);
+                            return (
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  if (linkedTask) onTaskClick?.(linkedTask);
+                                }}
+                                title={linkedTask ? `Linked: ${taskDisplayTitle(linkedTask)}` : "Linked task"}
+                                className="mt-1 inline-flex items-center gap-1 rounded-md border border-violet-400/50 bg-violet-50 px-1.5 py-0.5 text-xs font-medium text-violet-700 hover:bg-violet-100 dark:border-violet-600/40 dark:bg-violet-950/30 dark:text-violet-300 dark:hover:bg-violet-950/60"
+                              >
+                                🔗 {linkedTask ? taskDisplayTitle(linkedTask) : "Linked"}
+                              </button>
+                            );
+                          })() : null}
                           {task.totalEditingSeconds > 0 ? (
                             <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
                               Total Edit Time: {formatDuration(task.totalEditingSeconds)}

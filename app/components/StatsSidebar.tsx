@@ -124,7 +124,7 @@ export default function StatsSidebar({ refreshSignal = 0 }: StatsSidebarProps) {
       .subscribe();
 
     return () => {
-      void supabase.removeChannel(channel);
+      void supabase?.removeChannel(channel);
     };
   }, [scheduleRealtimeRefresh]);
 

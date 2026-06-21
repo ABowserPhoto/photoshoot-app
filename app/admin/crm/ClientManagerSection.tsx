@@ -1,9 +1,17 @@
 "use client";
 
-import { GitMerge, Search, Trash2 } from "lucide-react";
+import { GitMerge, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { formatEuro } from "@/lib/adminStatsFormat";
+
+export type ContactPerson = {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  role: string;
+};
 
 export type CrmClient = {
   id: string;
@@ -13,6 +21,7 @@ export type CrmClient = {
   phone: string;
   billingAddress: string;
   lexofficeId: string;
+  contactPersons: ContactPerson[];
   lifetimeRevenue: number;
 };
 
@@ -24,6 +33,7 @@ type ClientFormState = {
   phone: string;
   billing_address: string;
   lexoffice_id: string;
+  contact_persons: ContactPerson[];
 };
 
 const EMPTY_FORM: ClientFormState = {
@@ -34,7 +44,12 @@ const EMPTY_FORM: ClientFormState = {
   phone: "",
   billing_address: "",
   lexoffice_id: "",
+  contact_persons: [],
 };
+
+function newContactPerson(): ContactPerson {
+  return { id: crypto.randomUUID(), name: "", email: "", phone: "", role: "" };
+}
 
 type ClientManagerSectionProps = {
   active: boolean;
@@ -46,6 +61,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
   const [clients, setClients] = useState<CrmClient[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState<ClientFormState>(EMPTY_FORM);
   const [searchTerm, setSearchTerm] = useState("");
@@ -67,7 +83,6 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
     if (!query) {
       return clients;
     }
-
     return clients.filter((client) => {
       const companyName = client.companyName.toLowerCase();
       const contactName = client.contactName.toLowerCase();
@@ -102,6 +117,38 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
     }
   }, [active, loadClients]);
 
+  const handleSyncLexoffice = async () => {
+    setSyncing(true);
+    onError(null);
+    try {
+      const response = await fetch("/api/admin/crm/lexoffice-sync", {
+        method: "POST",
+        credentials: "include",
+      });
+      const json = (await response.json().catch(() => null)) as {
+        ok?: boolean;
+        synced?: number;
+        errors?: string[];
+        error?: string;
+      } | null;
+      if (!response.ok) {
+        throw new Error(json?.error ?? `Sync failed (${response.status})`);
+      }
+      const synced = json?.synced ?? 0;
+      const errors = json?.errors ?? [];
+      onToast(
+        errors.length > 0
+          ? `Synced ${synced} clients. ${errors.length} error(s): ${errors.slice(0, 2).join("; ")}`
+          : `Synced ${synced} clients from Lexoffice.`
+      );
+      await loadClients();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to sync with Lexoffice.");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const openCreateModal = () => {
     setForm(EMPTY_FORM);
     setModalOpen(true);
@@ -116,6 +163,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
       phone: client.phone,
       billing_address: client.billingAddress,
       lexoffice_id: client.lexofficeId,
+      contact_persons: client.contactPersons.length > 0 ? client.contactPersons : [],
     });
     setModalOpen(true);
   };
@@ -128,6 +176,29 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
     setForm(EMPTY_FORM);
   };
 
+  const updateContactPerson = (index: number, field: keyof ContactPerson, value: string) => {
+    setForm((prev) => {
+      const updated = prev.contact_persons.map((cp, i) =>
+        i === index ? { ...cp, [field]: value } : cp
+      );
+      return { ...prev, contact_persons: updated };
+    });
+  };
+
+  const addContactPerson = () => {
+    setForm((prev) => ({
+      ...prev,
+      contact_persons: [...prev.contact_persons, newContactPerson()],
+    }));
+  };
+
+  const removeContactPerson = (index: number) => {
+    setForm((prev) => ({
+      ...prev,
+      contact_persons: prev.contact_persons.filter((_, i) => i !== index),
+    }));
+  };
+
   const handleSave = async () => {
     if (!form.company_name.trim()) {
       onError("Company name is required.");
@@ -137,6 +208,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
     setSaving(true);
     onError(null);
     try {
+      const validPersons = form.contact_persons.filter((cp) => cp.name.trim() !== "");
       const response = await fetch("/api/admin/crm/clients", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -149,6 +221,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
           phone: form.phone.trim(),
           billing_address: form.billing_address.trim(),
           lexoffice_id: form.lexoffice_id.trim(),
+          contact_persons: validPersons,
         }),
       });
       const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
@@ -264,6 +337,15 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
+              onClick={() => void handleSyncLexoffice()}
+              disabled={syncing || loading}
+              className="inline-flex h-10 items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-950 px-4 text-sm font-semibold text-zinc-100 hover:bg-zinc-800 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} aria-hidden="true" />
+              {syncing ? "Syncing…" : "Sync with Lexoffice"}
+            </button>
+            <button
+              type="button"
               onClick={() => void loadClients()}
               disabled={loading}
               className="inline-flex h-10 items-center rounded-lg border border-zinc-700 bg-zinc-950 px-4 text-sm font-semibold text-zinc-100 hover:bg-zinc-800 disabled:opacity-50"
@@ -302,7 +384,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                   Company
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
-                  Contact
+                  Contact(s)
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
                   Email / Phone
@@ -341,7 +423,25 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                 filteredClients.map((client) => (
                   <tr key={client.id} className="hover:bg-zinc-950/40">
                     <td className="px-4 py-3 font-medium text-zinc-100">{client.companyName}</td>
-                    <td className="px-4 py-3 text-zinc-300">{client.contactName || "—"}</td>
+                    <td className="px-4 py-3 text-zinc-300">
+                      {client.contactPersons.length > 0 ? (
+                        <ul className="space-y-0.5">
+                          {client.contactPersons.map((cp) => (
+                            <li key={cp.id} className="text-xs">
+                              <span className="font-medium text-zinc-200">{cp.name}</span>
+                              {cp.role ? (
+                                <span className="ml-1 text-zinc-500">({cp.role})</span>
+                              ) : null}
+                              {cp.email ? (
+                                <span className="ml-1 text-zinc-500">{cp.email}</span>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="text-zinc-500">{client.contactName || "—"}</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-zinc-300">
                       <div>{client.email || "—"}</div>
                       <div className="mt-0.5 text-xs text-zinc-500">{client.phone || "No phone"}</div>
@@ -388,12 +488,12 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
       </section>
 
       {modalOpen ? (
-        <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[150] flex items-start justify-center overflow-y-auto bg-black/65 p-4 backdrop-blur-sm">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="client-modal-title"
-            className="w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl"
+            className="my-8 w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
             <h3 id="client-modal-title" className="text-lg font-semibold text-white">
@@ -411,7 +511,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                 />
               </label>
               <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                Contact person
+                Primary contact (legacy)
                 <input
                   value={form.contact_name}
                   onChange={(event) => setForm((prev) => ({ ...prev, contact_name: event.target.value }))}
@@ -454,6 +554,72 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                   className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-500"
                 />
               </label>
+
+              {/* Contact persons */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                    Contact persons
+                  </span>
+                  <button
+                    type="button"
+                    onClick={addContactPerson}
+                    className="inline-flex items-center gap-1 rounded-md border border-zinc-600 px-2 py-1 text-xs font-semibold text-zinc-300 hover:bg-zinc-800"
+                  >
+                    <Plus className="h-3 w-3" aria-hidden="true" />
+                    Add contact
+                  </button>
+                </div>
+
+                {form.contact_persons.length === 0 ? (
+                  <p className="mt-2 text-xs text-zinc-500">No contacts yet. Click &ldquo;Add contact&rdquo; to add one.</p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {form.contact_persons.map((cp, index) => (
+                      <div
+                        key={cp.id}
+                        className="relative rounded-lg border border-zinc-700 bg-zinc-950 p-3"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => removeContactPerson(index)}
+                          className="absolute right-2 top-2 rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                          aria-label="Remove contact"
+                        >
+                          <X className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
+                        <div className="grid gap-2 pr-6 sm:grid-cols-2">
+                          <input
+                            placeholder="Full name *"
+                            value={cp.name}
+                            onChange={(e) => updateContactPerson(index, "name", e.target.value)}
+                            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-violet-500 sm:col-span-2"
+                          />
+                          <input
+                            placeholder="Email"
+                            type="email"
+                            value={cp.email}
+                            onChange={(e) => updateContactPerson(index, "email", e.target.value)}
+                            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-violet-500"
+                          />
+                          <input
+                            placeholder="Phone"
+                            value={cp.phone}
+                            onChange={(e) => updateContactPerson(index, "phone", e.target.value)}
+                            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-violet-500"
+                          />
+                          <input
+                            placeholder="Role (e.g. CEO, PM)"
+                            value={cp.role}
+                            onChange={(e) => updateContactPerson(index, "role", e.target.value)}
+                            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-violet-500 sm:col-span-2"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="mt-6 flex justify-end gap-3">

@@ -4,12 +4,19 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@supabase/supabase-js";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
+import {
+  clearInstagramConnectionsForProfile,
+  listInstagramConnectionsForProfile,
+  removeInstagramConnectionForProfile,
+  upsertInstagramConnectionsForProfile,
+  type InstagramConnectionInput,
+  type InstagramConnectionRecord,
+} from "@/lib/server/instagramConnections";
 
-export type MetaIgAccountOption = {
-  pageName: string;
-  igUsername: string | null;
-  igAccountId: string;
-  pageAccessToken: string;
+export type MetaIgAccountOption = InstagramConnectionInput;
+
+export type InstagramConnectedAccount = InstagramConnectionRecord & {
+  isActive: boolean;
 };
 
 type ActionOk<T = void> = T extends void ? { ok: true } : { ok: true } & T;
@@ -24,6 +31,66 @@ function serviceSupabase() {
     return null;
   }
   return createClient(url, key, { auth: { persistSession: false } });
+}
+
+export async function getInstagramConnections(
+  profileId: string
+): Promise<ActionOk<{ accounts: InstagramConnectedAccount[] }> | ActionErr> {
+  const auth = await getAuthRole();
+  if (!auth.authenticated) {
+    return { ok: false, error: "Unauthorized" };
+  }
+
+  const pid = profileId.trim();
+  if (!pid) {
+    return { ok: false, error: "Missing profile id." };
+  }
+
+  const listed = await listInstagramConnectionsForProfile(pid);
+  if (!listed.ok) {
+    return listed;
+  }
+
+  if (listed.accounts.length === 0) {
+    const supabase = serviceSupabase();
+    if (supabase) {
+      const { data: profileRow } = await supabase
+        .from("social_profiles")
+        .select("ig_account_id, access_token, handle")
+        .eq("id", pid)
+        .maybeSingle();
+
+      const legacyIgId =
+        typeof profileRow?.ig_account_id === "string" ? profileRow.ig_account_id.trim() : "";
+      const legacyToken =
+        typeof profileRow?.access_token === "string" ? profileRow.access_token.trim() : "";
+      if (legacyIgId && legacyToken) {
+        return {
+          ok: true,
+          accounts: [
+            {
+              id: legacyIgId,
+              profileId: pid,
+              igAccountId: legacyIgId,
+              igUsername:
+                typeof profileRow?.handle === "string" ? profileRow.handle.replace(/^@/, "") : null,
+              pageName: null,
+              accessToken: legacyToken,
+              isActive: true,
+            },
+          ],
+        };
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    accounts: listed.accounts.map((account) => ({
+      ...account,
+      isActive: account.igAccountId === listed.activeIgAccountId,
+    })),
+  };
 }
 
 export async function saveInstagramConnection(
@@ -43,22 +110,63 @@ export async function saveInstagramConnection(
     return { ok: false, error: "Missing profile, Instagram account, or token." };
   }
 
-  const supabase = serviceSupabase();
-  if (!supabase) {
-    return { ok: false, error: "Database is not configured." };
+  const result = await upsertInstagramConnectionsForProfile(pid, [
+    {
+      pageName: "Instagram",
+      igUsername: null,
+      igAccountId: ig,
+      pageAccessToken: token,
+    },
+  ]);
+  if (!result.ok) {
+    return result;
   }
 
-  const { error } = await supabase
-    .from("social_profiles")
-    .update({
-      ig_account_id: ig,
-      access_token: token,
-    })
-    .eq("id", pid);
+  revalidatePath("/scheduler");
+  return { ok: true };
+}
 
-  if (error) {
-    console.error("[saveInstagramConnection]", error);
-    return { ok: false, error: error.message };
+export async function saveAllInstagramConnections(
+  profileId: string,
+  accounts: MetaIgAccountOption[]
+): Promise<ActionOk<{ count: number }> | ActionErr> {
+  const auth = await getAuthRole();
+  if (!auth.authenticated) {
+    return { ok: false, error: "Unauthorized" };
+  }
+
+  const pid = profileId.trim();
+  if (!pid) {
+    return { ok: false, error: "Missing profile id." };
+  }
+
+  const result = await upsertInstagramConnectionsForProfile(pid, accounts);
+  if (!result.ok) {
+    return result;
+  }
+
+  revalidatePath("/scheduler");
+  return { ok: true, count: result.count };
+}
+
+export async function disconnectInstagramAccount(
+  profileId: string,
+  igAccountId: string
+): Promise<ActionOk | ActionErr> {
+  const auth = await getAuthRole();
+  if (!auth.authenticated) {
+    return { ok: false, error: "Unauthorized" };
+  }
+
+  const pid = profileId.trim();
+  const ig = igAccountId.trim();
+  if (!pid || !ig) {
+    return { ok: false, error: "Missing profile or Instagram account id." };
+  }
+
+  const result = await removeInstagramConnectionForProfile(pid, ig);
+  if (!result.ok) {
+    return result;
   }
 
   revalidatePath("/scheduler");
@@ -76,22 +184,9 @@ export async function disconnectInstagram(profileId: string): Promise<ActionOk |
     return { ok: false, error: "Missing profile id." };
   }
 
-  const supabase = serviceSupabase();
-  if (!supabase) {
-    return { ok: false, error: "Database is not configured." };
-  }
-
-  const { error } = await supabase
-    .from("social_profiles")
-    .update({
-      ig_account_id: null,
-      access_token: null,
-    })
-    .eq("id", pid);
-
-  if (error) {
-    console.error("[disconnectInstagram]", error);
-    return { ok: false, error: error.message };
+  const result = await clearInstagramConnectionsForProfile(pid);
+  if (!result.ok) {
+    return result;
   }
 
   revalidatePath("/scheduler");

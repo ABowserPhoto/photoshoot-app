@@ -126,6 +126,8 @@ type TaskSupabasePayload = {
   is_credit_note: boolean;
   expected_revenue: number;
   is_paid: boolean;
+  linked_item_id: string | null;
+  local_open_path: string | null;
 };
 
 const selectStyles = {
@@ -259,6 +261,10 @@ function HomeContent() {
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [allBoardTasks, setAllBoardTasks] = useState<BoardTask[]>([]);
+  const [linkedItemId, setLinkedItemId] = useState<string | null>(null);
+  const [localOpenPath, setLocalOpenPath] = useState("");
+  const [softwareToast, setSoftwareToast] = useState<{ message: string; isError: boolean } | null>(null);
 
   const [companyName, setCompanyName] = useState("");
   const [contactPerson, setContactPerson] = useState("");
@@ -557,6 +563,9 @@ function HomeContent() {
     setLocalFolderNameDisplay("");
     setPreservedTaskTitle("");
     setFormError(null);
+    setLinkedItemId(null);
+    setLocalOpenPath("");
+    setSoftwareToast(null);
   };
 
   const closeModal = () => {
@@ -631,11 +640,44 @@ function HomeContent() {
     setCurrentTaskStatus(task.status);
     setLocalFolderNameDisplay(task.localFolderName ?? "");
     setPreservedTaskTitle(task.taskTitle?.trim() ?? "");
+    setLinkedItemId(task.linkedItemId ?? null);
+    setLocalOpenPath(task.localOpenPath ?? "");
     void loadReferenceData();
   };
 
   const setSectionOpen = (section: "client" | "invoice" | "info") => {
     setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  };
+
+  const SOFTWARE_LABELS: Record<string, string> = {
+    photoshop: "Photoshop",
+    lightroom: "Lightroom Classic",
+    captureone: "Capture One",
+  };
+
+  const handleOpenInSoftware = async (software: string) => {
+    const path = localOpenPath.trim();
+    if (!path) {
+      setSoftwareToast({ message: "Enter a path first.", isError: true });
+      return;
+    }
+    setSoftwareToast({ message: `Opening in ${SOFTWARE_LABELS[software] ?? software}…`, isError: false });
+    try {
+      const response = await fetch("/api/local/open-software", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetPath: path, software }),
+      });
+      const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!response.ok) {
+        setSoftwareToast({ message: json?.error ?? `Failed to open (HTTP ${response.status}).`, isError: true });
+      } else {
+        setSoftwareToast({ message: `Opened in ${SOFTWARE_LABELS[software] ?? software}.`, isError: false });
+        window.setTimeout(() => setSoftwareToast(null), 4000);
+      }
+    } catch (err) {
+      setSoftwareToast({ message: err instanceof Error ? err.message : "Request failed.", isError: true });
+    }
   };
 
   const handleClientNameChange = (
@@ -907,6 +949,8 @@ function HomeContent() {
       is_credit_note: isCreditNote,
       expected_revenue: isCreditNote ? Number(expectedRevenue) || 0 : 0,
       is_paid: isPaid,
+      linked_item_id: linkedItemId ?? null,
+      local_open_path: localOpenPath.trim() || null,
     };
 
     if (editingTaskId) {
@@ -1088,6 +1132,7 @@ function HomeContent() {
                 onTaskClick={openEditModal}
                 onTaskMoved={handleTaskMoved}
                 showArchived={showArchiveView}
+                onBoardChange={setAllBoardTasks}
               />
             </div>
             <div className="min-w-0">
@@ -1101,6 +1146,7 @@ function HomeContent() {
               onTaskClick={openEditModal}
               onTaskMoved={handleTaskMoved}
               showArchived={showArchiveView}
+              onBoardChange={setAllBoardTasks}
             />
           </div>
         )}
@@ -1603,6 +1649,83 @@ function HomeContent() {
                         />
                       </label>
                     ) : null}
+                    <div className="sm:col-span-2">
+                      <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Local Folder / File Path
+                      </p>
+                      <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                        Full path to open directly in Photoshop, Lightroom or Capture One.
+                      </p>
+                      <div className="mt-1 flex gap-2">
+                        <input
+                          value={localOpenPath}
+                          onChange={(e) => setLocalOpenPath(e.target.value)}
+                          placeholder="e.g. Z:\Shoots\Smith_Apartment or /Volumes/Shoots/Smith"
+                          className="min-w-0 flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        />
+                        <button
+                          type="button"
+                          disabled={!localOpenPath.trim()}
+                          onClick={() => void handleOpenInSoftware("photoshop")}
+                          title="Open in Adobe Photoshop"
+                          className="shrink-0 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-bold text-zinc-700 transition hover:border-[#31A8FF] hover:bg-[#001E36] hover:text-[#31A8FF] disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                        >
+                          Ps
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!localOpenPath.trim()}
+                          onClick={() => void handleOpenInSoftware("lightroom")}
+                          title="Open in Adobe Lightroom Classic"
+                          className="shrink-0 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-bold text-zinc-700 transition hover:border-[#4F9BFF] hover:bg-[#001326] hover:text-[#4F9BFF] disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                        >
+                          Lr
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!localOpenPath.trim()}
+                          onClick={() => void handleOpenInSoftware("captureone")}
+                          title="Open in Capture One"
+                          className="shrink-0 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-bold text-zinc-700 transition hover:border-[#FF5722] hover:bg-zinc-900 hover:text-[#FF5722] disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                        >
+                          C1
+                        </button>
+                      </div>
+                      {softwareToast ? (
+                        <p
+                          className={`mt-1.5 text-xs font-medium ${
+                            softwareToast.isError ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
+                          }`}
+                        >
+                          {softwareToast.message}
+                        </p>
+                      ) : null}
+                    </div>
+                    <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                      Link to Shoot / Task
+                      <select
+                        value={linkedItemId ?? ""}
+                        onChange={(event) => setLinkedItemId(event.target.value || null)}
+                        className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      >
+                        <option value="">— No link —</option>
+                        {allBoardTasks
+                          .filter((t) => t.id !== editingTaskId)
+                          .map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {[t.photoshootType, t.companyName, t.shootLocation].filter(Boolean).join(" · ") || t.taskTitle || t.id}
+                            </option>
+                          ))}
+                      </select>
+                      {linkedItemId ? (() => {
+                        const linked = allBoardTasks.find((t) => t.id === linkedItemId);
+                        return linked ? (
+                          <span className="mt-1 inline-flex items-center gap-1 rounded-md border border-violet-400/50 bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-700 dark:border-violet-600/40 dark:bg-violet-950/30 dark:text-violet-300">
+                            🔗 Linked to: {[linked.photoshootType, linked.companyName, linked.shootLocation].filter(Boolean).join(" · ") || linked.taskTitle || linked.id}
+                          </span>
+                        ) : null;
+                      })() : null}
+                    </label>
                   </div>
                 ) : null}
               </section>

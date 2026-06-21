@@ -536,7 +536,8 @@ function MoodboardDrawingEditor({
           return prev;
         }
         nextContent = { ...row.content, drawingData: { paths } };
-        return prev.map((item) => (item.id === elementId ? { ...item, content: nextContent } : item));
+        const safeContent = nextContent;
+        return prev.map((item) => (item.id === elementId ? { ...item, content: safeContent } : item));
       });
       if (nextContent !== undefined) {
         const payload = nextContent;
@@ -576,7 +577,8 @@ function MoodboardDrawingEditor({
         return prev;
       }
       nextContent = { ...row.content, strokeHex: nextHex };
-      return prev.map((item) => (item.id === elementId ? { ...item, content: nextContent } : item));
+      const safeContent = nextContent;
+      return prev.map((item) => (item.id === elementId ? { ...item, content: safeContent } : item));
     });
     if (nextContent !== undefined) {
       const payload = nextContent;
@@ -950,7 +952,8 @@ function MoodboardVideoBlock({
         return prev;
       }
       nextContent = { ...row.content, url: toSave };
-      return prev.map((item) => (item.id === elementId ? { ...item, content: nextContent } : item));
+      const safeContent = nextContent;
+      return prev.map((item) => (item.id === elementId ? { ...item, content: safeContent } : item));
     });
 
     if (nextContent !== undefined) {

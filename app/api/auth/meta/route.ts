@@ -1,7 +1,7 @@
-import { Buffer } from "node:buffer";
-
 import { NextRequest, NextResponse } from "next/server";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
+import { getAuthRole } from "@/lib/server/getAuthRole";
+import { upsertInstagramConnectionsForProfile } from "@/lib/server/instagramConnections";
 
 export const dynamic = "force-dynamic";
 
@@ -82,8 +82,6 @@ function getRedirectUri(request: NextRequest): string {
   const publicOrigin = getPublicAppOrigin(request);
   return `${publicOrigin}/api/auth/meta`;
 }
-
-const IG_ACCOUNT_SELECTION_COOKIE = "meta_ig_account_selection";
 
 function redirectScheduler(request: NextRequest, params: Record<string, string>) {
   const origin = getPublicAppOrigin(request);
@@ -223,21 +221,15 @@ export async function GET(request: NextRequest) {
     pageAccessToken: page.access_token!.trim(),
   }));
 
-  const cookiePayload = { profileId, accounts };
-  const encoded = Buffer.from(JSON.stringify(cookiePayload), "utf8").toString("base64url");
+  const auth = await getAuthRole();
+  if (!auth.authenticated) {
+    return redirectScheduler(request, { meta_error: "not_authenticated" });
+  }
 
-  const origin = getPublicAppOrigin(request);
-  const target = new URL("/scheduler", origin.endsWith("/") ? origin : `${origin}/`);
-  target.searchParams.set("meta_select", "1");
+  const upsertResult = await upsertInstagramConnectionsForProfile(profileId, accounts);
+  if (!upsertResult.ok) {
+    return redirectScheduler(request, { meta_error: upsertResult.error });
+  }
 
-  const res = NextResponse.redirect(target);
-  res.cookies.set(IG_ACCOUNT_SELECTION_COOKIE, encoded, {
-    httpOnly: true,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 600,
-    secure: process.env.NODE_ENV === "production",
-  });
-
-  return res;
+  return redirectScheduler(request, { meta_connected: "1" });
 }

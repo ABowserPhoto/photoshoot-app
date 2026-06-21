@@ -356,7 +356,7 @@ async function assertAdmin(): Promise<{ ok: true } | { ok: false; error: string 
 }
 
 async function loadProfileMap(
-  sb: ReturnType<typeof createClient>
+  sb: NonNullable<ReturnType<typeof serviceSupabase>>
 ): Promise<Map<string, { name: string; email: string | null }>> {
   const { data } = await sb.from("profiles").select("id, full_name, email");
   const map = new Map<string, { name: string; email: string | null }>();

@@ -211,17 +211,18 @@ export async function POST(request: Request) {
         fs.unlinkSync(comfyInputFilePath);
         comfyInputFilePath = null;
       }
-      let payload: {
-        prompt_id?: string;
-        error?: unknown;
-        detail?: unknown;
-        message?: unknown;
-      } | null = null;
-      try {
-        payload = JSON.parse(responseText) as typeof payload;
-      } catch {
-        payload = null;
-      }
+      const payload = (() => {
+        try {
+          return JSON.parse(responseText) as {
+            prompt_id?: string;
+            error?: unknown;
+            detail?: unknown;
+            message?: unknown;
+          } | null;
+        } catch {
+          return null;
+        }
+      })();
       const comfyError =
         payload?.message ?? payload?.detail ?? payload?.error ?? responseText ?? payload;
 

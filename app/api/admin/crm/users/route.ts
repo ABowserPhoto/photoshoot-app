@@ -122,7 +122,8 @@ export async function GET() {
 
   const result = await listAllUsers();
   if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: result.error.includes("configured") ? 503 : 400 });
+    const errMsg = result.error as string;
+    return NextResponse.json({ error: errMsg }, { status: errMsg.includes("configured") ? 503 : 400 });
   }
 
   return NextResponse.json({ ok: true, users: result.users });

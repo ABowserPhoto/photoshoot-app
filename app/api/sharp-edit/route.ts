@@ -252,29 +252,27 @@ function buildImageMagickEditArgs(options: AdjustmentOptions): string {
   return adjustments.join(" ");
 }
 
+type SharpEditBody = {
+  absoluteLocalPath?: unknown;
+  maskPath?: unknown;
+  storagePath?: unknown;
+  taskId?: unknown;
+  brightness?: unknown;
+  saturation?: unknown;
+  hue?: unknown;
+  contrast?: unknown;
+  blur?: unknown;
+  shadows?: unknown;
+  highlights?: unknown;
+} | null;
+
 export async function POST(request: Request) {
-  let body:
-    | {
-        absoluteLocalPath?: unknown;
-        maskPath?: unknown;
-        storagePath?: unknown;
-        taskId?: unknown;
-        brightness?: unknown;
-        saturation?: unknown;
-        hue?: unknown;
-        contrast?: unknown;
-        blur?: unknown;
-        shadows?: unknown;
-        highlights?: unknown;
-      }
-    | null = null;
+  const body: SharpEditBody = await request.json().catch((error) => {
+    console.error("[sharp-edit] Failing because request body JSON could not be parsed", error);
+    return null;
+  }) as SharpEditBody;
 
   try {
-    body = (await request.json().catch((error) => {
-      console.error("[sharp-edit] Failing because request body JSON could not be parsed", error);
-      return null;
-    })) as typeof body;
-
     if (!body) {
       console.error("[sharp-edit] Failing because request body is missing or invalid JSON");
       return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
@@ -324,7 +322,6 @@ export async function POST(request: Request) {
     console.log("Executing IM Command:", cmd);
 
     await execAsync(cmd, {
-      shell: true,
       maxBuffer: 16 * 1024 * 1024,
     });
 

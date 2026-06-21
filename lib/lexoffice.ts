@@ -233,7 +233,7 @@ async function fetchLexofficeVoucherListPage(params: {
 
   const content = Array.isArray(payload.content) ? payload.content : [];
   return content
-    .map((item) => parseVoucherListItem(item as Record<string, unknown>))
+    .map((item) => parseVoucherListItem(item as unknown as Record<string, unknown>))
     .filter((item): item is LexofficeVoucherListItem => item !== null);
 }
 

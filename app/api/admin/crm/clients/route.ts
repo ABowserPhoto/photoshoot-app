@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { buildCompanyLtvMap, normalizeCompanyKey } from "@/lib/crmClientLtv";
 import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
+import { pushClientToLexoffice, type ContactPerson } from "@/lib/server/lexofficeContacts";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,7 @@ type ClientRow = {
   zip_code?: string | null;
   city?: string | null;
   lexoffice_contact_id?: string | null;
+  contact_persons?: ContactPerson[] | null;
 };
 
 export type CrmClientRecord = {
@@ -28,6 +30,7 @@ export type CrmClientRecord = {
   phone: string;
   billingAddress: string;
   lexofficeId: string;
+  contactPersons: ContactPerson[];
   lifetimeRevenue: number;
 };
 
@@ -51,6 +54,27 @@ function composeBillingAddress(row: ClientRow): string {
   return parts;
 }
 
+function safeContactPersons(value: unknown): ContactPerson[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const row = item as Record<string, unknown>;
+      return {
+        id: typeof row.id === "string" ? row.id : String(Math.random()),
+        name: typeof row.name === "string" ? row.name : "",
+        email: typeof row.email === "string" ? row.email : "",
+        phone: typeof row.phone === "string" ? row.phone : "",
+        role: typeof row.role === "string" ? row.role : "",
+      };
+    })
+    .filter((item): item is ContactPerson => item !== null && item.name.trim() !== "");
+}
+
 function mapClientRow(row: ClientRow, ltvByCompany: Map<string, number>): CrmClientRecord {
   const companyName = row.company_name?.trim() ?? "";
   const companyKey = normalizeCompanyKey(companyName);
@@ -62,6 +86,7 @@ function mapClientRow(row: ClientRow, ltvByCompany: Map<string, number>): CrmCli
     phone: row.phone?.trim() ?? "",
     billingAddress: composeBillingAddress(row),
     lexofficeId: row.lexoffice_id?.trim() || row.lexoffice_contact_id?.trim() || "",
+    contactPersons: safeContactPersons(row.contact_persons),
     lifetimeRevenue: companyKey ? (ltvByCompany.get(companyKey) ?? 0) : 0,
   };
 }
@@ -112,6 +137,7 @@ type ClientUpsertBody = {
   phone?: unknown;
   billing_address?: unknown;
   lexoffice_id?: unknown;
+  contact_persons?: unknown;
 };
 
 export async function POST(request: Request) {
@@ -141,6 +167,8 @@ export async function POST(request: Request) {
   }
 
   const lexofficeId = typeof body.lexoffice_id === "string" ? body.lexoffice_id.trim() || null : null;
+  const contactPersons = safeContactPersons(body.contact_persons);
+
   const payload = {
     company_name: companyName,
     contact_name: typeof body.contact_name === "string" ? body.contact_name.trim() || null : null,
@@ -149,14 +177,45 @@ export async function POST(request: Request) {
     billing_address: typeof body.billing_address === "string" ? body.billing_address.trim() || null : null,
     lexoffice_id: lexofficeId,
     lexoffice_contact_id: lexofficeId,
+    contact_persons: contactPersons,
   };
 
   const clientId = typeof body.id === "string" ? body.id.trim() : "";
+
+  // Push to Lexoffice (best-effort — DB write is not blocked by Lexoffice failure)
+  const lexofficePushPromise = pushClientToLexoffice({
+    lexofficeId,
+    companyName,
+    email: payload.email,
+    phone: payload.phone,
+    billingAddress: payload.billing_address,
+    contactPersons,
+  }).then((result) => {
+    if (!result.ok) {
+      console.warn("[crm/clients] Lexoffice push failed:", result.error);
+    } else if (!lexofficeId) {
+      // If a new Lexoffice contact was created, write its ID back to the DB record
+      return result.lexofficeId;
+    }
+    return null;
+  }).catch((err: unknown) => {
+    console.warn("[crm/clients] Lexoffice push error:", err instanceof Error ? err.message : err);
+    return null;
+  });
 
   if (clientId) {
     const { data, error } = await supabase.from("clients").update(payload).eq("id", clientId).select("*").single();
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+
+    // If Lexoffice created a new contact (no prior ID), persist the ID
+    const newLexId = await lexofficePushPromise;
+    if (newLexId) {
+      await supabase
+        .from("clients")
+        .update({ lexoffice_id: newLexId, lexoffice_contact_id: newLexId })
+        .eq("id", clientId);
     }
 
     const { data: tasks } = await supabase
@@ -171,6 +230,15 @@ export async function POST(request: Request) {
   const { data, error } = await supabase.from("clients").insert(payload).select("*").single();
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 400 });
+  }
+
+  const insertedId = (data as { id: string }).id;
+  const newLexId = await lexofficePushPromise;
+  if (newLexId) {
+    await supabase
+      .from("clients")
+      .update({ lexoffice_id: newLexId, lexoffice_contact_id: newLexId })
+      .eq("id", insertedId);
   }
 
   const { data: tasks } = await supabase

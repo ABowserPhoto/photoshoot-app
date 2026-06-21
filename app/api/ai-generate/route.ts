@@ -127,7 +127,7 @@ function resolveLocalSourcePath(
 
 async function uploadImageToComfy(buffer: Buffer, filename: string): Promise<string> {
   const formData = new FormData();
-  const blob = new Blob([buffer], { type: "application/octet-stream" });
+  const blob = new Blob([new Uint8Array(buffer)], { type: "application/octet-stream" });
   formData.append("image", blob, filename);
   formData.append("overwrite", "true");
   formData.append("type", "input");
@@ -177,17 +177,18 @@ async function submitComfyPrompt(workflow: Record<string, WorkflowNode>): Promis
   );
 
   const responseText = await response.text();
-  let payload: {
-    prompt_id?: string;
-    error?: unknown;
-    detail?: unknown;
-    message?: unknown;
-  } | null = null;
-  try {
-    payload = JSON.parse(responseText) as typeof payload;
-  } catch {
-    payload = null;
-  }
+  const payload = (() => {
+    try {
+      return JSON.parse(responseText) as {
+        prompt_id?: string;
+        error?: unknown;
+        detail?: unknown;
+        message?: unknown;
+      } | null;
+    } catch {
+      return null;
+    }
+  })();
 
   if (!response.ok) {
     throw new Error(

@@ -4,7 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 import { readNaturallySortedImageFiles, resolveTaskDir } from "@/app/api/gallery/_shared";
-import { sanitizeStoragePath } from "@/lib/sanitizeStoragePath";
+import { sanitizeStoragePath } from "@/lib/sanitizeStoragePath.mjs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,7 +31,7 @@ function getSupabaseServerClient() {
 }
 
 async function deleteSupabasePreviewObjects(
-  supabase: ReturnType<typeof createClient>,
+  supabase: NonNullable<ReturnType<typeof getSupabaseServerClient>>,
   localFolderName: string,
   taskId: string,
   protectedStoragePaths: Set<string>

@@ -71,7 +71,7 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
     throw new Error(`Failed to load gallery previews: ${error.message}`);
   }
 
-  const items = Array.isArray(data?.gallery_previews?.items) ? data.gallery_previews.items : [];
+  const items: unknown[] = Array.isArray(data?.gallery_previews?.items) ? data.gallery_previews.items : [];
   const { selectedChunkIndices } = parseSelectionPayload(data?.gallery_selection);
   const selectedChunkSet = new Set(selectedChunkIndices);
   const selection = parseSelectionDetails(data?.gallery_selection);
