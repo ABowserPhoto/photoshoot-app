@@ -111,7 +111,7 @@ export default function AdminCrmPage() {
         setToast("Invoice already paid in Lexoffice — removed from unpaid list.");
         setItems((prev) => prev.filter((row) => row.id !== item.id));
       } else {
-        setToast(json?.message ?? "Draft created in Gmail!");
+        setToast(json?.message ?? "HTML Draft created in Gmail!");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate reminder.");

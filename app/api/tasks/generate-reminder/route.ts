@@ -115,7 +115,7 @@ export async function POST(request: Request) {
       ok: true,
       gmailDraftId: result.gmailDraftId,
       invoiceNumber: result.invoiceNumber,
-      message: "Draft created in Gmail!",
+      message: "HTML Draft created in Gmail!",
     });
   }
 
@@ -161,6 +161,6 @@ export async function POST(request: Request) {
     ok: true,
     gmailDraftId: result.gmailDraftId,
     invoiceNumber: result.invoiceNumber,
-    message: "Draft created in Gmail!",
+    message: "HTML Draft created in Gmail!",
   });
 }

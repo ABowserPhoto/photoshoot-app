@@ -28,6 +28,28 @@ export function plainTextToHtml(text: string): string {
     .join("");
 }
 
+const INVOICE_REMINDER_IMAGE_URL =
+  "https://res.cloudinary.com/dggils0xr/image/upload/v1782084423/zahlungserinnerung_ggoqcw.png";
+
+export function buildInvoiceReminderEmailHtml(generatedEmailText: string): string {
+  const bodyText = escapeHtml(generatedEmailText.trim());
+
+  return `<html>
+<head></head>
+<body>
+  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+    <h2 style="text-align: center; color: #222;">Zahlungserinnerung</h2>
+
+    <img src="${INVOICE_REMINDER_IMAGE_URL}" alt="Zahlungserinnerung" style="width: 100%; max-width: 600px; height: auto; display: block; margin: 20px auto; border-radius: 8px;" />
+
+    <div style="font-size: 16px; line-height: 1.5; white-space: pre-wrap;">
+      ${bodyText}
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
 function parseJsonObject(raw: string): Record<string, unknown> | null {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -124,6 +146,6 @@ export async function generateInvoiceReminderEmail(input: {
   return {
     subject,
     bodyPlain,
-    bodyHtml: plainTextToHtml(bodyPlain),
+    bodyHtml: buildInvoiceReminderEmailHtml(bodyPlain),
   };
 }

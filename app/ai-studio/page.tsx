@@ -1,5 +1,6 @@
 "use client";
 
+import { Power } from "lucide-react";
 import Image from "next/image";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -47,6 +48,9 @@ const EMPTY_PROMPTS: Record<ToolKey, string> = {
 };
 
 const AI_STUDIO_LAST_IMAGE_KEY = "aiStudioLastImage";
+const COMFYUI_PATH_STORAGE_KEY = "comfyui_path";
+const DEFAULT_COMFYUI_PATH =
+  "F:\\ComfyUI_windows_portable_nvidia\\ComfyUI_windows_portable\\run_nvidia_gpu.bat";
 
 const DEFAULT_TEXT2IMAGE_WIDTH = 1024;
 const DEFAULT_TEXT2IMAGE_HEIGHT = 1024;
@@ -219,6 +223,33 @@ function AiStudioPageContent() {
   const [radianceHdrSettings, setRadianceHdrSettings] = useState<RadianceHdrSettings>(
     DEFAULT_RADIANCE_HDR_SETTINGS
   );
+  const [comfyUiPath, setComfyUiPath] = useState(DEFAULT_COMFYUI_PATH);
+  const [isLaunchingComfyUi, setIsLaunchingComfyUi] = useState(false);
+  const [comfyUiToast, setComfyUiToast] = useState<string | null>(null);
+  const [comfyUiError, setComfyUiError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const savedPath = localStorage.getItem(COMFYUI_PATH_STORAGE_KEY);
+      if (savedPath) {
+        setComfyUiPath(savedPath);
+      }
+    } catch {
+      // localStorage may be unavailable in some contexts
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (comfyUiPath.trim()) {
+        localStorage.setItem(COMFYUI_PATH_STORAGE_KEY, comfyUiPath.trim());
+      } else {
+        localStorage.removeItem(COMFYUI_PATH_STORAGE_KEY);
+      }
+    } catch {
+      // localStorage may be unavailable in some contexts
+    }
+  }, [comfyUiPath]);
 
   useEffect(() => {
     try {
@@ -951,6 +982,36 @@ function AiStudioPageContent() {
     setShowOriginalImage(false);
   };
 
+  const handleLaunchComfyUi = async () => {
+    const path = comfyUiPath.trim();
+    if (!path) {
+      setComfyUiError("Enter the path to your ComfyUI launch script first.");
+      setComfyUiToast(null);
+      return;
+    }
+
+    setIsLaunchingComfyUi(true);
+    setComfyUiError(null);
+    setComfyUiToast(null);
+
+    try {
+      const response = await fetch("/api/local/start-comfyui", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ comfyPath: path }),
+      });
+      const payload = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Launch failed (${response.status}).`);
+      }
+      setComfyUiToast("Booting ComfyUI... Check your terminal window!");
+    } catch (error) {
+      setComfyUiError(error instanceof Error ? error.message : "Failed to launch ComfyUI.");
+    } finally {
+      setIsLaunchingComfyUi(false);
+    }
+  };
+
   const handleSendToMoodboard = async () => {
     if (!previewImageUrl || !selectedBoardId) {
       return;
@@ -1190,6 +1251,40 @@ function AiStudioPageContent() {
           </div>
 
           <aside className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="mb-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950/60">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
+                ComfyUI Server
+              </h2>
+              <p className="mb-3 text-[11px] text-zinc-500 dark:text-zinc-400">
+                Launch the local ComfyUI engine from your saved startup script path.
+              </p>
+              <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                Launch script path
+                <input
+                  type="text"
+                  value={comfyUiPath}
+                  onChange={(event) => setComfyUiPath(event.target.value)}
+                  placeholder={DEFAULT_COMFYUI_PATH}
+                  className="mt-1 h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={isLaunchingComfyUi || !comfyUiPath.trim()}
+                onClick={() => void handleLaunchComfyUi()}
+                className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-amber-600 px-4 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-amber-500 dark:hover:bg-amber-400"
+              >
+                <Power className="h-4 w-4" aria-hidden="true" />
+                {isLaunchingComfyUi ? "Launching…" : "Launch ComfyUI Engine"}
+              </button>
+              {comfyUiToast ? (
+                <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">{comfyUiToast}</p>
+              ) : null}
+              {comfyUiError ? (
+                <p className="mt-2 text-xs text-red-600 dark:text-red-400">{comfyUiError}</p>
+              ) : null}
+            </div>
+
             <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
               Tools
             </h2>
