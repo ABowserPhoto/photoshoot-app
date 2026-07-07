@@ -1004,7 +1004,7 @@ function AiStudioPageContent() {
       if (!response.ok) {
         throw new Error(payload?.error ?? `Launch failed (${response.status}).`);
       }
-      setComfyUiToast("Booting ComfyUI... Check your terminal window!");
+      setComfyUiToast("Booting AI Servers... Check your terminal window!");
     } catch (error) {
       setComfyUiError(error instanceof Error ? error.message : "Failed to launch ComfyUI.");
     } finally {
@@ -1253,29 +1253,23 @@ function AiStudioPageContent() {
           <aside className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
             <div className="mb-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950/60">
               <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">
-                ComfyUI Server
+                Start AI Servers
               </h2>
-              <p className="mb-3 text-[11px] text-zinc-500 dark:text-zinc-400">
-                Launch the local ComfyUI engine from your saved startup script path.
-              </p>
-              <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                Launch script path
-                <input
-                  type="text"
-                  value={comfyUiPath}
-                  onChange={(event) => setComfyUiPath(event.target.value)}
-                  placeholder={DEFAULT_COMFYUI_PATH}
-                  className="mt-1 h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-                />
-              </label>
+              <input
+                type="text"
+                value={comfyUiPath}
+                onChange={(event) => setComfyUiPath(event.target.value)}
+                placeholder={DEFAULT_COMFYUI_PATH}
+                className="h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+              />
               <button
                 type="button"
                 disabled={isLaunchingComfyUi || !comfyUiPath.trim()}
                 onClick={() => void handleLaunchComfyUi()}
-                className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-amber-600 px-4 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-amber-500 dark:hover:bg-amber-400"
+                className="mt-2 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-amber-600 px-4 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-amber-500 dark:hover:bg-amber-400"
               >
                 <Power className="h-4 w-4" aria-hidden="true" />
-                {isLaunchingComfyUi ? "Launching…" : "Launch ComfyUI Engine"}
+                {isLaunchingComfyUi ? "Launching…" : "Start AI Servers"}
               </button>
               {comfyUiToast ? (
                 <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">{comfyUiToast}</p>

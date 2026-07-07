@@ -14,6 +14,7 @@ import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { PERMISSION_DENIED_QUERY } from "@/lib/permissionDenied";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
+import { buildFinalizeShootPayload } from "@/lib/finalizeShootPayload";
 
 type AmountType = "Net" | "Gross";
 type PhotoshootType =
@@ -1005,15 +1006,28 @@ function HomeContent() {
       return;
     }
 
+    // Validate fields required by finalize-shoot before starting.
+    if (!uploadTask.email.trim()) {
+      setUploadError("Cannot finalize: client email is missing on this task.");
+      return;
+    }
+    if (!uploadTask.localFolderName.trim()) {
+      setUploadError(
+        "Cannot finalize: no local folder is set for this task. Ensure the PC worker has created shoot folders."
+      );
+      return;
+    }
+
     setIsUploading(true);
     setUploadError(null);
 
+    // ── Step 1: Save files to the shared drive + local 4_Final folder ──────────
     const formData = new FormData();
     for (const file of uploadFiles) {
       formData.append("files", file);
     }
 
-    const payload = {
+    const uploadPayload = {
       id: uploadTask.id,
       title: getTaskTitle(uploadTask),
       email: uploadTask.email,
@@ -1036,36 +1050,56 @@ function HomeContent() {
       skip_invoice: uploadTask.skipInvoice ?? false,
     };
 
-    console.log("ZAPIER PAYLOAD:", payload);
-
-    formData.append("taskData", JSON.stringify(payload));
+    console.log("UPLOAD PAYLOAD:", uploadPayload);
+    formData.append("taskData", JSON.stringify(uploadPayload));
 
     try {
-      const response = await fetch("/api/upload", {
+      const uploadResponse = await fetch("/api/upload", {
         method: "POST",
         body: formData,
       });
 
-      if (!response.ok) {
+      if (!uploadResponse.ok) {
         let message = "Upload failed.";
         try {
-          const errorPayload = (await response.json()) as { error?: string };
+          const errorPayload = (await uploadResponse.json()) as { error?: string };
           if (errorPayload.error) message = errorPayload.error;
         } catch {}
         setUploadError(message);
         return;
       }
 
-      if (!supabase) {
-        setUploadError(
-          "Files were saved, but Supabase is not configured — task status could not be set to Send Email."
-        );
-        return;
-      }
+      // ── Step 2: Run the full finalize-shoot workflow ──────────────────────────
+      // This creates the Drive folder, uploads photos from 4_Final, optionally
+      // creates a Lexoffice invoice, creates the Gmail draft, and updates the
+      // task status — exactly the same side-effects as the manual Kanban drag.
+      const finalizePayload = buildFinalizeShootPayload(uploadTask);
 
-      const statusRes = await updateTaskStatus(uploadTask.id, "Send Email");
-      if (!statusRes.ok) {
-        setUploadError(`Files uploaded, but status update failed: ${statusRes.error}`);
+      const finalizeResponse = await fetch("/api/workflows/finalize-shoot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(finalizePayload),
+      });
+
+      const finalizeJson = (await finalizeResponse.json().catch(() => null)) as {
+        success?: boolean;
+        error?: unknown;
+        step?: string;
+        skippedInvoice?: boolean;
+        status?: string;
+      } | null;
+
+      if (!finalizeResponse.ok || !finalizeJson?.success) {
+        const detail =
+          finalizeJson?.error instanceof Error
+            ? finalizeJson.error.message
+            : typeof finalizeJson?.error === "string"
+              ? finalizeJson.error
+              : `Finalize shoot failed (${finalizeResponse.status}).`;
+        const step = typeof finalizeJson?.step === "string" ? finalizeJson.step : "";
+        setUploadError(step ? `${detail} (step: ${step})` : detail);
+        // Still mark status manually so the card moves even if an optional step failed.
+        void updateTaskStatus(uploadTask.id, "Send Email");
         return;
       }
 

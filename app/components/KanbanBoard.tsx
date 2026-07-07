@@ -13,6 +13,10 @@ import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { supabase } from "@/lib/supabaseClient";
+import {
+  buildFinalizeShootPayload,
+  buildShootDisplayName,
+} from "@/lib/finalizeShootPayload";
 import MergePromptModal from "./MergePromptModal";
 import ReviewMergedModal from "./ReviewMergedModal";
 
@@ -259,118 +263,8 @@ function isMergePipelineStatus(value: string | null | undefined): boolean {
   return MERGE_PIPELINE_STATUSES.has(normalized);
 }
 
-function sumBoardLineItems(items: BoardTask["services"]): number {
-  return items.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.price) || 0), 0);
-}
-
-function buildShootDisplayName(task: BoardTask): string {
-  return (
-    task.taskTitle.trim() ||
-    [task.photoshootType, task.companyName, task.shootLocation].filter(Boolean).join(" - ") ||
-    task.localFolderName.trim() ||
-    "Photoshoot"
-  );
-}
-
-function buildContactPersonName(task: BoardTask): string {
-  return [task.contactFirstName, task.contactLastName]
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .join(" ");
-}
-
-function resolveCountryCode(country: string): string {
-  const trimmed = country.trim();
-  if (!trimmed) {
-    return "DE";
-  }
-  const lower = trimmed.toLowerCase();
-  if (lower === "germany" || lower === "deutschland" || lower === "de") {
-    return "DE";
-  }
-  if (trimmed.length === 2) {
-    return trimmed.toUpperCase();
-  }
-  return "DE";
-}
-
-function calculateTaskInvoiceNetPrice(task: BoardTask): number {
-  const subtotal = sumBoardLineItems(task.services) + sumBoardLineItems(task.products);
-  return Math.max(0, subtotal - (Number(task.discount) || 0));
-}
-
-function buildTaskLineItems(task: BoardTask): Array<{
-  name: string;
-  quantity: number;
-  price: number;
-  taxRate: number;
-}> {
-  const taxRate = Number.isFinite(task.taxPercentage) ? task.taxPercentage : 19;
-  const items = [...task.services, ...task.products]
-    .map((item) => {
-      const name = item.name.trim();
-      if (!name) {
-        return null;
-      }
-      return {
-        name,
-        quantity: Number(item.quantity) || 1,
-        price: Number(item.price) || 0,
-        taxRate,
-      };
-    })
-    .filter((item): item is { name: string; quantity: number; price: number; taxRate: number } => Boolean(item));
-
-  if (task.discount > 0) {
-    items.push({
-      name: "Discount",
-      quantity: 1,
-      price: -Math.abs(Number(task.discount) || 0),
-      taxRate,
-    });
-  }
-
-  if (items.length > 0) {
-    return items;
-  }
-
-  return [
-    {
-      name: `Photoshoot: ${buildShootDisplayName(task)}`,
-      quantity: 1,
-      price: calculateTaskInvoiceNetPrice(task),
-      taxRate,
-    },
-  ];
-}
-
-function buildFinalizeShootPayload(task: BoardTask) {
-  const invoiceName = task.companyName.trim();
-  const contactPerson = buildContactPersonName(task);
-
-  return {
-    taskId: task.id,
-    shootName: buildShootDisplayName(task),
-    invoiceName,
-    clientName: contactPerson || invoiceName || "Client",
-    clientEmail: task.email.trim(),
-    photoshootType: task.photoshootType,
-    shootLocation: task.shootLocation.trim(),
-    ...(task.addressSupplement.trim() ? { addressSupplement: task.addressSupplement.trim() } : {}),
-    clientAddress: {
-      street: task.street.trim() || undefined,
-      zip: task.zipCode.trim() || undefined,
-      city: task.city.trim() || undefined,
-      country: task.country.trim() || undefined,
-      countryCode: resolveCountryCode(task.country),
-    },
-    lineItems: buildTaskLineItems(task),
-    taxRate: Number.isFinite(task.taxPercentage) ? task.taxPercentage : 19,
-    skipInvoice: task.skipInvoice,
-    localFolderName: task.localFolderName.trim(),
-    ...(task.lexofficeContactId.trim() ? { lexofficeContactId: task.lexofficeContactId.trim() } : {}),
-  };
-}
+// buildShootDisplayName, buildFinalizeShootPayload and their helpers are
+// imported from @/lib/finalizeShootPayload (shared with the upload modal flow).
 
 function createEmptyBoard(): BoardState {
   return {
@@ -1302,11 +1196,7 @@ export default function KanbanBoard({
     let nextTotalEditingSeconds = dragged.task.totalEditingSeconds;
 
     if (targetColumn === "editing" && sourceColumn !== "editing") {
-      const confirmed = window.confirm("Ready to start the editing timer for this shoot?");
-      if (!confirmed) {
-        clearDragState();
-        return;
-      }
+      // Timer start is handled automatically by updateTaskStatus; no popup needed.
     }
 
     if (sourceColumn === "editing" && targetColumn === "edited") {

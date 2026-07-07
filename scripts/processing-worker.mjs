@@ -328,12 +328,19 @@ async function resolveSelectionSyncFailure(supabase, taskId, err) {
 }
 
 async function claimTaskForStatus(supabase, taskId, fromStatus, toStatus) {
+  const updatePayload = { status: toStatus };
+
+  // Stamp the editing timer when the task enters the Processing (merge) phase.
+  if (toStatus === ACTIVE_STATUS) {
+    updatePayload.editing_started_at = new Date().toISOString();
+  }
+
   const { data, error } = await withRetry(
     `claim task ${taskId} (${fromStatus} -> ${toStatus})`,
     async () =>
       supabase
         .from("tasks")
-        .update({ status: toStatus })
+        .update(updatePayload)
         .eq("id", taskId)
         .eq("status", fromStatus)
         .select("id")
@@ -1353,7 +1360,35 @@ async function processTaskLocally(task) {
 }
 
 async function finalizeTask(supabase, taskId, status) {
-  const { error } = await supabase.from("tasks").update({ status }).eq("id", taskId);
+  // Read the current task so we can accumulate any in-progress editing timer.
+  const { data: currentTask } = await supabase
+    .from("tasks")
+    .select("status, editing_started_at, total_editing_seconds")
+    .eq("id", taskId)
+    .maybeSingle();
+
+  const updatePayload = { status };
+
+  const currentStatus = typeof currentTask?.status === "string" ? currentTask.status.trim().toLowerCase() : "";
+  const leavingProcessing = currentStatus === ACTIVE_STATUS.toLowerCase();
+
+  if (leavingProcessing) {
+    const startedAt = typeof currentTask?.editing_started_at === "string"
+      ? currentTask.editing_started_at
+      : null;
+    const startedAtMs = startedAt ? Date.parse(startedAt) : NaN;
+    const elapsed = Number.isFinite(startedAtMs)
+      ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+      : 0;
+    const prevTotal = Number(currentTask?.total_editing_seconds ?? 0);
+    updatePayload.editing_started_at = null;
+    updatePayload.total_editing_seconds = prevTotal + elapsed;
+    console.info(
+      `[worker] Accumulating editing timer for task ${taskId}: elapsed=${elapsed}s, new total=${updatePayload.total_editing_seconds}s.`
+    );
+  }
+
+  const { error } = await supabase.from("tasks").update(updatePayload).eq("id", taskId);
   if (error) {
     throw new Error(`Failed to set status ${status} for task ${taskId}: ${error.message}`);
   }
@@ -1655,7 +1690,7 @@ async function processPendingProcessing(supabase) {
 async function recoverOrphanedWorkerTasksOnStartup(supabase) {
   const { data: processingTasks, error: processingError } = await supabase
     .from("tasks")
-    .select("id, local_folder_name")
+    .select("id, local_folder_name, editing_started_at, total_editing_seconds")
     .eq("status", ACTIVE_STATUS)
     .order("id", { ascending: true })
     .limit(50);
@@ -1666,13 +1701,28 @@ async function recoverOrphanedWorkerTasksOnStartup(supabase) {
     for (const task of processingTasks ?? []) {
       const taskId = String(task.id);
       const localFolderName = String(task.local_folder_name ?? "").trim();
-      const { error } = await supabase.from("tasks").update({ status: CLAIM_STATUS }).eq("id", taskId);
+
+      // Accumulate any in-progress editing timer before moving back to pending.
+      const startedAt = typeof task.editing_started_at === "string" ? task.editing_started_at : null;
+      const startedAtMs = startedAt ? Date.parse(startedAt) : NaN;
+      const elapsed = Number.isFinite(startedAtMs)
+        ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+        : 0;
+      const prevTotal = Number(task.total_editing_seconds ?? 0);
+
+      const recoveryPayload = {
+        status: CLAIM_STATUS,
+        editing_started_at: null,
+        total_editing_seconds: prevTotal + elapsed,
+      };
+
+      const { error } = await supabase.from("tasks").update(recoveryPayload).eq("id", taskId);
       if (error) {
         console.error(`[worker] Could not recover orphaned ${ACTIVE_STATUS} task ${taskId}:`, error.message);
         continue;
       }
       console.warn(
-        `[worker] Recovered orphaned ${ACTIVE_STATUS} task ${taskId}${localFolderName ? ` (${localFolderName})` : ""} -> ${CLAIM_STATUS}.`
+        `[worker] Recovered orphaned ${ACTIVE_STATUS} task ${taskId}${localFolderName ? ` (${localFolderName})` : ""} -> ${CLAIM_STATUS}. Accumulated ${elapsed}s editing time (new total: ${recoveryPayload.total_editing_seconds}s).`
       );
     }
   }

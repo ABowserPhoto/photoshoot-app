@@ -1,7 +1,7 @@
 "use client";
 
-import { Key } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { Key, Link2, Loader2, Unlink } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export type CrmUser = {
   id: string;
@@ -11,6 +11,12 @@ export type CrmUser = {
   createdAtLabel: string;
   role: string;
   roleKey: "admin" | "staff";
+  jibblePersonId: string | null;
+};
+
+type JibblePerson = {
+  id: string;
+  name: string;
 };
 
 type UserFormState = {
@@ -56,6 +62,14 @@ export default function UserManagementSection({ active, onToast, onError }: User
   const [resetPassword, setResetPassword] = useState("");
   const [resettingPassword, setResettingPassword] = useState(false);
 
+  // Jibble linking state
+  const [jibblePeople, setJibblePeople] = useState<JibblePerson[]>([]);
+  const [jibbleLoading, setJibbleLoading] = useState(false);
+  const [jibbleLinkingUserId, setJibbleLinkingUserId] = useState<string | null>(null);
+  const [jibbleSaving, setJibbleSaving] = useState<string | null>(null); // userId being saved
+  const [jibbleDropdownUserId, setJibbleDropdownUserId] = useState<string | null>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
   const loadUsers = useCallback(async () => {
     setLoading(true);
     onError(null);
@@ -82,6 +96,18 @@ export default function UserManagementSection({ active, onToast, onError }: User
     }
   }, [active, loadUsers]);
 
+  // Close Jibble dropdown when clicking outside.
+  useEffect(() => {
+    if (!jibbleDropdownUserId) return;
+    function handleClick(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setJibbleDropdownUserId(null);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [jibbleDropdownUserId]);
+
   const openCreateModal = () => {
     setIsEditMode(false);
     setForm({ ...EMPTY_FORM, password: generateSecurePassword() });
@@ -101,9 +127,7 @@ export default function UserManagementSection({ active, onToast, onError }: User
   };
 
   const closeModal = () => {
-    if (saving) {
-      return;
-    }
+    if (saving) return;
     setModalOpen(false);
     setIsEditMode(false);
     setForm(EMPTY_FORM);
@@ -121,9 +145,7 @@ export default function UserManagementSection({ active, onToast, onError }: User
   };
 
   const closeResetPasswordModal = () => {
-    if (resettingPassword) {
-      return;
-    }
+    if (resettingPassword) return;
     setIsResetPasswordModalOpen(false);
     setSelectedUserId("");
     setSelectedUserName("");
@@ -151,10 +173,7 @@ export default function UserManagementSection({ active, onToast, onError }: User
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({
-          userId: selectedUserId,
-          newPassword: resetPassword,
-        }),
+        body: JSON.stringify({ userId: selectedUserId, newPassword: resetPassword }),
       });
       const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
       if (!response.ok) {
@@ -178,7 +197,6 @@ export default function UserManagementSection({ active, onToast, onError }: User
       onError("Email is required.");
       return;
     }
-
     if (!isEditMode && !form.password.trim()) {
       onError("Generate a password before creating the user.");
       return;
@@ -193,18 +211,8 @@ export default function UserManagementSection({ active, onToast, onError }: User
         credentials: "include",
         body: JSON.stringify(
           isEditMode
-            ? {
-                id: form.id,
-                name: form.name.trim(),
-                email: form.email.trim(),
-                role: form.role,
-              }
-            : {
-                name: form.name.trim(),
-                email: form.email.trim(),
-                password: form.password,
-                role: form.role,
-              }
+            ? { id: form.id, name: form.name.trim(), email: form.email.trim(), role: form.role }
+            : { name: form.name.trim(), email: form.email.trim(), password: form.password, role: form.role }
         ),
       });
       const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
@@ -228,6 +236,63 @@ export default function UserManagementSection({ active, onToast, onError }: User
     }
   };
 
+  // ── Jibble linking ───────────────────────────────────────────────────────────
+
+  const fetchJibblePeople = async (): Promise<JibblePerson[]> => {
+    if (jibblePeople.length > 0) return jibblePeople;
+    setJibbleLoading(true);
+    try {
+      const response = await fetch("/api/jibble/users", { credentials: "include" });
+      const json = (await response.json().catch(() => null)) as
+        | { ok?: boolean; people?: JibblePerson[]; error?: string }
+        | null;
+      if (!response.ok) throw new Error(json?.error ?? "Failed to load Jibble users.");
+      const people = json?.people ?? [];
+      setJibblePeople(people);
+      return people;
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to load Jibble users.");
+      return [];
+    } finally {
+      setJibbleLoading(false);
+    }
+  };
+
+  const handleOpenJibbleDropdown = async (userId: string) => {
+    setJibbleLinkingUserId(userId);
+    setJibbleDropdownUserId(userId);
+    await fetchJibblePeople();
+    setJibbleLinkingUserId(null);
+  };
+
+  const handleSelectJibblePerson = async (userId: string, jibblePersonId: string | null) => {
+    setJibbleDropdownUserId(null);
+    setJibbleSaving(userId);
+    try {
+      const response = await fetch("/api/admin/crm/users/link-jibble", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ userId, jibblePersonId }),
+      });
+      const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!response.ok) throw new Error(json?.error ?? "Failed to link Jibble account.");
+
+      setUsers((prev) =>
+        prev.map((u) => (u.id === userId ? { ...u, jibblePersonId: jibblePersonId ?? null } : u))
+      );
+      onToast(
+        jibblePersonId
+          ? "Jibble account linked successfully!"
+          : "Jibble account unlinked."
+      );
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to link Jibble account.");
+    } finally {
+      setJibbleSaving(null);
+    }
+  };
+
   return (
     <>
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 sm:p-6">
@@ -235,7 +300,7 @@ export default function UserManagementSection({ active, onToast, onError }: User
           <div>
             <h2 className="text-lg font-semibold text-white">User management</h2>
             <p className="mt-1 text-sm text-zinc-400">
-              Create accounts and assign Admin or Staff access to your team.
+              Create accounts, assign roles, and link employees to their Jibble time-tracking profile.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -273,6 +338,9 @@ export default function UserManagementSection({ active, onToast, onError }: User
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
                   Created
                 </th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Jibble
+                </th>
                 <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-zinc-500">
                   Actions
                 </th>
@@ -281,45 +349,129 @@ export default function UserManagementSection({ active, onToast, onError }: User
             <tbody className="divide-y divide-zinc-800">
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-8 text-center text-zinc-400">
+                  <td colSpan={6} className="px-4 py-8 text-center text-zinc-400">
                     Loading users…
                   </td>
                 </tr>
               ) : users.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-8 text-center text-zinc-500">
+                  <td colSpan={6} className="px-4 py-8 text-center text-zinc-500">
                     No users found yet.
                   </td>
                 </tr>
               ) : (
-                users.map((user) => (
-                  <tr key={user.id} className="hover:bg-zinc-950/40">
-                    <td className="px-4 py-3 font-medium text-zinc-100">{user.name || "—"}</td>
-                    <td className="px-4 py-3 text-zinc-300">{user.email || "—"}</td>
-                    <td className="px-4 py-3 text-zinc-300">{user.role}</td>
-                    <td className="px-4 py-3 text-zinc-300">{user.createdAtLabel}</td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="inline-flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => openResetPasswordModal(user)}
-                          title="Reset Password"
-                          className="inline-flex items-center rounded-lg border border-zinc-600 p-1.5 text-zinc-200 transition hover:bg-zinc-800"
-                        >
-                          <Key className="h-4 w-4" aria-hidden="true" />
-                          <span className="sr-only">Reset Password</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => openEditModal(user)}
-                          className="inline-flex items-center rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-800"
-                        >
-                          Edit
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                users.map((user) => {
+                  const linkedPerson = jibblePeople.find((p) => p.id === user.jibblePersonId);
+                  const isLinkingThis = jibbleLinkingUserId === user.id;
+                  const isSavingThis = jibbleSaving === user.id;
+                  const isDropdownOpenFor = jibbleDropdownUserId === user.id;
+
+                  return (
+                    <tr key={user.id} className="hover:bg-zinc-950/40">
+                      <td className="px-4 py-3 font-medium text-zinc-100">{user.name || "—"}</td>
+                      <td className="px-4 py-3 text-zinc-300">{user.email || "—"}</td>
+                      <td className="px-4 py-3 text-zinc-300">{user.role}</td>
+                      <td className="px-4 py-3 text-zinc-300">{user.createdAtLabel}</td>
+
+                      {/* Jibble cell */}
+                      <td className="relative px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          {user.jibblePersonId ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-900/50 px-2.5 py-0.5 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-700/50">
+                              <Link2 className="h-3 w-3" aria-hidden="true" />
+                              {linkedPerson?.name ?? user.jibblePersonId.slice(0, 8) + "…"}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-zinc-600 italic">Not linked</span>
+                          )}
+
+                          <div className="relative" ref={isDropdownOpenFor ? dropdownRef : undefined}>
+                            <button
+                              type="button"
+                              disabled={isLinkingThis || isSavingThis}
+                              onClick={() => void handleOpenJibbleDropdown(user.id)}
+                              title={user.jibblePersonId ? "Change Jibble link" : "Link Jibble account"}
+                              className="inline-flex items-center rounded-lg border border-zinc-600 p-1.5 text-zinc-300 transition hover:bg-zinc-800 disabled:opacity-50"
+                            >
+                              {isLinkingThis || isSavingThis ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                              ) : (
+                                <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
+                              )}
+                              <span className="sr-only">Link Jibble</span>
+                            </button>
+
+                            {isDropdownOpenFor && !jibbleLoading && (
+                              <div className="absolute left-0 top-full z-50 mt-1 min-w-[220px] rounded-xl border border-zinc-700 bg-zinc-900 py-1 shadow-2xl">
+                                {jibblePeople.length === 0 ? (
+                                  <p className="px-3 py-2 text-xs text-zinc-400">
+                                    No Jibble users found.
+                                  </p>
+                                ) : (
+                                  <>
+                                    {user.jibblePersonId && (
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleSelectJibblePerson(user.id, null)}
+                                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-red-400 hover:bg-zinc-800"
+                                      >
+                                        <Unlink className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                        Unlink Jibble
+                                      </button>
+                                    )}
+                                    <div className="max-h-64 overflow-y-auto">
+                                      {jibblePeople.map((person) => (
+                                        <button
+                                          key={person.id}
+                                          type="button"
+                                          onClick={() =>
+                                            void handleSelectJibblePerson(user.id, person.id)
+                                          }
+                                          className={`flex w-full items-start gap-2 px-3 py-2 text-left text-xs hover:bg-zinc-800 ${
+                                            person.id === user.jibblePersonId
+                                              ? "bg-violet-900/30 text-violet-300"
+                                              : "text-zinc-200"
+                                          }`}
+                                        >
+                                          <span className="min-w-0 flex-1 truncate">{person.name}</span>
+                                          <span className="shrink-0 font-mono text-[10px] text-zinc-500">
+                                            {person.id.slice(0, 8)}…
+                                          </span>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Actions cell */}
+                      <td className="px-4 py-3 text-right">
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openResetPasswordModal(user)}
+                            title="Reset Password"
+                            className="inline-flex items-center rounded-lg border border-zinc-600 p-1.5 text-zinc-200 transition hover:bg-zinc-800"
+                          >
+                            <Key className="h-4 w-4" aria-hidden="true" />
+                            <span className="sr-only">Reset Password</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(user)}
+                            className="inline-flex items-center rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-800"
+                          >
+                            Edit
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

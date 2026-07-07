@@ -15,6 +15,7 @@ export type CrmUserRecord = {
   createdAtLabel: string;
   role: string;
   roleKey: "admin" | "staff";
+  jibblePersonId: string | null;
 };
 
 function formatCreatedAtLabel(value: string | null): string {
@@ -37,12 +38,15 @@ function readMetadataName(metadata: Record<string, unknown>): string {
   return typeof name === "string" ? name.trim() : "";
 }
 
-function mapUserRecord(user: {
-  id: string;
-  email?: string | null;
-  created_at?: string;
-  user_metadata?: Record<string, unknown> | null;
-}): CrmUserRecord {
+function mapUserRecord(
+  user: {
+    id: string;
+    email?: string | null;
+    created_at?: string;
+    user_metadata?: Record<string, unknown> | null;
+  },
+  jibblePersonId: string | null = null
+): CrmUserRecord {
   const metadata = user.user_metadata ?? {};
   const createdAt = user.created_at ?? null;
 
@@ -54,6 +58,7 @@ function mapUserRecord(user: {
     createdAtLabel: formatCreatedAtLabel(createdAt),
     role: formatCrmUserRole(metadata.role),
     roleKey: crmRoleFormValue(metadata.role),
+    jibblePersonId,
   };
 }
 
@@ -82,7 +87,7 @@ async function listAllUsers() {
     return { error: "Supabase admin client is not configured. Set SUPABASE_SERVICE_ROLE_KEY." as const };
   }
 
-  const users: Array<{
+  const authUsers: Array<{
     id: string;
     email?: string | null;
     created_at?: string;
@@ -99,7 +104,7 @@ async function listAllUsers() {
     }
 
     const batch = data.users ?? [];
-    users.push(...batch);
+    authUsers.push(...batch);
 
     if (batch.length < perPage) {
       break;
@@ -107,9 +112,20 @@ async function listAllUsers() {
     page += 1;
   }
 
+  // Fetch jibble_employee_id from profiles for all users in one query.
+  const { data: profiles } = await supabaseAdmin
+    .from("profiles")
+    .select("id, jibble_employee_id");
+
+  const jibbleMap = new Map<string, string | null>();
+  for (const profile of profiles ?? []) {
+    const p = profile as { id: string; jibble_employee_id?: string | null };
+    jibbleMap.set(p.id, p.jibble_employee_id?.trim() || null);
+  }
+
   return {
-    users: users
-      .map(mapUserRecord)
+    users: authUsers
+      .map((u) => mapUserRecord(u, jibbleMap.get(u.id) ?? null))
       .sort((a, b) => a.email.localeCompare(b.email, "en")),
   };
 }
@@ -200,12 +216,15 @@ export async function POST(request: Request) {
   return NextResponse.json(
     {
       ok: true,
-      user: mapUserRecord({
-        id: createdUser.id,
-        email: createdUser.email,
-        created_at: createdUser.created_at,
-        user_metadata: createdUser.user_metadata as Record<string, unknown>,
-      }),
+      user: mapUserRecord(
+        {
+          id: createdUser.id,
+          email: createdUser.email,
+          created_at: createdUser.created_at,
+          user_metadata: createdUser.user_metadata as Record<string, unknown>,
+        },
+        null
+      ),
     },
     { status: 201 }
   );
@@ -291,11 +310,14 @@ export async function PATCH(request: Request) {
 
   return NextResponse.json({
     ok: true,
-    user: mapUserRecord({
-      id: updatedUser.id,
-      email: updatedUser.email,
-      created_at: updatedUser.created_at,
-      user_metadata: updatedUser.user_metadata as Record<string, unknown>,
-    }),
+    user: mapUserRecord(
+      {
+        id: updatedUser.id,
+        email: updatedUser.email,
+        created_at: updatedUser.created_at,
+        user_metadata: updatedUser.user_metadata as Record<string, unknown>,
+      },
+      null
+    ),
   });
 }

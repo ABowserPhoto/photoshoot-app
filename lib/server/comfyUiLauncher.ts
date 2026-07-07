@@ -1,6 +1,7 @@
 import { exec } from "child_process";
 import fs from "fs";
 import os from "os";
+import path from "path";
 
 export type LaunchComfyUIResult = { ok: true } | { ok: false; error: string };
 
@@ -9,10 +10,14 @@ function escapePathForShell(targetPath: string): string {
 }
 
 function buildLaunchCommand(batPath: string, platform: string): string {
-  const escaped = escapePathForShell(batPath);
-
   if (platform === "win32") {
-    return `start cmd.exe /k "${escaped}"`;
+    // cd /d switches to the correct drive (e.g. F:\) before running the script
+    // so that relative paths inside the .bat file resolve correctly.
+    const comfyDir = path.dirname(batPath);
+    const batFile = path.basename(batPath);
+    const escapedDir = escapePathForShell(comfyDir);
+    const escapedFile = escapePathForShell(batFile);
+    return `start cmd.exe /k "cd /d "${escapedDir}" && "${escapedFile}""`;
   }
 
   if (platform === "darwin") {
@@ -21,6 +26,7 @@ function buildLaunchCommand(batPath: string, platform: string): string {
   }
 
   // Linux — try common terminal emulators, then fall back to running directly.
+  const escaped = escapePathForShell(batPath);
   return `gnome-terminal -- bash -c "${escaped}; exec bash" || xterm -hold -e "${escaped}" || bash -c "${escaped}"`;
 }
 

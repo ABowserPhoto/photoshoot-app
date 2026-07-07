@@ -58,12 +58,11 @@ function gatekeeperFallbackEmployeeId(role: "admin" | "editor"): string | null {
 async function resolveJibbleEmployeeId(params: {
   userId: string | null;
   role: "admin" | "editor";
-}): Promise<string | null> {
+}): Promise<{ id: string | null; notLinked: boolean }> {
   const { userId, role } = params;
   if (userId) {
     const sb = serviceSupabase();
     if (sb) {
-      // Placeholder mapping: add `profiles.jibble_employee_id` in DB for robust per-user mapping.
       const { data, error } = await sb
         .from("profiles")
         .select("jibble_employee_id")
@@ -72,14 +71,15 @@ async function resolveJibbleEmployeeId(params: {
       if (!error) {
         const value = (data as { jibble_employee_id?: unknown } | null)?.jibble_employee_id;
         if (typeof value === "string" && value.trim()) {
-          return value.trim();
+          return { id: value.trim(), notLinked: false };
         }
       }
     }
-    return process.env.JIBBLE_DEFAULT_EMPLOYEE_ID?.trim() || null;
+    // No per-user mapping found — require explicit linking.
+    return { id: null, notLinked: true };
   }
 
-  return gatekeeperFallbackEmployeeId(role);
+  return { id: gatekeeperFallbackEmployeeId(role), notLinked: false };
 }
 
 async function getJibbleAccessToken(): Promise<string> {
@@ -162,13 +162,14 @@ export async function POST(request: Request) {
   }
 
   const userId = await getSessionUserId();
-  const employeeId = await resolveJibbleEmployeeId({ userId, role: auth.role });
+  const { id: employeeId, notLinked } = await resolveJibbleEmployeeId({ userId, role: auth.role });
   if (!employeeId) {
     return NextResponse.json(
       {
         ok: false,
-        error:
-          "No Jibble employee mapping found. Configure profiles.jibble_employee_id or JIBBLE_*_EMPLOYEE_ID env vars.",
+        error: notLinked
+          ? "Your account is not linked to Jibble. Ask an admin to link your account in User Management."
+          : "No Jibble employee mapping found. Configure JIBBLE_*_EMPLOYEE_ID env vars.",
       },
       { status: 400 }
     );

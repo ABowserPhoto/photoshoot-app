@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/publish-social",
+      "schedule": "0/5 * * * *"
+    }
+  ]
+}
