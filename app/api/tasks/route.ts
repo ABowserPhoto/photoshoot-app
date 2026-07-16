@@ -108,15 +108,20 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: "taskId is required." }, { status: 400 });
   }
 
-  const purgeResult = await purgeTaskStorage(taskId, { strict: true });
+  // Best-effort storage purge — orphaned files are logged but never block deletion.
+  const purgeResult = await purgeTaskStorage(taskId);
   if (!purgeResult.ok) {
+    // purgeTaskStorage only returns ok:false when Supabase credentials are missing entirely.
     return NextResponse.json(
-      {
-        error:
-          purgeResult.error ||
-          "Could not fully purge task storage. Task was not deleted to avoid orphaned files.",
-      },
-      { status: 500 }
+      { error: purgeResult.error || "Supabase storage is not configured." },
+      { status: 503 }
+    );
+  }
+
+  if ((purgeResult.remainingCount ?? 0) > 0) {
+    console.warn(
+      `[DELETE /api/tasks] Task ${taskId}: storage purge left ${purgeResult.remainingCount} orphaned file(s). Proceeding with DB deletion.`,
+      purgeResult.remainingPaths
     );
   }
 
@@ -135,5 +140,6 @@ export async function DELETE(request: Request) {
     taskId,
     removedCount: purgeResult.removedCount,
     buckets: purgeResult.buckets,
+    ...(purgeResult.remainingCount ? { orphanedFiles: purgeResult.remainingCount } : {}),
   });
 }

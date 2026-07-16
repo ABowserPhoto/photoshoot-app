@@ -674,7 +674,8 @@ function startComfyUi() {
 
 function startManagedChildProcesses() {
   startPhotoWorker();
-  startComfyUi();
+  // ComfyUI is intentionally NOT auto-started here.
+  // Use the "Start AI Servers" button in the AI Studio UI to launch it manually.
 }
 
 function stopManagedChildProcesses() {

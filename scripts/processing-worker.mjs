@@ -142,6 +142,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Returns the expected merged-output filename for a bracket, matching the
+ * naming logic in app/services/processingEngine.ts `mergedOutputFileName`.
+ * `bracketIndex` is 1-based (currentBracketIndex = photoIndex + 1).
+ */
+function mergedOutputFileName(firstFileInGroup, bracketIndex, totalBrackets) {
+  const stem = path.basename(firstFileInGroup, path.extname(firstFileInGroup));
+  const withoutFrameIndex = stem.replace(/_\d+$/i, "");
+  if (totalBrackets <= 1) {
+    return `${withoutFrameIndex}-merged.jpg`;
+  }
+  return `${withoutFrameIndex}-merged-${bracketIndex}.jpg`;
+}
+
 function isRawPreviewFile(filePath) {
   return RAW_PREVIEW_EXTENSIONS.has(path.extname(String(filePath || "")).toLowerCase());
 }
@@ -1291,6 +1305,21 @@ async function processTaskLocally(task) {
   let expectedComfyJobs = 0;
 
   for (let photoIndex = 0; photoIndex < totalItems; photoIndex += 1) {
+    // ── Resume check: skip brackets already merged in a previous run ─────────
+    const firstFileInGroup = brackets[photoIndex]?.[0];
+    if (firstFileInGroup) {
+      const expectedBaseName = mergedOutputFileName(firstFileInGroup, photoIndex + 1, totalItems);
+      const expectedOutFile = path.join(taskRoot, "3_Merged", expectedBaseName);
+      if (fs.existsSync(expectedOutFile)) {
+        console.info(
+          `[worker] Task ${task.id}: photo ${photoIndex + 1} of ${totalItems} already merged (${expectedBaseName}). Skipping.`
+        );
+        processedItems += 1;
+        continue;
+      }
+    }
+    // ── End resume check ──────────────────────────────────────────────────────
+
     console.log(`[Worker] Task ${task.id}: Merging photo ${photoIndex + 1} of ${totalItems}...`);
     try {
       const response = await fetchWithTimeout(
@@ -1636,14 +1665,24 @@ async function processPendingProcessing(supabase) {
         );
       }
 
+      // `noMergeNeeded` covers two cases:
+      //   (a) all brackets were skipped because they were already merged on a
+      //       previous (interrupted) run — resume path.
+      //   (b) the task genuinely has no _sqi files so no Comfy jobs are needed.
+      // In both cases every bracket was processed without failure, so we can
+      // upload the existing merged/final files and advance to Ready for Review.
       const fullyMerged =
         processingResult.failedItems === 0 &&
         processingResult.processedItems === processingResult.totalItems &&
-        expectedComfyJobs > 0 &&
-        queuedComfyJobs === expectedComfyJobs &&
-        failedComfyJobs === 0 &&
-        comfyResult.timedOut === false &&
-        Number(comfyResult.copied ?? 0) >= expectedComfyJobs;
+        (
+          noMergeNeeded ||
+          (
+            queuedComfyJobs === expectedComfyJobs &&
+            failedComfyJobs === 0 &&
+            comfyResult.timedOut === false &&
+            Number(comfyResult.copied ?? 0) >= expectedComfyJobs
+          )
+        );
 
       if (fullyMerged) {
         await uploadMergedAndFinalsForReview(supabase, localFolderName);

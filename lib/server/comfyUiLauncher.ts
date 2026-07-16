@@ -33,12 +33,20 @@ function buildLaunchCommand(batPath: string, platform: string): string {
 /**
  * Launches ComfyUI in a new visible terminal window on the local machine.
  * Only meaningful when the Next.js server runs on the same host (Electron / local dev).
+ *
+ * Path resolution order:
+ *   1. `COMFYUI_LAUNCH_SCRIPT` environment variable (set in .env.local / .env.production)
+ *   2. `batPath` argument supplied by the caller (value from the AI Studio UI input)
  */
 export function launchComfyUI(batPath: string): Promise<LaunchComfyUIResult> {
   return new Promise((resolve) => {
-    const trimmed = batPath.trim();
+    // Prefer the server-side env var so deployments can pin the correct path
+    // without relying on the browser's localStorage value.
+    const envPath = process.env.COMFYUI_LAUNCH_SCRIPT?.trim();
+    const trimmed = envPath || batPath.trim();
+
     if (!trimmed) {
-      resolve({ ok: false, error: "No ComfyUI launch path specified." });
+      resolve({ ok: false, error: "No ComfyUI launch path specified. Set COMFYUI_LAUNCH_SCRIPT or enter the path in the UI." });
       return;
     }
 

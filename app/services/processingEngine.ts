@@ -627,6 +627,28 @@ export async function startProcessingSingleItem(
     const originalInputs = group.map((name) => path.join(selectsDir, name));
     const outBaseName = mergedOutputFileName(firstName, currentBracketIndex, totalBrackets);
     const outFile = path.join(mergedDir, outBaseName);
+
+    // ── Resume guard ─────────────────────────────────────────────────────────
+    // If this bracket was already merged (e.g. worker was interrupted mid-run),
+    // skip the expensive RawTherapee → SNS-HDR pipeline and return success.
+    // We report 0 new Comfy jobs so the caller doesn't double-queue them.
+    if (fs.existsSync(outFile)) {
+      console.info(
+        `[processingEngine] Bracket ${currentBracketIndex}/${totalBrackets} already merged: ${outBaseName}. Skipping merge pipeline.`
+      );
+      return {
+        ok: true,
+        bracketIndex,
+        totalBrackets,
+        mergedFile: outBaseName,
+        expectedComfyJobs: 0,
+        comfyQueuedCount: 0,
+        comfyFailedCount: 0,
+        comfyErrors: [],
+      };
+    }
+    // ── End resume guard ─────────────────────────────────────────────────────
+
     const tempOutFile = path.join(
       mergedDir,
       `${path.basename(outBaseName, path.extname(outBaseName))}.__tmp_${Date.now()}_${Math.random()
