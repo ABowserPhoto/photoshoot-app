@@ -16,11 +16,15 @@ export type FinalizeShootTask = {
   contactFirstName: string;
   contactLastName: string;
   email: string;
+  /** Comma-separated CC recipients for the delivery email draft. */
+  emailCc?: string;
   street: string;
   zipCode: string;
   city: string;
   country: string;
   addressSupplement: string;
+  /** Client-facing gallery URL shown on the Lexoffice invoice. */
+  galleryLink?: string;
   services: Array<{ name: string; quantity: number; price: number }>;
   products: Array<{ name: string; quantity: number; price: number }>;
   taxPercentage: number;
@@ -43,9 +47,11 @@ export type FinalizeShootPayload = {
   invoiceName: string;
   clientName: string;
   clientEmail: string;
+  clientEmailCc?: string;
   photoshootType: string;
   shootLocation: string;
   addressSupplement?: string;
+  galleryLink?: string;
   clientAddress: {
     street?: string;
     zip?: string;
@@ -80,13 +86,36 @@ export function buildContactPersonName(task: FinalizeShootTask): string {
     .join(" ");
 }
 
+const COUNTRY_NAME_TO_CODE: Record<string, string> = {
+  germany: "DE",
+  deutschland: "DE",
+  austria: "AT",
+  österreich: "AT",
+  osterreich: "AT",
+  switzerland: "CH",
+  schweiz: "CH",
+  netherlands: "NL",
+  niederlande: "NL",
+  belgium: "BE",
+  belgien: "BE",
+  france: "FR",
+  frankreich: "FR",
+  luxembourg: "LU",
+  luxemburg: "LU",
+};
+
+/**
+ * Maps a free-text country field to an ISO country code.
+ * Does NOT hardcode a default — empty input stays empty so the saved
+ * country value is always respected dynamically.
+ */
 export function resolveCountryCode(country: string): string {
   const trimmed = country.trim();
-  if (!trimmed) return "DE";
+  if (!trimmed) return "";
   const lower = trimmed.toLowerCase();
-  if (lower === "germany" || lower === "deutschland" || lower === "de") return "DE";
-  if (trimmed.length === 2) return trimmed.toUpperCase();
-  return "DE";
+  if (COUNTRY_NAME_TO_CODE[lower]) return COUNTRY_NAME_TO_CODE[lower];
+  if (/^[a-zA-Z]{2}$/.test(trimmed)) return trimmed.toUpperCase();
+  return trimmed.toUpperCase();
 }
 
 export function calculateTaskInvoiceNetPrice(task: FinalizeShootTask): number {
@@ -133,6 +162,9 @@ export function buildTaskLineItems(task: FinalizeShootTask): FinalizeShootLineIt
 export function buildFinalizeShootPayload(task: FinalizeShootTask): FinalizeShootPayload {
   const invoiceName = task.companyName.trim();
   const contactPerson = buildContactPersonName(task);
+  const galleryLink = (task.galleryLink ?? "").trim();
+  const emailCc = (task.emailCc ?? "").trim();
+  const countryCode = resolveCountryCode(task.country);
 
   return {
     taskId: task.id,
@@ -140,15 +172,17 @@ export function buildFinalizeShootPayload(task: FinalizeShootTask): FinalizeShoo
     invoiceName,
     clientName: contactPerson || invoiceName || "Client",
     clientEmail: task.email.trim(),
+    ...(emailCc ? { clientEmailCc: emailCc } : {}),
     photoshootType: task.photoshootType,
     shootLocation: task.shootLocation.trim(),
     ...(task.addressSupplement.trim() ? { addressSupplement: task.addressSupplement.trim() } : {}),
+    ...(galleryLink ? { galleryLink } : {}),
     clientAddress: {
       street: task.street.trim() || undefined,
       zip: task.zipCode.trim() || undefined,
       city: task.city.trim() || undefined,
       country: task.country.trim() || undefined,
-      countryCode: resolveCountryCode(task.country),
+      countryCode,
     },
     lineItems: buildTaskLineItems(task),
     taxRate: Number.isFinite(task.taxPercentage) ? task.taxPercentage : 19,

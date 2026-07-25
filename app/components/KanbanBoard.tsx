@@ -43,12 +43,18 @@ export type BoardTask = {
   contactFirstName: string;
   contactLastName: string;
   email: string;
+  /** Comma-separated CC emails for delivery drafts. */
+  emailCc: string;
   phone: string;
   street: string;
   zipCode: string;
   city: string;
   country: string;
   addressSupplement: string;
+  /** Client-facing photo gallery URL shown on the invoice. */
+  galleryLink: string;
+  /** Selected CRM contact UUID. */
+  contactId: string | null;
   services: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
   products: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
   taxPercentage: number;
@@ -124,12 +130,15 @@ const FALLBACK_TASKS: BoardTask[] = [
     contactFirstName: "Alex",
     contactLastName: "Jordan",
     email: "",
+    emailCc: "",
     phone: "",
     street: "",
     zipCode: "",
     city: "",
     country: "",
     addressSupplement: "",
+    galleryLink: "",
+    contactId: null,
     services: [],
     products: [],
     taxPercentage: 19,
@@ -166,12 +175,15 @@ const FALLBACK_TASKS: BoardTask[] = [
     contactFirstName: "Maria",
     contactLastName: "Klein",
     email: "",
+    emailCc: "",
     phone: "",
     street: "",
     zipCode: "",
     city: "",
     country: "",
     addressSupplement: "",
+    galleryLink: "",
+    contactId: null,
     services: [],
     products: [],
     taxPercentage: 19,
@@ -207,12 +219,15 @@ type DbTask = {
   contact_first_name: string | null;
   contact_last_name: string | null;
   email: string | null;
+  email_cc: string | null;
   phone: string | null;
   street: string | null;
   zip_code: string | null;
   city: string | null;
   country: string | null;
   address_supplement: string | null;
+  gallery_link: string | null;
+  contact_id: string | null;
   services: unknown;
   products: unknown;
   tax_percentage: number | null;
@@ -540,6 +555,7 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
     contactLastName:
       typeof row.contact_last_name === "string" ? row.contact_last_name : (existing?.contactLastName ?? ""),
     email: typeof row.email === "string" ? row.email : (existing?.email ?? ""),
+    emailCc: typeof row.email_cc === "string" ? row.email_cc : (existing?.emailCc ?? ""),
     phone: typeof row.phone === "string" ? row.phone : (existing?.phone ?? ""),
     street: typeof row.street === "string" ? row.street : (existing?.street ?? ""),
     zipCode: typeof row.zip_code === "string" ? row.zip_code : (existing?.zipCode ?? ""),
@@ -549,6 +565,13 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
       typeof row.address_supplement === "string"
         ? row.address_supplement
         : (existing?.addressSupplement ?? ""),
+    galleryLink: typeof row.gallery_link === "string" ? row.gallery_link : (existing?.galleryLink ?? ""),
+    contactId:
+      typeof row.contact_id === "string"
+        ? row.contact_id
+        : row.contact_id === null
+          ? null
+          : (existing?.contactId ?? null),
     services: safeLineItems(row.services ?? existing?.services),
     products: safeLineItems(row.products ?? existing?.products),
     taxPercentage: Number(row.tax_percentage ?? existing?.taxPercentage ?? 19),
@@ -1277,6 +1300,8 @@ export default function KanbanBoard({
               success?: boolean;
               skippedInvoice?: boolean;
               status?: string;
+              galleryLink?: string;
+              googleDriveLink?: string;
             }
           | null;
 
@@ -1293,9 +1318,15 @@ export default function KanbanBoard({
               ? "Send Email"
               : "Invoice Sent";
 
+        const resolvedGalleryLink =
+          (typeof payload.galleryLink === "string" && payload.galleryLink.trim()) ||
+          (typeof payload.googleDriveLink === "string" && payload.googleDriveLink.trim()) ||
+          movedTask.galleryLink;
+
         const finalizedTask: BoardTask = {
           ...movedTask,
           workflowStatus,
+          galleryLink: resolvedGalleryLink,
           updatedAt: new Date().toISOString(),
         };
 

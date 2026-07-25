@@ -12,7 +12,8 @@ const GOOGLE_SCOPES = [
 
 export interface CreateDriveFolderResult {
   id: string;
-  webViewLink: string | null;
+  /** Shareable folder URL (`webViewLink`, or constructed Drive folders URL fallback). */
+  webViewLink: string;
 }
 
 export interface CreateGmailDraftResult {
@@ -129,13 +130,16 @@ function buildRawEmail(options: {
   plainTextFallback?: string;
   attachmentBuffer?: Buffer;
   attachmentFileName?: string;
+  cc?: string;
 }): string {
   const from = sanitizeHeaderValue(options.from);
   const to = sanitizeHeaderValue(options.to);
+  const cc = options.cc?.trim() ? sanitizeHeaderValue(options.cc.trim()) : "";
   const subject = encodeSubject(options.subject);
   const htmlBody = options.htmlBody.replace(/\r?\n/g, "\r\n");
   const plainText = (options.plainTextFallback ?? "").replace(/\r?\n/g, "\r\n");
   const htmlBase64 = foldBase64(Buffer.from(htmlBody, "utf8").toString("base64"));
+  const ccHeader = cc ? [`Cc: ${cc}`] : [];
 
   if (!options.attachmentBuffer) {
     if (plainText) {
@@ -144,6 +148,7 @@ function buildRawEmail(options: {
       return [
         `From: ${from}`,
         `To: ${to}`,
+        ...ccHeader,
         `Subject: ${subject}`,
         "MIME-Version: 1.0",
         `Content-Type: multipart/alternative; boundary="${alternativeBoundary}"`,
@@ -166,6 +171,7 @@ function buildRawEmail(options: {
     return [
       `From: ${from}`,
       `To: ${to}`,
+      ...ccHeader,
       `Subject: ${subject}`,
       "MIME-Version: 1.0",
       'Content-Type: text/html; charset="UTF-8"',
@@ -183,6 +189,7 @@ function buildRawEmail(options: {
   const parts = [
     `From: ${from}`,
     `To: ${to}`,
+    ...ccHeader,
     `Subject: ${subject}`,
     "MIME-Version: 1.0",
     `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
@@ -297,7 +304,7 @@ export async function createDriveFolder(
     const webViewLink =
       typeof response.data.webViewLink === "string" && response.data.webViewLink.trim()
         ? response.data.webViewLink.trim()
-        : null;
+        : `https://drive.google.com/drive/folders/${id}`;
 
     return { id, webViewLink };
   } catch (error) {
@@ -360,7 +367,7 @@ export async function createGmailDraft(
   htmlBody: string,
   attachmentBuffer?: Buffer,
   attachmentFileName?: string,
-  options?: { plainTextFallback?: string }
+  options?: { plainTextFallback?: string; cc?: string }
 ): Promise<CreateGmailDraftResult> {
   const recipient = to.trim();
   if (!recipient) {
@@ -385,6 +392,7 @@ export async function createGmailDraft(
     plainTextFallback: options?.plainTextFallback,
     attachmentBuffer,
     attachmentFileName,
+    cc: options?.cc,
   });
 
   try {

@@ -329,21 +329,40 @@ function buildLexofficeInvoiceViewUrl(invoiceId: string): string {
   return `${base.replace(/\/$/, "")}/permalink/invoices/view/${encodeURIComponent(invoiceId)}`;
 }
 
+const COUNTRY_NAME_TO_CODE: Record<string, string> = {
+  germany: "DE",
+  deutschland: "DE",
+  austria: "AT",
+  österreich: "AT",
+  osterreich: "AT",
+  switzerland: "CH",
+  schweiz: "CH",
+  netherlands: "NL",
+  niederlande: "NL",
+  belgium: "BE",
+  belgien: "BE",
+  france: "FR",
+  frankreich: "FR",
+  luxembourg: "LU",
+  luxemburg: "LU",
+};
+
+/** Resolves ISO country code dynamically — no hardcoded DE fallback. */
 function resolveCountryCode(countryCode?: string, country?: string): string {
-  const explicit = countryCode?.trim().toUpperCase();
+  const explicit = countryCode?.trim();
   if (explicit) {
-    return explicit;
+    if (/^[a-zA-Z]{2}$/.test(explicit)) return explicit.toUpperCase();
+    const mapped = COUNTRY_NAME_TO_CODE[explicit.toLowerCase()];
+    if (mapped) return mapped;
+    return explicit.toUpperCase();
   }
 
-  const normalized = (country ?? "").trim().toLowerCase();
-  if (!normalized || normalized === "germany" || normalized === "deutschland" || normalized === "de") {
-    return "DE";
-  }
-  if (normalized.length === 2) {
-    return normalized.toUpperCase();
-  }
-
-  return "DE";
+  const normalized = (country ?? "").trim();
+  if (!normalized) return "";
+  const mapped = COUNTRY_NAME_TO_CODE[normalized.toLowerCase()];
+  if (mapped) return mapped;
+  if (/^[a-zA-Z]{2}$/.test(normalized)) return normalized.toUpperCase();
+  return normalized.toUpperCase();
 }
 
 function splitPersonName(fullName: string): { firstName: string; lastName: string } {
@@ -592,6 +611,11 @@ function buildLexofficeInvoicePayload(invoiceData: CreateLexofficeInvoiceData, c
   }
 
   const countryCode = resolveCountryCode(client.countryCode, client.country);
+  if (!countryCode) {
+    throw new Error(
+      "Invoice country is required. Set the Country field on the booking (ISO code, e.g. DE)."
+    );
+  }
 
   const mappedLineItems = lineItems.map((item) => {
     const name = item.name.trim();

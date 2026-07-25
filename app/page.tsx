@@ -56,6 +56,11 @@ type Client = {
   street: string | null;
   zip_code: string | null;
   city: string | null;
+  country?: string | null;
+  billing_street?: string | null;
+  billing_city?: string | null;
+  billing_postal_code?: string | null;
+  billing_country?: string | null;
   email?: string | null;
   phone?: string | null;
   lexoffice_contact_id: string | null;
@@ -80,6 +85,7 @@ type ClientDirectoryEntry = {
   street: string;
   zip_code: string;
   city: string;
+  country: string;
   email: string;
   phone: string;
   lexoffice_contact_id: string;
@@ -87,6 +93,27 @@ type ClientDirectoryEntry = {
 
 type ClientNameOption = SelectOption & {
   client: ClientDirectoryEntry | null;
+};
+
+type CrmContactDirectoryEntry = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  fullName: string;
+  phone: string;
+  companyId: string;
+  companyName: string;
+  lexofficeContactId: string;
+  billingStreet: string;
+  billingCity: string;
+  billingPostalCode: string;
+  billingCountry: string;
+  primaryEmail: string;
+  ccEmails: string[];
+};
+
+type ContactPersonOption = SelectOption & {
+  contact: CrmContactDirectoryEntry | null;
 };
 
 type CatalogOption = SelectOption & {
@@ -100,6 +127,7 @@ type TaskSupabasePayload = {
   company_name: string;
   contact_first_name: string;
   contact_last_name: string;
+  contact_id: string | null;
   street: string;
   zip_code: string;
   city: string;
@@ -107,6 +135,8 @@ type TaskSupabasePayload = {
   country: string;
   address_supplement: string;
   email: string;
+  email_cc: string | null;
+  gallery_link: string | null;
   phone: string;
   services: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
   products: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
@@ -248,6 +278,7 @@ function HomeContent() {
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
   const [accessNotice, setAccessNotice] = useState<string | null>(null);
   const [clientDirectory, setClientDirectory] = useState<ClientDirectoryEntry[]>([]);
+  const [crmContacts, setCrmContacts] = useState<CrmContactDirectoryEntry[]>([]);
   const [serviceCatalog, setServiceCatalog] = useState<CatalogItem[]>([]);
   const [productCatalog, setProductCatalog] = useState<CatalogItem[]>([]);
   const [saveAsNewClient, setSaveAsNewClient] = useState(false);
@@ -269,6 +300,7 @@ function HomeContent() {
 
   const [companyName, setCompanyName] = useState("");
   const [contactPerson, setContactPerson] = useState("");
+  const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [street, setStreet] = useState("");
   const [zipCode, setZipCode] = useState("");
   const [city, setCity] = useState("");
@@ -276,6 +308,8 @@ function HomeContent() {
   const [lexofficeContactId, setLexofficeContactId] = useState("");
   const [country, setCountry] = useState("");
   const [email, setEmail] = useState("");
+  const [emailCc, setEmailCc] = useState("");
+  const [galleryLink, setGalleryLink] = useState("");
   const [phone, setPhone] = useState("");
   const [services, setServices] = useState<LineItem[]>([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
   const [products, setProducts] = useState<LineItem[]>([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
@@ -355,6 +389,34 @@ function HomeContent() {
     );
     return existingOption ?? { value: trimmedName, label: trimmedName, client: null };
   }, [clientNameOptions, companyName]);
+
+  const contactPersonOptions: ContactPersonOption[] = useMemo(
+    () =>
+      crmContacts.map((contact) => ({
+        value: contact.id,
+        label: contact.companyName
+          ? `${contact.fullName} — ${contact.companyName}`
+          : contact.fullName,
+        contact,
+      })),
+    [crmContacts]
+  );
+  const selectedContactOption = useMemo<ContactPersonOption | null>(() => {
+    if (selectedContactId) {
+      const byId = contactPersonOptions.find((option) => option.value === selectedContactId);
+      if (byId) return byId;
+    }
+    const trimmed = contactPerson.trim();
+    if (!trimmed) return null;
+    const byName = contactPersonOptions.find(
+      (option) =>
+        option.contact &&
+        option.contact.fullName.toLowerCase() === trimmed.toLowerCase() &&
+        (!companyName.trim() ||
+          option.contact.companyName.toLowerCase() === companyName.trim().toLowerCase())
+    );
+    return byName ?? { value: trimmed, label: trimmed, contact: null };
+  }, [contactPersonOptions, selectedContactId, contactPerson, companyName]);
   const serviceOptions: CatalogOption[] = serviceCatalog.map((item) => ({
     value: item.id,
     label: item.name,
@@ -396,22 +458,43 @@ function HomeContent() {
       { data: clientsData, error: clientsError },
       { data: taskClientData, error: taskClientError },
       { data: catalogData, error: catalogLoadError },
-    ] =
-      await Promise.all([
-        supabase
-          .from("clients")
-          .select("id, company_name, street, zip_code, city, lexoffice_contact_id")
-          .order("company_name", { ascending: true }),
-        supabase
-          .from("tasks")
-          .select("company_name, email, phone, street, zip_code, city, lexoffice_contact_id")
-          .not("company_name", "is", null)
-          .neq("company_name", ""),
-        supabase
-          .from("catalog")
-          .select("id, item_type, name, default_price, lexoffice_id")
-          .order("name", { ascending: true }),
-      ]);
+      contactsLoad,
+    ] = await Promise.all([
+      supabase
+        .from("clients")
+        .select(
+          "id, company_name, street, zip_code, city, country, billing_street, billing_city, billing_postal_code, billing_country, email, phone, lexoffice_contact_id"
+        )
+        .order("company_name", { ascending: true }),
+      supabase
+        .from("tasks")
+        .select("company_name, email, phone, street, zip_code, city, country, lexoffice_contact_id")
+        .not("company_name", "is", null)
+        .neq("company_name", ""),
+      supabase
+        .from("catalog")
+        .select("id, item_type, name, default_price, lexoffice_id")
+        .order("name", { ascending: true }),
+      fetch("/api/crm/contacts", { credentials: "include" })
+        .then(async (response) => {
+          const json = (await response.json().catch(() => null)) as {
+            ok?: boolean;
+            contacts?: CrmContactDirectoryEntry[];
+            error?: string;
+          } | null;
+          if (!response.ok) {
+            return {
+              error: json?.error ?? `HTTP ${response.status}`,
+              contacts: [] as CrmContactDirectoryEntry[],
+            };
+          }
+          return { error: null as string | null, contacts: json?.contacts ?? [] };
+        })
+        .catch((err) => ({
+          error: err instanceof Error ? err.message : "Failed to load contacts.",
+          contacts: [] as CrmContactDirectoryEntry[],
+        })),
+    ]);
 
     const clientsTableMissing = clientsError?.code === "42P01";
     if (clientsError && !clientsTableMissing) {
@@ -419,6 +502,11 @@ function HomeContent() {
     }
     if (taskClientError) {
       setFormError(`Failed to load client suggestions: ${taskClientError.message}`);
+    }
+    if (contactsLoad.error) {
+      console.warn("[booking] contacts load:", contactsLoad.error);
+    } else {
+      setCrmContacts(contactsLoad.contacts);
     }
 
     const mergedClients = new Map<string, ClientDirectoryEntry>();
@@ -428,6 +516,11 @@ function HomeContent() {
       street?: string | null;
       zip_code?: string | null;
       city?: string | null;
+      country?: string | null;
+      billing_street?: string | null;
+      billing_city?: string | null;
+      billing_postal_code?: string | null;
+      billing_country?: string | null;
       email?: string | null;
       phone?: string | null;
       lexoffice_contact_id?: string | null;
@@ -442,9 +535,10 @@ function HomeContent() {
       const nextEntry: ClientDirectoryEntry = {
         id: existing?.id ?? record.id ?? null,
         company_name: existing?.company_name ?? companyNameValue,
-        street: existing?.street || record.street || "",
-        zip_code: existing?.zip_code || record.zip_code || "",
-        city: existing?.city || record.city || "",
+        street: existing?.street || record.billing_street || record.street || "",
+        zip_code: existing?.zip_code || record.billing_postal_code || record.zip_code || "",
+        city: existing?.city || record.billing_city || record.city || "",
+        country: existing?.country || record.billing_country || record.country || "",
         email: existing?.email || record.email || "",
         phone: existing?.phone || record.phone || "",
         lexoffice_contact_id: existing?.lexoffice_contact_id || record.lexoffice_contact_id || "",
@@ -538,6 +632,7 @@ function HomeContent() {
     setSaveToClientAddressBook(false);
     setCompanyName("");
     setContactPerson("");
+    setSelectedContactId(null);
     setStreet("");
     setZipCode("");
     setCity("");
@@ -545,6 +640,8 @@ function HomeContent() {
     setLexofficeContactId("");
     setCountry("");
     setEmail("");
+    setEmailCc("");
+    setGalleryLink("");
     setPhone("");
     setServices([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
     setProducts([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
@@ -608,6 +705,7 @@ function HomeContent() {
     setContactPerson(
       [task.contactFirstName, task.contactLastName].filter(Boolean).join(" ").trim()
     );
+    setSelectedContactId(task.contactId ?? null);
     setStreet(task.street);
     setZipCode(task.zipCode);
     setCity(task.city);
@@ -615,6 +713,8 @@ function HomeContent() {
     setLexofficeContactId(task.lexofficeContactId ?? "");
     setCountry(task.country);
     setEmail(task.email);
+    setEmailCc(task.emailCc ?? "");
+    setGalleryLink(task.galleryLink ?? "");
     setPhone(task.phone);
     setServices(
       task.services.length > 0
@@ -698,6 +798,7 @@ function HomeContent() {
       setStreet(option.client.street);
       setZipCode(option.client.zip_code);
       setCity(option.client.city);
+      setCountry(option.client.country);
       setLexofficeContactId(option.client.lexoffice_contact_id);
       return;
     }
@@ -708,8 +809,37 @@ function HomeContent() {
       setStreet("");
       setZipCode("");
       setCity("");
+      setCountry("");
       setLexofficeContactId("");
     }
+  };
+
+  const handleContactPersonChange = (option: SingleValue<ContactPersonOption>) => {
+    if (!option) {
+      setSelectedContactId(null);
+      setContactPerson("");
+      return;
+    }
+
+    if (!option.contact) {
+      // Free-text / create path — keep typed name only.
+      setSelectedContactId(null);
+      setContactPerson(option.label);
+      return;
+    }
+
+    const contact = option.contact;
+    setSelectedContactId(contact.id);
+    setContactPerson(contact.fullName);
+    setCompanyName(contact.companyName);
+    setEmail(contact.primaryEmail);
+    setEmailCc(contact.ccEmails.join(", "));
+    setPhone(contact.phone);
+    setStreet(contact.billingStreet);
+    setZipCode(contact.billingPostalCode);
+    setCity(contact.billingCity);
+    setCountry(contact.billingCountry);
+    setLexofficeContactId(contact.lexofficeContactId);
   };
 
   const openCatalogModal = (type: ItemType) => {
@@ -911,6 +1041,7 @@ function HomeContent() {
       company_name: companyName.trim(),
       contact_first_name: contactFirstName.trim(),
       contact_last_name: contactLastName.trim(),
+      contact_id: selectedContactId,
       street,
       zip_code: zipCode,
       city,
@@ -918,6 +1049,8 @@ function HomeContent() {
       country,
       address_supplement: addressSupplement,
       email,
+      email_cc: emailCc.trim() || null,
+      gallery_link: galleryLink.trim() || null,
       phone,
       services: selectedServices,
       products: selectedProducts,
@@ -1224,12 +1357,34 @@ function HomeContent() {
                   <div className="space-y-4 bg-white px-4 py-4 dark:bg-zinc-900">
                     <div className="grid gap-4 sm:grid-cols-2">
                       <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Contact Person <span className="font-normal text-zinc-500">(optional)</span>
-                        <input
-                          value={contactPerson}
-                          onChange={(event) => setContactPerson(event.target.value)}
-                          placeholder="e.g. Alex Jordan"
-                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        Contact Person <span className="font-normal text-zinc-500">(searchable)</span>
+                        <CreatableSelect<ContactPersonOption, false>
+                          isClearable
+                          isSearchable
+                          options={contactPersonOptions}
+                          value={selectedContactOption}
+                          onChange={handleContactPersonChange}
+                          placeholder="Search contact name or company…"
+                          formatCreateLabel={(inputValue) => `Use "${inputValue}"`}
+                          classNames={
+                            clientNameSelectClassNames as unknown as ClassNamesConfig<ContactPersonOption, false>
+                          }
+                          filterOption={(option, rawInput) => {
+                            const q = rawInput.trim().toLowerCase();
+                            if (!q) return true;
+                            const contact = option.data.contact;
+                            const haystack = [
+                              option.label,
+                              contact?.fullName,
+                              contact?.companyName,
+                              contact?.primaryEmail,
+                              ...(contact?.ccEmails ?? []),
+                            ]
+                              .filter(Boolean)
+                              .join(" ")
+                              .toLowerCase();
+                            return haystack.includes(q);
+                          }}
                         />
                       </label>
                       <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
@@ -1246,6 +1401,16 @@ function HomeContent() {
                         <input
                           value={phone}
                           onChange={(event) => setPhone(event.target.value)}
+                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        />
+                      </label>
+                      <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        CC Emails <span className="font-normal text-zinc-500">(comma-separated)</span>
+                        <input
+                          type="text"
+                          value={emailCc}
+                          onChange={(event) => setEmailCc(event.target.value)}
+                          placeholder="cc1@example.com, cc2@example.com"
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
@@ -1317,10 +1482,11 @@ function HomeContent() {
                         />
                       </label>
                       <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Country
+                        Country <span className="font-normal text-zinc-500">(ISO e.g. DE, AT, CH)</span>
                         <input
                           value={country}
                           onChange={(event) => setCountry(event.target.value)}
+                          placeholder="DE"
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
@@ -1339,6 +1505,34 @@ function HomeContent() {
                           onChange={(event) => setCity(event.target.value)}
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
+                      </label>
+                      <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Gallery Link{" "}
+                        <span className="font-normal text-zinc-500">
+                          (auto-filled from Google Drive after final upload; shown on invoice)
+                        </span>
+                        <input
+                          type="url"
+                          value={galleryLink}
+                          onChange={(event) => setGalleryLink(event.target.value)}
+                          placeholder="Filled automatically when Drive folder is created…"
+                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        />
+                        {galleryLink.trim() ? (
+                          <a
+                            href={galleryLink.trim()}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-1 inline-block text-xs font-medium text-amber-700 underline underline-offset-2 hover:text-amber-600 dark:text-amber-300"
+                          >
+                            Open gallery
+                          </a>
+                        ) : (
+                          <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                            Set automatically when finished photos are uploaded from the Edited
+                            column (finalize-shoot creates the Drive folder).
+                          </p>
+                        )}
                       </label>
                       <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
                         Lexoffice Contact ID

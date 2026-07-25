@@ -53,10 +53,12 @@ type FinalizeShootBody = {
   invoiceName?: string;
   clientName?: string;
   clientEmail?: string;
+  clientEmailCc?: string;
   photoshootType?: string;
   shootLocation?: string;
   clientAddress?: ClientAddressInput;
   addressSupplement?: string;
+  galleryLink?: string;
   lineItems?: FinalizeShootLineItemInput[];
   taxRate?: number;
   lexofficeContactId?: string;
@@ -84,22 +86,25 @@ function sanitizeFileName(value: string): string {
 function parseClientAddress(clientAddress: ClientAddressInput | undefined) {
   if (typeof clientAddress === "string") {
     const trimmed = clientAddress.trim();
-    return trimmed ? { street: trimmed, countryCode: "DE" as const } : { countryCode: "DE" as const };
+    return trimmed ? { street: trimmed, countryCode: "" } : { countryCode: "" };
   }
 
   if (!clientAddress || typeof clientAddress !== "object") {
-    return { countryCode: "DE" as const };
+    return { countryCode: "" };
   }
 
   const countryCodeRaw =
     typeof clientAddress.countryCode === "string" ? clientAddress.countryCode.trim().toUpperCase() : "";
+  const country =
+    typeof clientAddress.country === "string" ? clientAddress.country.trim() : undefined;
 
   return {
     street: typeof clientAddress.street === "string" ? clientAddress.street.trim() : undefined,
     zip: typeof clientAddress.zip === "string" ? clientAddress.zip.trim() : undefined,
     city: typeof clientAddress.city === "string" ? clientAddress.city.trim() : undefined,
-    country: typeof clientAddress.country === "string" ? clientAddress.country.trim() : undefined,
-    countryCode: countryCodeRaw || "DE",
+    country,
+    // Prefer explicit countryCode; otherwise pass country through for Lexoffice resolution.
+    countryCode: countryCodeRaw || country || "",
   };
 }
 
@@ -155,10 +160,12 @@ function parseRequestBody(body: FinalizeShootBody) {
   const invoiceName = typeof body.invoiceName === "string" ? body.invoiceName.trim() : "";
   const clientName = typeof body.clientName === "string" ? body.clientName.trim() : "";
   const clientEmail = typeof body.clientEmail === "string" ? body.clientEmail.trim() : "";
+  const clientEmailCc = typeof body.clientEmailCc === "string" ? body.clientEmailCc.trim() : "";
   const photoshootType = typeof body.photoshootType === "string" ? body.photoshootType.trim() : "";
   const shootLocation = typeof body.shootLocation === "string" ? body.shootLocation.trim() : "";
   const addressSupplement =
     typeof body.addressSupplement === "string" ? body.addressSupplement.trim() : "";
+  const galleryLink = typeof body.galleryLink === "string" ? body.galleryLink.trim() : "";
   const taxRate = Number.isFinite(Number(body.taxRate)) ? Number(body.taxRate) : DEFAULT_TAX_RATE;
   const lexofficeContactId =
     typeof body.lexofficeContactId === "string" ? body.lexofficeContactId.trim() : "";
@@ -188,10 +195,12 @@ function parseRequestBody(body: FinalizeShootBody) {
     invoiceName,
     clientName,
     clientEmail,
+    clientEmailCc,
     photoshootType,
     shootLocation,
     clientAddress: parseClientAddress(body.clientAddress),
     addressSupplement,
+    galleryLink,
     lineItems: parseLineItems(body.lineItems, taxRate, shootName),
     taxRate,
     lexofficeContactId,
@@ -236,7 +245,33 @@ export async function POST(request: Request) {
     currentStep = "google-drive-create-folder";
     console.info(`[finalize-shoot] Step 1: Creating Drive folder for task ${input.taskId}`);
     const driveFolder = await createDriveFolder(input.shootName, parentFolderId);
-    const googleDriveLink = driveFolder.webViewLink ?? `https://drive.google.com/drive/folders/${driveFolder.id}`;
+    const googleDriveLink = driveFolder.webViewLink.trim();
+    // Prefer an explicit pre-set gallery URL; otherwise use the freshly created Drive folder.
+    const effectiveGalleryLink = input.galleryLink.trim() || googleDriveLink;
+
+    // Persist gallery/drive links immediately so the Kanban/edit UI can show them
+    // even if a later invoice/email step fails.
+    currentStep = "supabase-save-gallery-link";
+    {
+      const { error: galleryUpdateError } = await supabase
+        .from("tasks")
+        .update({
+          google_drive_link: googleDriveLink,
+          gallery_link: effectiveGalleryLink,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", input.taskId);
+      if (galleryUpdateError) {
+        console.warn(
+          `[finalize-shoot] Could not persist gallery_link for task ${input.taskId}:`,
+          galleryUpdateError.message
+        );
+      } else {
+        console.info(
+          `[finalize-shoot] Saved gallery_link for task ${input.taskId}: ${effectiveGalleryLink}`
+        );
+      }
+    }
 
     currentStep = "google-drive-upload-photos";
     console.info(
@@ -260,6 +295,8 @@ export async function POST(request: Request) {
     if (!input.skipInvoice) {
       currentStep = "lexoffice-create-invoice";
       console.info(`[finalize-shoot] Step 2: Creating Lexoffice invoice for task ${input.taskId}`);
+      const galleryRemark = `Foto-Galerie / Photo gallery:\n${effectiveGalleryLink}`;
+
       invoice = await createLexofficeInvoice({
         client: {
           invoiceName: input.invoiceName,
@@ -273,6 +310,7 @@ export async function POST(request: Request) {
         taxType: "net",
         finalize: true,
         introduction: `Rechnung für ${input.shootName}`,
+        remark: galleryRemark,
       });
 
       if (!invoice.documentFileId) {
@@ -308,7 +346,10 @@ export async function POST(request: Request) {
       htmlBody,
       pdfBuffer,
       pdfBuffer ? `Invoice-${sanitizeFileName(input.shootName)}.pdf` : undefined,
-      { plainTextFallback }
+      {
+        plainTextFallback,
+        ...(input.clientEmailCc ? { cc: input.clientEmailCc } : {}),
+      }
     );
 
     const nextStatus = input.skipInvoice ? SEND_EMAIL_STATUS : INVOICE_SENT_STATUS;
@@ -328,6 +369,7 @@ export async function POST(request: Request) {
             }
           : {}),
         google_drive_link: googleDriveLink,
+        gallery_link: effectiveGalleryLink,
         status: nextStatus,
         updated_at: new Date().toISOString(),
       })
@@ -344,6 +386,7 @@ export async function POST(request: Request) {
       skippedInvoice: input.skipInvoice,
       googleDriveFolderId: driveFolder.id,
       googleDriveLink,
+      galleryLink: effectiveGalleryLink,
       driveUploadedCount: driveUpload.uploadedCount,
       driveUploadedFiles: driveUpload.fileNames,
       lexofficeInvoiceId: invoice?.id ?? null,
