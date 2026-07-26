@@ -144,3 +144,67 @@ export function buildFinalizeShootEmailPlainText(input: {
 
   return lines.join("\n");
 }
+
+export function buildSeparateInvoiceEmailSubject(input: {
+  shootLocation?: string;
+  shootName?: string;
+}): string {
+  const place = input.shootLocation?.trim() || input.shootName?.trim() || "Photoshoot";
+  return `Invoice for Photoshoot - ${place}`;
+}
+
+export function buildSeparateInvoiceEmailHtml(input: {
+  shootLocation?: string;
+  shootName?: string;
+  invoiceViewUrl?: string | null;
+}): string {
+  const place = escapeHtml(
+    input.shootLocation?.trim() || input.shootName?.trim() || "your recent photoshoot"
+  );
+  const invoiceUrl =
+    typeof input.invoiceViewUrl === "string" && input.invoiceViewUrl.trim()
+      ? escapeHtml(input.invoiceViewUrl.trim())
+      : "";
+
+  const linkBlock = invoiceUrl
+    ? `<p style="margin:18px 0 0;"><a href="${invoiceUrl}" target="_blank" style="color:rgb(32,33,36);">Open invoice</a></p>`
+    : `<p style="margin:18px 0 0;">The invoice PDF is attached to this email.</p>`;
+
+  return `<html>
+<head></head>
+<body>
+  <div dir="ltr" style="font-family:arial,sans-serif;font-size:15px;line-height:1.5;color:rgb(32,33,36);">
+    <p>Hello,</p>
+    <p>Attached/linked is the invoice for the recent photoshoot at <strong>${place}</strong>. Let us know if you have any questions!</p>
+    ${linkBlock}
+    <br>
+    <div>
+      <b>Aaron Bowser</b><br>
+      Photographer<br>
+      <a href="http://aaronbowser-photography.com">aaronbowser-photography.com</a>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+export function buildSeparateInvoiceEmailPlainText(input: {
+  shootLocation?: string;
+  shootName?: string;
+  invoiceViewUrl?: string | null;
+}): string {
+  const place = input.shootLocation?.trim() || input.shootName?.trim() || "your recent photoshoot";
+  const lines = [
+    "Hello,",
+    "",
+    `Attached/linked is the invoice for the recent photoshoot at ${place}. Let us know if you have any questions!`,
+    "",
+  ];
+  if (input.invoiceViewUrl?.trim()) {
+    lines.push(`Open invoice: ${input.invoiceViewUrl.trim()}`, "");
+  } else {
+    lines.push("The invoice PDF is attached to this email.", "");
+  }
+  lines.push("--", "Aaron Bowser", "Photographer", "http://aaronbowser-photography.com");
+  return lines.join("\n");
+}

@@ -6,6 +6,9 @@ import {
   buildFinalizeShootEmailHtml,
   buildFinalizeShootEmailPlainText,
   buildFinalizeShootEmailSubject,
+  buildSeparateInvoiceEmailHtml,
+  buildSeparateInvoiceEmailPlainText,
+  buildSeparateInvoiceEmailSubject,
 } from "@/lib/finalizeShootEmail";
 import { createLexofficeInvoice, getLexofficePdfBuffer } from "@/lib/lexoffice";
 import type { LexofficeInvoiceLineItem } from "@/lib/lexoffice";
@@ -59,12 +62,23 @@ type FinalizeShootBody = {
   clientAddress?: ClientAddressInput;
   addressSupplement?: string;
   galleryLink?: string;
+  hasSeparateInvoiceEmail?: boolean | string | number | null;
+  invoiceEmailAddress?: string;
   lineItems?: FinalizeShootLineItemInput[];
   taxRate?: number;
   lexofficeContactId?: string;
   skipInvoice?: boolean | string | number | null;
   localFolderName?: string;
 };
+
+function parseTruthyFlag(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+  }
+  if (typeof value === "number") return value === 1;
+  return false;
+}
 
 function getSupabaseAdmin() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
@@ -166,6 +180,9 @@ function parseRequestBody(body: FinalizeShootBody) {
   const addressSupplement =
     typeof body.addressSupplement === "string" ? body.addressSupplement.trim() : "";
   const galleryLink = typeof body.galleryLink === "string" ? body.galleryLink.trim() : "";
+  const hasSeparateInvoiceEmail = parseTruthyFlag(body.hasSeparateInvoiceEmail);
+  const invoiceEmailAddress =
+    typeof body.invoiceEmailAddress === "string" ? body.invoiceEmailAddress.trim() : "";
   const taxRate = Number.isFinite(Number(body.taxRate)) ? Number(body.taxRate) : DEFAULT_TAX_RATE;
   const lexofficeContactId =
     typeof body.lexofficeContactId === "string" ? body.lexofficeContactId.trim() : "";
@@ -188,6 +205,9 @@ function parseRequestBody(body: FinalizeShootBody) {
   if (!clientEmail) {
     throw new Error("clientEmail is required.");
   }
+  if (hasSeparateInvoiceEmail && !skipInvoice && !invoiceEmailAddress) {
+    throw new Error("invoiceEmailAddress is required when hasSeparateInvoiceEmail is true.");
+  }
 
   return {
     taskId,
@@ -201,6 +221,8 @@ function parseRequestBody(body: FinalizeShootBody) {
     clientAddress: parseClientAddress(body.clientAddress),
     addressSupplement,
     galleryLink,
+    hasSeparateInvoiceEmail,
+    invoiceEmailAddress,
     lineItems: parseLineItems(body.lineItems, taxRate, shootName),
     taxRate,
     lexofficeContactId,
@@ -297,10 +319,15 @@ export async function POST(request: Request) {
       console.info(`[finalize-shoot] Step 2: Creating Lexoffice invoice for task ${input.taskId}`);
       const galleryRemark = `Foto-Galerie / Photo gallery:\n${effectiveGalleryLink}`;
 
+      const lexofficeEmail =
+        input.hasSeparateInvoiceEmail && input.invoiceEmailAddress
+          ? input.invoiceEmailAddress
+          : input.clientEmail;
+
       invoice = await createLexofficeInvoice({
         client: {
           invoiceName: input.invoiceName,
-          email: input.clientEmail,
+          email: lexofficeEmail,
           contactPersonName: input.clientName || undefined,
           addressSupplement: input.addressSupplement || undefined,
           ...input.clientAddress,
@@ -324,8 +351,18 @@ export async function POST(request: Request) {
       console.info(`[finalize-shoot] Skipping Lexoffice steps for task ${input.taskId} (skipInvoice=true)`);
     }
 
+    const splitInvoiceEmail =
+      !input.skipInvoice &&
+      input.hasSeparateInvoiceEmail &&
+      Boolean(input.invoiceEmailAddress) &&
+      Boolean(pdfBuffer);
+
     currentStep = "gmail-create-draft";
-    console.info(`[finalize-shoot] Creating Gmail draft for task ${input.taskId}`);
+    console.info(
+      `[finalize-shoot] Creating Gmail draft(s) for task ${input.taskId}${
+        splitInvoiceEmail ? " (gallery + separate invoice)" : ""
+      }`
+    );
     const subject = buildFinalizeShootEmailSubject({
       photoshootType: input.photoshootType,
       companyName: input.invoiceName,
@@ -334,23 +371,56 @@ export async function POST(request: Request) {
     });
     const htmlBody = buildFinalizeShootEmailHtml({
       googleDriveLink,
-      includeInvoiceNote: !input.skipInvoice,
+      // When invoice goes to a separate address, strip invoice wording/attachment from gallery mail.
+      includeInvoiceNote: !input.skipInvoice && !splitInvoiceEmail,
     });
     const plainTextFallback = buildFinalizeShootEmailPlainText({
       googleDriveLink,
-      includeInvoiceNote: !input.skipInvoice,
+      includeInvoiceNote: !input.skipInvoice && !splitInvoiceEmail,
     });
     const gmailDraft = await createGmailDraft(
       input.clientEmail,
       subject,
       htmlBody,
-      pdfBuffer,
-      pdfBuffer ? `Invoice-${sanitizeFileName(input.shootName)}.pdf` : undefined,
+      splitInvoiceEmail ? undefined : pdfBuffer,
+      splitInvoiceEmail
+        ? undefined
+        : pdfBuffer
+          ? `Invoice-${sanitizeFileName(input.shootName)}.pdf`
+          : undefined,
       {
         plainTextFallback,
         ...(input.clientEmailCc ? { cc: input.clientEmailCc } : {}),
       }
     );
+
+    let invoiceGmailDraftId: string | null = null;
+    if (splitInvoiceEmail && pdfBuffer) {
+      currentStep = "gmail-create-invoice-draft";
+      const invoiceSubject = buildSeparateInvoiceEmailSubject({
+        shootLocation: input.shootLocation,
+        shootName: input.shootName,
+      });
+      const invoiceHtml = buildSeparateInvoiceEmailHtml({
+        shootLocation: input.shootLocation,
+        shootName: input.shootName,
+        invoiceViewUrl: invoice?.invoiceViewUrl,
+      });
+      const invoicePlain = buildSeparateInvoiceEmailPlainText({
+        shootLocation: input.shootLocation,
+        shootName: input.shootName,
+        invoiceViewUrl: invoice?.invoiceViewUrl,
+      });
+      const invoiceDraft = await createGmailDraft(
+        input.invoiceEmailAddress,
+        invoiceSubject,
+        invoiceHtml,
+        pdfBuffer,
+        `Invoice-${sanitizeFileName(input.shootName)}.pdf`,
+        { plainTextFallback: invoicePlain }
+      );
+      invoiceGmailDraftId = invoiceDraft.id;
+    }
 
     const nextStatus = input.skipInvoice ? SEND_EMAIL_STATUS : INVOICE_SENT_STATUS;
 
@@ -394,6 +464,8 @@ export async function POST(request: Request) {
       lexofficeResourceUri: invoice?.resourceUri ?? null,
       lexofficeInvoiceViewUrl: invoice?.invoiceViewUrl ?? null,
       gmailDraftId: gmailDraft.id,
+      invoiceGmailDraftId,
+      separateInvoiceEmail: splitInvoiceEmail,
     });
   } catch (error) {
     const message = toErrorMessage(error);

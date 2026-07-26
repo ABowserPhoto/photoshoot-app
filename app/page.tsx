@@ -7,6 +7,7 @@ import Select, { type ActionMeta, type ClassNamesConfig, type SingleValue } from
 import CreatableSelect from "react-select/creatable";
 import KanbanBoard, { type BoardTask } from "./components/KanbanBoard";
 import StatsSidebar from "./components/StatsSidebar";
+import CreditNoteUploadModal from "@/app/components/CreditNoteUploadModal";
 import GlobalNavButtons from "@/app/components/GlobalNavButtons";
 import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
 import JibbleClockToggle from "@/app/components/JibbleClockToggle";
@@ -137,6 +138,8 @@ type TaskSupabasePayload = {
   email: string;
   email_cc: string | null;
   gallery_link: string | null;
+  has_separate_invoice_email: boolean;
+  invoice_email_address: string | null;
   phone: string;
   services: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
   products: Array<{ name: string; quantity: number; price: number; lexoffice_id: string | null }>;
@@ -157,6 +160,8 @@ type TaskSupabasePayload = {
   is_credit_note: boolean;
   expected_revenue: number;
   is_paid: boolean;
+  credit_note_paid: boolean;
+  credit_note_file_url: string | null;
   linked_item_id: string | null;
   local_open_path: string | null;
 };
@@ -310,6 +315,8 @@ function HomeContent() {
   const [email, setEmail] = useState("");
   const [emailCc, setEmailCc] = useState("");
   const [galleryLink, setGalleryLink] = useState("");
+  const [hasSeparateInvoiceEmail, setHasSeparateInvoiceEmail] = useState(false);
+  const [invoiceEmailAddress, setInvoiceEmailAddress] = useState("");
   const [phone, setPhone] = useState("");
   const [services, setServices] = useState<LineItem[]>([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
   const [products, setProducts] = useState<LineItem[]>([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
@@ -325,6 +332,10 @@ function HomeContent() {
   const [isCreditNote, setIsCreditNote] = useState(false);
   const [expectedRevenue, setExpectedRevenue] = useState(0);
   const [isPaid, setIsPaid] = useState(false);
+  const [creditNotePaid, setCreditNotePaid] = useState(false);
+  const [creditNoteFileUrl, setCreditNoteFileUrl] = useState("");
+  const [isCreditNoteUploadOpen, setIsCreditNoteUploadOpen] = useState(false);
+  const [creditNoteToast, setCreditNoteToast] = useState<string | null>(null);
   const [currentTaskStatus, setCurrentTaskStatus] = useState<BoardTask["status"]>("booking");
   const [localFolderNameDisplay, setLocalFolderNameDisplay] = useState("");
   const [openSections, setOpenSections] = useState({
@@ -642,6 +653,8 @@ function HomeContent() {
     setEmail("");
     setEmailCc("");
     setGalleryLink("");
+    setHasSeparateInvoiceEmail(false);
+    setInvoiceEmailAddress("");
     setPhone("");
     setServices([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
     setProducts([{ name: "", quantity: 1, price: 0, lexoffice_id: null }]);
@@ -715,6 +728,8 @@ function HomeContent() {
     setEmail(task.email);
     setEmailCc(task.emailCc ?? "");
     setGalleryLink(task.galleryLink ?? "");
+    setHasSeparateInvoiceEmail(task.hasSeparateInvoiceEmail ?? false);
+    setInvoiceEmailAddress(task.invoiceEmailAddress ?? "");
     setPhone(task.phone);
     setServices(
       task.services.length > 0
@@ -738,6 +753,9 @@ function HomeContent() {
     setIsCreditNote(task.isCreditNote ?? false);
     setExpectedRevenue(task.expectedRevenue ?? 0);
     setIsPaid(task.isPaid ?? false);
+    setCreditNotePaid(task.creditNotePaid ?? false);
+    setCreditNoteFileUrl(task.creditNoteFileUrl ?? "");
+    setIsCreditNoteUploadOpen(false);
     setCurrentTaskStatus(task.status);
     setLocalFolderNameDisplay(task.localFolderName ?? "");
     setPreservedTaskTitle(task.taskTitle?.trim() ?? "");
@@ -971,6 +989,11 @@ function HomeContent() {
       return;
     }
 
+    if (hasSeparateInvoiceEmail && !invoiceEmailAddress.trim()) {
+      setFormError("Invoice Email Address is required when Separate Invoice Email is checked.");
+      return;
+    }
+
     const { firstName: contactFirstName, lastName: contactLastName } = splitContactPerson(contactPerson);
 
     setIsSubmitting(true);
@@ -1051,6 +1074,11 @@ function HomeContent() {
       email,
       email_cc: emailCc.trim() || null,
       gallery_link: galleryLink.trim() || null,
+      has_separate_invoice_email: hasSeparateInvoiceEmail,
+      invoice_email_address:
+        hasSeparateInvoiceEmail && invoiceEmailAddress.trim()
+          ? invoiceEmailAddress.trim()
+          : null,
       phone,
       services: selectedServices,
       products: selectedProducts,
@@ -1082,7 +1110,10 @@ function HomeContent() {
       skip_invoice: skipInvoice,
       is_credit_note: isCreditNote,
       expected_revenue: isCreditNote ? Number(expectedRevenue) || 0 : 0,
-      is_paid: isPaid,
+      // Credit notes can only become paid via upload modal (sets credit_note_paid + is_paid).
+      is_paid: isCreditNote ? creditNotePaid : isPaid,
+      credit_note_paid: isCreditNote ? creditNotePaid : false,
+      credit_note_file_url: isCreditNote ? creditNoteFileUrl || null : null,
       linked_item_id: linkedItemId ?? null,
       local_open_path: localOpenPath.trim() || null,
     };
@@ -1414,6 +1445,36 @@ function HomeContent() {
                           className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                         />
                       </label>
+                      <label className="sm:col-span-2 inline-flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={hasSeparateInvoiceEmail}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            setHasSeparateInvoiceEmail(checked);
+                            if (!checked) {
+                              setInvoiceEmailAddress("");
+                            }
+                          }}
+                        />
+                        Separate Invoice Email
+                      </label>
+                      {hasSeparateInvoiceEmail ? (
+                        <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                          Invoice Email Address
+                          <input
+                            type="email"
+                            value={invoiceEmailAddress}
+                            onChange={(event) => setInvoiceEmailAddress(event.target.value)}
+                            placeholder="billing@company.com"
+                            required
+                            className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                          />
+                          <span className="mt-1 block text-[11px] font-normal text-zinc-500">
+                            Gallery delivery stays on the contact email; the invoice draft goes here.
+                          </span>
+                        </label>
+                      ) : null}
                     </div>
                     {!editingTaskId ? (
                       <label className="inline-flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
@@ -1559,6 +1620,8 @@ function HomeContent() {
                             setIsCreditNote(checked);
                             if (!checked) {
                               setExpectedRevenue(0);
+                              setCreditNotePaid(false);
+                              setCreditNoteFileUrl("");
                             }
                           }}
                         />
@@ -1577,14 +1640,52 @@ function HomeContent() {
                           />
                         </label>
                       ) : null}
-                      <label className={`inline-flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 ${isCreditNote ? "" : "sm:col-span-2"}`}>
-                        <input
-                          type="checkbox"
-                          checked={isPaid}
-                          onChange={(event) => setIsPaid(event.target.checked)}
-                        />
-                        Is Paid
-                      </label>
+                      {isCreditNote ? (
+                        <div className="sm:col-span-2 space-y-1">
+                          <label className="inline-flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                            <input
+                              type="checkbox"
+                              checked={creditNotePaid}
+                              onChange={(event) => {
+                                if (event.target.checked) {
+                                  // Intercept: require PDF upload before checking / saving paid.
+                                  if (!editingTaskId) {
+                                    setFormError(
+                                      "Save the booking first, then mark the credit note as paid."
+                                    );
+                                    return;
+                                  }
+                                  setIsCreditNoteUploadOpen(true);
+                                  return;
+                                }
+                                setCreditNotePaid(false);
+                                setIsPaid(false);
+                                setCreditNoteFileUrl("");
+                              }}
+                            />
+                            Credit Note Paid
+                          </label>
+                          {creditNoteFileUrl ? (
+                            <a
+                              href={creditNoteFileUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="block text-xs font-medium text-amber-700 underline underline-offset-2 hover:text-amber-600 dark:text-amber-300"
+                            >
+                              View uploaded credit note
+                            </a>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <label className="sm:col-span-2 inline-flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                          <input
+                            type="checkbox"
+                            checked={isPaid}
+                            onChange={(event) => setIsPaid(event.target.checked)}
+                          />
+                          Is Paid
+                        </label>
+                      )}
                     </div>
                     <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
@@ -2133,6 +2234,35 @@ function HomeContent() {
               </button>
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {editingTaskId ? (
+        <CreditNoteUploadModal
+          open={isCreditNoteUploadOpen}
+          taskId={editingTaskId}
+          taskLabel={preservedTaskTitle || undefined}
+          onClose={() => setIsCreditNoteUploadOpen(false)}
+          onSuccess={({ creditNoteFileUrl: url }) => {
+            setCreditNotePaid(true);
+            setIsPaid(true);
+            setCreditNoteFileUrl(url);
+            setIsCreditNoteUploadOpen(false);
+            setCreditNoteToast("Credit note uploaded to Lexoffice and marked as paid.");
+            window.setTimeout(() => setCreditNoteToast(null), 4000);
+          }}
+        />
+      ) : null}
+
+      {creditNoteToast ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed bottom-6 left-1/2 z-[200] w-full max-w-md -translate-x-1/2 px-4"
+        >
+          <p className="rounded-xl border border-emerald-500/40 bg-emerald-950/95 px-5 py-3 text-center text-sm font-semibold text-emerald-100 shadow-2xl">
+            {creditNoteToast}
+          </p>
         </div>
       ) : null}
     </div>

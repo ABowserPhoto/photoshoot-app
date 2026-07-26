@@ -58,24 +58,32 @@ export async function POST(request: Request) {
       updateRow.is_credit_note === true && Number.isFinite(parsedExpectedRevenue) ? parsedExpectedRevenue : 0;
   }
 
+  const toBool = (value: unknown, fallback = false) =>
+    typeof value === "boolean"
+      ? value
+      : typeof value === "string"
+        ? ["1", "true", "yes", "on"].includes(value.trim().toLowerCase())
+        : fallback;
+
   const isPaidRaw = updateRow.is_paid;
   if (isPaidRaw !== undefined) {
-    updateRow.is_paid =
-      typeof isPaidRaw === "boolean"
-        ? isPaidRaw
-        : typeof isPaidRaw === "string"
-          ? ["1", "true", "yes", "on"].includes(isPaidRaw.trim().toLowerCase())
-          : false;
+    updateRow.is_paid = toBool(isPaidRaw);
+  }
+
+  const creditNotePaidRaw = updateRow.credit_note_paid;
+  if (creditNotePaidRaw !== undefined) {
+    updateRow.credit_note_paid = toBool(creditNotePaidRaw);
+  }
+
+  if (updateRow.credit_note_file_url !== undefined) {
+    const rawUrl = updateRow.credit_note_file_url;
+    updateRow.credit_note_file_url =
+      typeof rawUrl === "string" && rawUrl.trim() ? rawUrl.trim() : null;
   }
 
   const skipInvoiceRaw = updateRow.skip_invoice;
   if (skipInvoiceRaw !== undefined) {
-    updateRow.skip_invoice =
-      typeof skipInvoiceRaw === "boolean"
-        ? skipInvoiceRaw
-        : typeof skipInvoiceRaw === "string"
-          ? ["1", "true", "yes", "on"].includes(skipInvoiceRaw.trim().toLowerCase())
-          : false;
+    updateRow.skip_invoice = toBool(skipInvoiceRaw);
   }
 
   updateRow.updated_at = new Date().toISOString();
@@ -97,6 +105,30 @@ export async function POST(request: Request) {
       },
     },
   });
+
+  // Credit notes may only be marked paid via processCreditNotePayment (PDF → Lexoffice).
+  const wantsCreditNotePaid =
+    updateRow.is_credit_note === true &&
+    (updateRow.credit_note_paid === true || updateRow.is_paid === true);
+  if (wantsCreditNotePaid) {
+    const { data: existing, error: existingError } = await supabase
+      .from("tasks")
+      .select("credit_note_paid, credit_note_file_url")
+      .eq("id", taskId)
+      .maybeSingle();
+    if (existingError) {
+      return NextResponse.json({ error: existingError.message }, { status: 400 });
+    }
+    if (!existing?.credit_note_paid || !existing?.credit_note_file_url) {
+      return NextResponse.json(
+        {
+          error:
+            "Upload the credit note PDF to mark this shoot as paid (Credit Note Paid checkbox).",
+        },
+        { status: 400 }
+      );
+    }
+  }
 
   let payloadWithClient: Record<string, unknown>;
   try {

@@ -1,7 +1,18 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { Circle, FileText, GripHorizontal, Square, Trash2, Triangle, User, X } from "lucide-react";
+import {
+  ArrowUpRight,
+  Circle,
+  FileText,
+  GripHorizontal,
+  Square,
+  Trash2,
+  Triangle,
+  User,
+  X,
+} from "lucide-react";
+import Link from "next/link";
 import type { ChangeEvent, CSSProperties, Dispatch, SetStateAction } from "react";
 import { Suspense, useCallback, useEffect, useRef, useState, startTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -1110,10 +1121,43 @@ function MoodboardPageContent() {
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiGeneratedUrl, setAiGeneratedUrl] = useState<string | null>(null);
   const [aiGenerating, setAiGenerating] = useState(false);
+  const [linkedNoteId, setLinkedNoteId] = useState<string | null>(null);
 
   useEffect(() => {
     elementsRef.current = elements;
   }, [elements]);
+
+  useEffect(() => {
+    const moodboardId = activeMoodboardId?.trim();
+    if (!moodboardId || !authenticated) {
+      setLinkedNoteId(null);
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/api/notes?moodboardId=${encodeURIComponent(moodboardId)}`
+        );
+        const payload = (await response.json().catch(() => null)) as
+          | { note?: { id?: string } | null }
+          | null;
+        if (cancelled) return;
+        const id =
+          response.ok && payload?.note && typeof payload.note.id === "string"
+            ? payload.note.id
+            : null;
+        setLinkedNoteId(id);
+      } catch {
+        if (!cancelled) setLinkedNoteId(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMoodboardId, authenticated]);
 
   const loadMoodboard = useCallback(async (preferredBoardId?: string | null) => {
     setLoading(true);
@@ -1492,6 +1536,16 @@ function MoodboardPageContent() {
     }
   }
 `}</style>
+      {linkedNoteId ? (
+        <Link
+          href={`/notes?noteId=${encodeURIComponent(linkedNoteId)}`}
+          aria-label="Open linked note"
+          title="Open linked note"
+          className="absolute right-3 top-3 z-50 rounded p-1.5 text-gray-400 opacity-60 transition-all hover:text-gray-900 hover:opacity-100 print:hidden"
+        >
+          <ArrowUpRight className="h-4 w-4" />
+        </Link>
+      ) : null}
       <div className="pointer-events-none absolute left-0 top-0 z-40 flex w-full items-center justify-between p-6 print:hidden">
         <div className="pointer-events-auto flex min-w-0 flex-1 items-center gap-2">
           <select

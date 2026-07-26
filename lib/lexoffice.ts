@@ -861,3 +861,72 @@ export async function getLexofficePdfBuffer(documentFileId: string): Promise<Buf
 
   return buffer;
 }
+
+export type UploadLexofficeVoucherFileResult = {
+  fileId: string | null;
+  voucherId: string | null;
+};
+
+/**
+ * Upload a bookkeeping document into the Lexoffice Inbox via POST /v1/files.
+ * Lexoffice expects multipart field `type=voucher` (not `purpose`).
+ */
+export async function uploadLexofficeVoucherFile(
+  file: Blob | Buffer | Uint8Array,
+  fileName: string
+): Promise<UploadLexofficeVoucherFileResult> {
+  const trimmedName = fileName.trim() || "credit-note.pdf";
+  const apiKey = getLexofficeApiKey();
+
+  const bytes =
+    file instanceof Buffer
+      ? file
+      : file instanceof Uint8Array
+        ? Buffer.from(file)
+        : Buffer.from(await file.arrayBuffer());
+
+  if (bytes.length === 0) {
+    throw new Error("Credit note file is empty.");
+  }
+  if (bytes.length > 5 * 1024 * 1024) {
+    throw new Error("Credit note file exceeds Lexoffice 5 MB limit.");
+  }
+
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([new Uint8Array(bytes)], { type: "application/pdf" }),
+    trimmedName.toLowerCase().endsWith(".pdf") ? trimmedName : `${trimmedName}.pdf`
+  );
+  // Official Lexoffice files endpoint field name is `type` with value `voucher`.
+  form.append("type", "voucher");
+
+  const response = await lexofficeFetch(`${LEXOFFICE_API_BASE_URL}/files`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+    },
+    body: form,
+  });
+
+  if (!response.ok) {
+    const detail = await readLexofficeError(response);
+    throw new Error(
+      `Lexoffice file upload failed (${response.status} ${response.statusText}): ${detail}`
+    );
+  }
+
+  const payload = (await response.json().catch(() => null)) as {
+    id?: unknown;
+    voucherId?: unknown;
+  } | null;
+
+  return {
+    fileId: typeof payload?.id === "string" && payload.id.trim() ? payload.id.trim() : null,
+    voucherId:
+      typeof payload?.voucherId === "string" && payload.voucherId.trim()
+        ? payload.voucherId.trim()
+        : null,
+  };
+}

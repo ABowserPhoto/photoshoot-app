@@ -87,6 +87,10 @@ export type BoardTask = {
   isCreditNote: boolean;
   expectedRevenue: number;
   isPaid: boolean;
+  creditNotePaid: boolean;
+  creditNoteFileUrl: string;
+  hasSeparateInvoiceEmail: boolean;
+  invoiceEmailAddress: string;
   /** UUID of a linked task/photoshoot booking (tasks.linked_item_id). */
   linkedItemId: string | null;
   /** Full local/network path for opening the shoot in external software (e.g. Z:\Shoots\Smith). */
@@ -161,6 +165,10 @@ const FALLBACK_TASKS: BoardTask[] = [
     isCreditNote: false,
     expectedRevenue: 0,
     isPaid: false,
+    creditNotePaid: false,
+    creditNoteFileUrl: "",
+    hasSeparateInvoiceEmail: false,
+    invoiceEmailAddress: "",
     linkedItemId: null,
     localOpenPath: "",
   },
@@ -206,6 +214,10 @@ const FALLBACK_TASKS: BoardTask[] = [
     isCreditNote: false,
     expectedRevenue: 0,
     isPaid: false,
+    creditNotePaid: false,
+    creditNoteFileUrl: "",
+    hasSeparateInvoiceEmail: false,
+    invoiceEmailAddress: "",
     linkedItemId: null,
     localOpenPath: "",
   },
@@ -251,6 +263,10 @@ type DbTask = {
   is_credit_note?: boolean | null;
   expected_revenue?: number | null;
   is_paid?: boolean | null;
+  credit_note_paid?: boolean | null;
+  credit_note_file_url?: string | null;
+  has_separate_invoice_email?: boolean | null;
+  invoice_email_address?: string | null;
   linked_item_id?: string | null;
   local_open_path?: string | null;
 };
@@ -647,6 +663,26 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
         : row.is_paid == null
           ? (existing?.isPaid ?? false)
           : Boolean(row.is_paid),
+    creditNotePaid:
+      typeof row.credit_note_paid === "boolean"
+        ? row.credit_note_paid
+        : row.credit_note_paid == null
+          ? (existing?.creditNotePaid ?? false)
+          : Boolean(row.credit_note_paid),
+    creditNoteFileUrl:
+      typeof row.credit_note_file_url === "string"
+        ? row.credit_note_file_url
+        : (existing?.creditNoteFileUrl ?? ""),
+    hasSeparateInvoiceEmail:
+      typeof row.has_separate_invoice_email === "boolean"
+        ? row.has_separate_invoice_email
+        : row.has_separate_invoice_email == null
+          ? (existing?.hasSeparateInvoiceEmail ?? false)
+          : Boolean(row.has_separate_invoice_email),
+    invoiceEmailAddress:
+      typeof row.invoice_email_address === "string"
+        ? row.invoice_email_address
+        : (existing?.invoiceEmailAddress ?? ""),
     linkedItemId:
       typeof row.linked_item_id === "string"
         ? row.linked_item_id
@@ -1302,6 +1338,8 @@ export default function KanbanBoard({
               status?: string;
               galleryLink?: string;
               googleDriveLink?: string;
+              separateInvoiceEmail?: boolean;
+              invoiceGmailDraftId?: string | null;
             }
           | null;
 
@@ -1345,7 +1383,9 @@ export default function KanbanBoard({
         setWorkflowToast({
           message: payload.skippedInvoice
             ? "Drive folder created & draft saved (no invoice)."
-            : "Invoice created & draft saved!",
+            : payload.separateInvoiceEmail
+              ? "Invoice created — 2 Gmail drafts ready (gallery + invoice)."
+              : "Invoice created & draft saved!",
           variant: "success",
         });
         setStatusMessage(null);

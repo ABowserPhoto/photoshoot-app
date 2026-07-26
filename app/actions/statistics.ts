@@ -759,7 +759,7 @@ export async function getCreditNoteBillingSummary(
   const { data, error } = await sb
     .from("tasks")
     .select(
-      "id, title, company_name, client, contact_first_name, contact_last_name, photoshoot_type, photoshoot_date, expected_revenue, is_credit_note"
+      "id, title, company_name, client, contact_first_name, contact_last_name, photoshoot_type, photoshoot_date, expected_revenue, is_credit_note, credit_note_paid, is_paid"
     )
     .eq("is_credit_note", true);
 
@@ -771,6 +771,10 @@ export async function getCreditNoteBillingSummary(
   for (const row of data ?? []) {
     const record = row as Record<string, unknown>;
     if (isTestTaskRow(record)) {
+      continue;
+    }
+    // Expected-fee dashboard only lists open credit notes (exclude paid).
+    if (record.credit_note_paid === true || record.is_paid === true) {
       continue;
     }
 

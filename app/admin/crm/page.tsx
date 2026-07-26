@@ -7,6 +7,7 @@ import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { formatEuro } from "@/lib/adminStatsFormat";
 import ClientManagerSection from "@/app/admin/crm/ClientManagerSection";
 import UserManagementSection from "@/app/admin/crm/UserManagementSection";
+import CreditNoteUploadModal from "@/app/components/CreditNoteUploadModal";
 
 type CrmTab = "billing" | "clients" | "users";
 
@@ -41,6 +42,10 @@ export default function AdminCrmPage() {
   const [error, setError] = useState<string | null>(null);
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [creditNoteUpload, setCreditNoteUpload] = useState<{
+    taskId: string;
+    label: string;
+  } | null>(null);
 
   const loadUnpaid = useCallback(async () => {
     setLoading(true);
@@ -216,6 +221,9 @@ export default function AdminCrmPage() {
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
                       Open amount
                     </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                      Paid
+                    </th>
                     <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-zinc-500">
                       Actions
                     </th>
@@ -224,13 +232,13 @@ export default function AdminCrmPage() {
                 <tbody className="divide-y divide-zinc-800">
                   {loading ? (
                     <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-zinc-400">
+                      <td colSpan={6} className="px-4 py-8 text-center text-zinc-400">
                         Loading unpaid billing…
                       </td>
                     </tr>
                   ) : items.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-zinc-500">
+                      <td colSpan={6} className="px-4 py-8 text-center text-zinc-500">
                         No unpaid billing items found.
                       </td>
                     </tr>
@@ -250,6 +258,26 @@ export default function AdminCrmPage() {
                         <td className="px-4 py-3 text-zinc-300">{item.dateLabel}</td>
                         <td className="px-4 py-3 text-zinc-100">
                           {item.amount > 0 ? formatEuro(item.amount) : "—"}
+                        </td>
+                        <td className="px-4 py-3">
+                          {item.type === "credit_note" && item.taskId ? (
+                            <label className="inline-flex items-center gap-2 text-xs font-medium text-zinc-300">
+                              <input
+                                type="checkbox"
+                                checked={false}
+                                onChange={(event) => {
+                                  if (!event.target.checked || !item.taskId) return;
+                                  setCreditNoteUpload({
+                                    taskId: item.taskId,
+                                    label: `${item.clientName} · ${item.documentName}`,
+                                  });
+                                }}
+                              />
+                              Credit Note Paid
+                            </label>
+                          ) : (
+                            <span className="text-xs text-zinc-600">—</span>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-right">
                           <button
@@ -293,6 +321,25 @@ export default function AdminCrmPage() {
           />
         ) : null}
       </div>
+
+      {creditNoteUpload ? (
+        <CreditNoteUploadModal
+          open
+          taskId={creditNoteUpload.taskId}
+          taskLabel={creditNoteUpload.label}
+          onClose={() => setCreditNoteUpload(null)}
+          onSuccess={() => {
+            const paidTaskId = creditNoteUpload.taskId;
+            setCreditNoteUpload(null);
+            setItems((prev) =>
+              prev.filter(
+                (row) => !(row.type === "credit_note" && row.taskId === paidTaskId)
+              )
+            );
+            setToast("Credit note uploaded to Lexoffice and marked as paid.");
+          }}
+        />
+      ) : null}
 
       {toast ? (
         <div

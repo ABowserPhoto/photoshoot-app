@@ -24,7 +24,14 @@ function toNumber(value: unknown): number {
 
 /** Tasks eligible for the CRM credit-note unpaid billing list. */
 export function isCrmEligibleCreditNoteBillingTask(row: Record<string, unknown>): boolean {
-  return toNumber(row.expected_revenue) > 0;
+  if (toNumber(row.expected_revenue) <= 0) {
+    return false;
+  }
+  // Paid credit notes (legacy is_paid or new credit_note_paid) leave the unpaid list.
+  if (row.credit_note_paid === true || row.is_paid === true) {
+    return false;
+  }
+  return true;
 }
 
 /** Exclude CRM billing rows whose title, client label, or company name looks like test data. */

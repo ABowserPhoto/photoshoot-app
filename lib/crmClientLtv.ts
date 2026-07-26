@@ -39,7 +39,7 @@ export function normalizeCompanyKey(value: string | null | undefined): string {
 }
 
 export function isTaskEligibleForLtv(row: Record<string, unknown>): boolean {
-  if (row.is_paid === true) {
+  if (row.is_paid === true || row.credit_note_paid === true) {
     return true;
   }
   const status = String(row.status ?? "")

@@ -25,6 +25,10 @@ export type FinalizeShootTask = {
   addressSupplement: string;
   /** Client-facing gallery URL shown on the Lexoffice invoice. */
   galleryLink?: string;
+  /** When true, gallery and invoice emails are drafted to different recipients. */
+  hasSeparateInvoiceEmail?: boolean;
+  /** Invoice-only recipient when hasSeparateInvoiceEmail is true. */
+  invoiceEmailAddress?: string;
   services: Array<{ name: string; quantity: number; price: number }>;
   products: Array<{ name: string; quantity: number; price: number }>;
   taxPercentage: number;
@@ -52,6 +56,8 @@ export type FinalizeShootPayload = {
   shootLocation: string;
   addressSupplement?: string;
   galleryLink?: string;
+  hasSeparateInvoiceEmail?: boolean;
+  invoiceEmailAddress?: string;
   clientAddress: {
     street?: string;
     zip?: string;
@@ -165,6 +171,8 @@ export function buildFinalizeShootPayload(task: FinalizeShootTask): FinalizeShoo
   const galleryLink = (task.galleryLink ?? "").trim();
   const emailCc = (task.emailCc ?? "").trim();
   const countryCode = resolveCountryCode(task.country);
+  const hasSeparateInvoiceEmail = Boolean(task.hasSeparateInvoiceEmail);
+  const invoiceEmailAddress = (task.invoiceEmailAddress ?? "").trim();
 
   return {
     taskId: task.id,
@@ -177,6 +185,12 @@ export function buildFinalizeShootPayload(task: FinalizeShootTask): FinalizeShoo
     shootLocation: task.shootLocation.trim(),
     ...(task.addressSupplement.trim() ? { addressSupplement: task.addressSupplement.trim() } : {}),
     ...(galleryLink ? { galleryLink } : {}),
+    ...(hasSeparateInvoiceEmail
+      ? {
+          hasSeparateInvoiceEmail: true,
+          ...(invoiceEmailAddress ? { invoiceEmailAddress } : {}),
+        }
+      : {}),
     clientAddress: {
       street: task.street.trim() || undefined,
       zip: task.zipCode.trim() || undefined,

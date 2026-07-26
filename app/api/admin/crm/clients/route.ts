@@ -110,7 +110,7 @@ export async function GET() {
     supabase
       .from("tasks")
       .select(
-        "company_name, client, expected_revenue, is_paid, status, services, products, discount, tax_percentage, amount_type"
+        "company_name, client, expected_revenue, is_paid, credit_note_paid, is_credit_note, status, services, products, discount, tax_percentage, amount_type"
       ),
   ]);
 
@@ -221,7 +221,7 @@ export async function POST(request: Request) {
     const { data: tasks } = await supabase
       .from("tasks")
       .select(
-        "company_name, client, expected_revenue, is_paid, status, services, products, discount, tax_percentage, amount_type"
+        "company_name, client, expected_revenue, is_paid, credit_note_paid, is_credit_note, status, services, products, discount, tax_percentage, amount_type"
       );
     const ltvByCompany = buildCompanyLtvMap((tasks ?? []) as Record<string, unknown>[]);
     return NextResponse.json({ ok: true, client: mapClientRow(data as ClientRow, ltvByCompany) });
@@ -244,7 +244,7 @@ export async function POST(request: Request) {
   const { data: tasks } = await supabase
     .from("tasks")
     .select(
-      "company_name, client, expected_revenue, is_paid, status, services, products, discount, tax_percentage, amount_type"
+      "company_name, client, expected_revenue, is_paid, credit_note_paid, is_credit_note, status, services, products, discount, tax_percentage, amount_type"
     );
   const ltvByCompany = buildCompanyLtvMap((tasks ?? []) as Record<string, unknown>[]);
   return NextResponse.json({ ok: true, client: mapClientRow(data as ClientRow, ltvByCompany) }, { status: 201 });
