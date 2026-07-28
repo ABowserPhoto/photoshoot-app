@@ -35,6 +35,8 @@ export type FinalizeShootTask = {
   discount: number;
   photoshootType: string;
   shootLocation: string;
+  /** ISO date (YYYY-MM-DD) for the shoot — used in separate invoice email copy. */
+  photoshootDate?: string;
   skipInvoice: boolean;
 };
 
@@ -50,10 +52,12 @@ export type FinalizeShootPayload = {
   shootName: string;
   invoiceName: string;
   clientName: string;
+  contactFirstName?: string;
   clientEmail: string;
   clientEmailCc?: string;
   photoshootType: string;
   shootLocation: string;
+  photoshootDate?: string;
   addressSupplement?: string;
   galleryLink?: string;
   hasSeparateInvoiceEmail?: boolean;
@@ -179,10 +183,12 @@ export function buildFinalizeShootPayload(task: FinalizeShootTask): FinalizeShoo
     shootName: buildShootDisplayName(task),
     invoiceName,
     clientName: contactPerson || invoiceName || "Client",
+    ...(task.contactFirstName.trim() ? { contactFirstName: task.contactFirstName.trim() } : {}),
     clientEmail: task.email.trim(),
     ...(emailCc ? { clientEmailCc: emailCc } : {}),
     photoshootType: task.photoshootType,
     shootLocation: task.shootLocation.trim(),
+    ...(task.photoshootDate?.trim() ? { photoshootDate: task.photoshootDate.trim() } : {}),
     ...(task.addressSupplement.trim() ? { addressSupplement: task.addressSupplement.trim() } : {}),
     ...(galleryLink ? { galleryLink } : {}),
     ...(hasSeparateInvoiceEmail

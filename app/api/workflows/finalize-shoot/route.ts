@@ -55,10 +55,12 @@ type FinalizeShootBody = {
   shootName?: string;
   invoiceName?: string;
   clientName?: string;
+  contactFirstName?: string;
   clientEmail?: string;
   clientEmailCc?: string;
   photoshootType?: string;
   shootLocation?: string;
+  photoshootDate?: string;
   clientAddress?: ClientAddressInput;
   addressSupplement?: string;
   galleryLink?: string;
@@ -173,10 +175,13 @@ function parseRequestBody(body: FinalizeShootBody) {
   const shootName = typeof body.shootName === "string" ? body.shootName.trim() : "";
   const invoiceName = typeof body.invoiceName === "string" ? body.invoiceName.trim() : "";
   const clientName = typeof body.clientName === "string" ? body.clientName.trim() : "";
+  const contactFirstName =
+    typeof body.contactFirstName === "string" ? body.contactFirstName.trim() : "";
   const clientEmail = typeof body.clientEmail === "string" ? body.clientEmail.trim() : "";
   const clientEmailCc = typeof body.clientEmailCc === "string" ? body.clientEmailCc.trim() : "";
   const photoshootType = typeof body.photoshootType === "string" ? body.photoshootType.trim() : "";
   const shootLocation = typeof body.shootLocation === "string" ? body.shootLocation.trim() : "";
+  const photoshootDate = typeof body.photoshootDate === "string" ? body.photoshootDate.trim() : "";
   const addressSupplement =
     typeof body.addressSupplement === "string" ? body.addressSupplement.trim() : "";
   const galleryLink = typeof body.galleryLink === "string" ? body.galleryLink.trim() : "";
@@ -214,10 +219,12 @@ function parseRequestBody(body: FinalizeShootBody) {
     shootName,
     invoiceName,
     clientName,
+    contactFirstName,
     clientEmail,
     clientEmailCc,
     photoshootType,
     shootLocation,
+    photoshootDate,
     clientAddress: parseClientAddress(body.clientAddress),
     addressSupplement,
     galleryLink,
@@ -398,16 +405,24 @@ export async function POST(request: Request) {
     if (splitInvoiceEmail && pdfBuffer) {
       currentStep = "gmail-create-invoice-draft";
       const invoiceSubject = buildSeparateInvoiceEmailSubject({
+        clientName: input.invoiceName || input.clientName,
         shootLocation: input.shootLocation,
+        photoshootDate: input.photoshootDate,
         shootName: input.shootName,
       });
       const invoiceHtml = buildSeparateInvoiceEmailHtml({
+        contactFirstName: input.contactFirstName || input.clientName.split(/\s+/).filter(Boolean)[0],
+        contactName: input.clientName,
         shootLocation: input.shootLocation,
+        photoshootDate: input.photoshootDate,
         shootName: input.shootName,
         invoiceViewUrl: invoice?.invoiceViewUrl,
       });
       const invoicePlain = buildSeparateInvoiceEmailPlainText({
+        contactFirstName: input.contactFirstName || input.clientName.split(/\s+/).filter(Boolean)[0],
+        contactName: input.clientName,
         shootLocation: input.shootLocation,
+        photoshootDate: input.photoshootDate,
         shootName: input.shootName,
         invoiceViewUrl: invoice?.invoiceViewUrl,
       });

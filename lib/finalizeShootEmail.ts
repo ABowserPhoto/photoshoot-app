@@ -146,65 +146,114 @@ export function buildFinalizeShootEmailPlainText(input: {
 }
 
 export function buildSeparateInvoiceEmailSubject(input: {
+  clientName?: string;
   shootLocation?: string;
+  photoshootDate?: string;
   shootName?: string;
 }): string {
-  const place = input.shootLocation?.trim() || input.shootName?.trim() || "Photoshoot";
-  return `Invoice for Photoshoot - ${place}`;
+  const client = input.clientName?.trim() || "Client";
+  const location = input.shootLocation?.trim() || input.shootName?.trim() || "Photoshoot";
+  const date = formatGermanShootDate(input.photoshootDate) || "—";
+  return `Invoice | ${client} - ${location} - ${date}`;
+}
+
+function formatGermanShootDate(value?: string): string {
+  const raw = value?.trim() ?? "";
+  if (!raw) return "";
+  // Prefer YYYY-MM-DD without timezone shift.
+  const isoDay = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoDay) {
+    return `${isoDay[3]}.${isoDay[2]}.${isoDay[1]}`;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return raw;
+  }
+  return new Intl.DateTimeFormat("de-DE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(parsed);
+}
+
+function resolveInvoiceContactSalutationName(input: {
+  contactFirstName?: string;
+  contactName?: string;
+}): string {
+  const first = input.contactFirstName?.trim();
+  if (first) return first;
+  const full = input.contactName?.trim();
+  if (!full) return "Kunde";
+  return full.split(/\s+/).filter(Boolean)[0] || full;
 }
 
 export function buildSeparateInvoiceEmailHtml(input: {
+  contactFirstName?: string;
+  contactName?: string;
   shootLocation?: string;
+  photoshootDate?: string;
   shootName?: string;
   invoiceViewUrl?: string | null;
 }): string {
-  const place = escapeHtml(
-    input.shootLocation?.trim() || input.shootName?.trim() || "your recent photoshoot"
+  const contactName = escapeHtml(resolveInvoiceContactSalutationName(input));
+  const location = escapeHtml(
+    input.shootLocation?.trim() || input.shootName?.trim() || "Ihrem Standort"
   );
+  const date = escapeHtml(formatGermanShootDate(input.photoshootDate) || "dem Shooting-Termin");
   const invoiceUrl =
     typeof input.invoiceViewUrl === "string" && input.invoiceViewUrl.trim()
       ? escapeHtml(input.invoiceViewUrl.trim())
       : "";
 
   const linkBlock = invoiceUrl
-    ? `<p style="margin:18px 0 0;"><a href="${invoiceUrl}" target="_blank" style="color:rgb(32,33,36);">Open invoice</a></p>`
-    : `<p style="margin:18px 0 0;">The invoice PDF is attached to this email.</p>`;
+    ? `<p style="margin:18px 0 0;"><a href="${invoiceUrl}" target="_blank" style="color:rgb(32,33,36);">Rechnung online öffnen</a></p>`
+    : "";
 
   return `<html>
 <head></head>
 <body>
   <div dir="ltr" style="font-family:arial,sans-serif;font-size:15px;line-height:1.5;color:rgb(32,33,36);">
-    <p>Hello,</p>
-    <p>Attached/linked is the invoice for the recent photoshoot at <strong>${place}</strong>. Let us know if you have any questions!</p>
+    <p>Hallo ${contactName},</p>
+    <p>anbei erhalten Sie die Rechnung für unser Fotoshooting in ${location} vom ${date}.</p>
+    <p>Bitte entnehmen Sie alle weiteren Details sowie die Zahlungsfrist dem angehängten PDF.</p>
     ${linkBlock}
-    <br>
-    <div>
-      <b>Aaron Bowser</b><br>
-      Photographer<br>
-      <a href="http://aaronbowser-photography.com">aaronbowser-photography.com</a>
-    </div>
+    <p>Vielen Dank für die gute Zusammenarbeit!</p>
+    <p>Viele Grüße,<br>
+    Aaron Bowser<br>
+    Aaron Bowser Photography</p>
   </div>
 </body>
 </html>`;
 }
 
 export function buildSeparateInvoiceEmailPlainText(input: {
+  contactFirstName?: string;
+  contactName?: string;
   shootLocation?: string;
+  photoshootDate?: string;
   shootName?: string;
   invoiceViewUrl?: string | null;
 }): string {
-  const place = input.shootLocation?.trim() || input.shootName?.trim() || "your recent photoshoot";
+  const contactName = resolveInvoiceContactSalutationName(input);
+  const location = input.shootLocation?.trim() || input.shootName?.trim() || "Ihrem Standort";
+  const date = formatGermanShootDate(input.photoshootDate) || "dem Shooting-Termin";
   const lines = [
-    "Hello,",
+    `Hallo ${contactName},`,
     "",
-    `Attached/linked is the invoice for the recent photoshoot at ${place}. Let us know if you have any questions!`,
+    `anbei erhalten Sie die Rechnung für unser Fotoshooting in ${location} vom ${date}.`,
+    "",
+    "Bitte entnehmen Sie alle weiteren Details sowie die Zahlungsfrist dem angehängten PDF.",
     "",
   ];
   if (input.invoiceViewUrl?.trim()) {
-    lines.push(`Open invoice: ${input.invoiceViewUrl.trim()}`, "");
-  } else {
-    lines.push("The invoice PDF is attached to this email.", "");
+    lines.push(`Rechnung online öffnen: ${input.invoiceViewUrl.trim()}`, "");
   }
-  lines.push("--", "Aaron Bowser", "Photographer", "http://aaronbowser-photography.com");
+  lines.push(
+    "Vielen Dank für die gute Zusammenarbeit!",
+    "",
+    "Viele Grüße,",
+    "Aaron Bowser",
+    "Aaron Bowser Photography"
+  );
   return lines.join("\n");
 }

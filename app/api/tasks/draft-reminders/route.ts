@@ -66,7 +66,7 @@ export async function POST() {
   const { data, error } = await supabase
     .from("tasks")
     .select(
-      "id, title, company_name, contact_first_name, contact_last_name, email, photoshoot_type, shoot_location, lexoffice_invoice_id, lexoffice_document_file_id, invoice_date, is_paid, skip_invoice, expected_revenue, is_credit_note"
+      "id, title, company_name, contact_first_name, contact_last_name, email, photoshoot_type, shoot_location, photoshoot_date, lexoffice_invoice_id, lexoffice_document_file_id, invoice_date, is_paid, skip_invoice, expected_revenue, is_credit_note"
     )
     .not("lexoffice_invoice_id", "is", null)
     .or("is_paid.is.null,is_paid.eq.false")

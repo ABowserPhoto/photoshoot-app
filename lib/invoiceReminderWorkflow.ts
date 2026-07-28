@@ -19,6 +19,7 @@ export type ReminderTaskRow = {
   email: string | null;
   photoshoot_type: string | null;
   shoot_location: string | null;
+  photoshoot_date: string | null;
   lexoffice_invoice_id: string | null;
   lexoffice_document_file_id: string | null;
   invoice_date: string | null;
@@ -41,14 +42,6 @@ function parseDate(value: string | null | undefined): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-function daysSince(invoiceDate: Date, now = new Date()): number {
-  const start = new Date(invoiceDate);
-  start.setHours(0, 0, 0, 0);
-  const today = new Date(now);
-  today.setHours(0, 0, 0, 0);
-  return Math.max(0, Math.floor((today.getTime() - start.getTime()) / (24 * 60 * 60 * 1000)));
-}
-
 export function resolveReminderClientName(row: ReminderTaskRow): string {
   const company = row.company_name?.trim();
   if (company) {
@@ -59,6 +52,18 @@ export function resolveReminderClientName(row: ReminderTaskRow): string {
     .filter(Boolean)
     .join(" ");
   return contact || "Kunde";
+}
+
+/** Greeting name: contact person if present, otherwise business/company name. */
+export function resolveReminderGreetingName(row: ReminderTaskRow): string {
+  const contact = [row.contact_first_name, row.contact_last_name]
+    .map((part) => part?.trim() ?? "")
+    .filter(Boolean)
+    .join(" ");
+  if (contact) {
+    return contact;
+  }
+  return row.company_name?.trim() || "Kunde";
 }
 
 export function resolveReminderShootName(row: ReminderTaskRow): string {
@@ -106,7 +111,6 @@ export async function createInvoiceReminderDraftForTask(
   let invoiceNumber = invoiceId || "Rechnung";
   let documentFileId = task.lexoffice_document_file_id?.trim() || "";
   let invoiceDate = parseDate(task.invoice_date);
-  let daysOverdue = 7;
 
   if (invoiceId) {
     const invoice = await getLexofficeInvoice(invoiceId);
@@ -137,23 +141,20 @@ export async function createInvoiceReminderDraftForTask(
     invoiceNumber = invoice.voucherNumber ?? invoiceId;
     documentFileId = documentFileId || invoice.documentFileId?.trim() || "";
     invoiceDate = parseDate(invoice.voucherDate) ?? invoiceDate;
-    if (invoiceDate) {
-      daysOverdue = Math.max(1, daysSince(invoiceDate));
-    }
   } else if (Number(task.expected_revenue ?? 0) > 0 || task.is_credit_note) {
     invoiceNumber = "Credit Note";
     invoiceDate = invoiceDate ?? new Date();
-    daysOverdue = 7;
   } else {
     return { ok: false, error: "No Lexoffice invoice or credit-note amount on this task.", code: "missing_invoice" };
   }
 
-  const reminder = await generateInvoiceReminderEmail({
+  const location = task.shoot_location?.trim() || resolveReminderShootName(task);
+  const reminder = generateInvoiceReminderEmail({
     invoiceNumber,
-    shootName: resolveReminderShootName(task),
     clientName: resolveReminderClientName(task),
-    companyName: task.company_name?.trim() ?? "",
-    daysOverdue,
+    contactNameOrBusinessName: resolveReminderGreetingName(task),
+    location,
+    photoshootDate: task.photoshoot_date?.trim() || task.invoice_date?.trim() || undefined,
   });
 
   let pdfBuffer: Buffer | undefined;
@@ -238,16 +239,14 @@ export async function createInvoiceReminderDraftForLexofficeInvoice(
   }
 
   const invoiceNumber = invoice.voucherNumber ?? trimmedInvoiceId;
-  const invoiceDate = parseDate(invoice.voucherDate);
-  const daysOverdue = invoiceDate ? Math.max(1, daysSince(invoiceDate)) : 7;
   const clientName = invoice.contactName?.trim() || "Kunde";
 
-  const reminder = await generateInvoiceReminderEmail({
+  const reminder = generateInvoiceReminderEmail({
     invoiceNumber,
-    shootName: invoiceNumber,
     clientName,
-    companyName: clientName,
-    daysOverdue,
+    contactNameOrBusinessName: clientName,
+    location: "Ihrem Standort",
+    photoshootDate: invoice.voucherDate?.trim() || undefined,
   });
 
   let pdfBuffer: Buffer | undefined;
