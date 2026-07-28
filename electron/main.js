@@ -44,6 +44,12 @@ const DEFAULT_PORT = Number(process.env.PORT) || 3000;
 const DEFAULT_COMFYUI_PATH = "C:/ComfyUI_windows_portable/ComfyUI";
 const BRAND_ICON_RELATIVE_PATH = path.join("build", "icon.ico");
 
+// Windows taskbar / Start Menu / desktop shortcuts group under this id and
+// pick up the branded exe icon instead of a generic Electron entry.
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.studiosuite.workflow");
+}
+
 let mainWindow = null;
 let widgetWindow = null;
 let tray = null;
