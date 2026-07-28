@@ -1,6 +1,6 @@
 {
   "name": "photoshoot-app",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "main": "main.js",
   "scripts": {
@@ -152,17 +152,17 @@
           "previewMagick.mjs"
         ]
       },
-  {
-    "from": "electron/photoshoot-worker.package.json",
-    "to": "photoshoot-worker/package.json"
-  },
-  {
-    "from": "electron/runtime",
-    "to": "photoshoot-worker",
-    "filter": [
-      ".env.production"
-    ]
-  }
+      {
+        "from": "electron/photoshoot-worker.package.json",
+        "to": "photoshoot-worker/package.json"
+      },
+      {
+        "from": "electron/runtime",
+        "to": "photoshoot-worker",
+        "filter": [
+          ".env.production"
+        ]
+      }
     ],
     "win": {
       "target": "nsis",
