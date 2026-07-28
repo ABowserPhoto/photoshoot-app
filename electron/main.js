@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell, dialog } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -87,6 +87,10 @@ function loadBundledProductionEnv() {
     path.join(app.getAppPath(), "electron", "runtime", ".env.production"),
     path.join(process.resourcesPath, "app.asar", "electron", "runtime", ".env.production"),
     path.join(process.resourcesPath, "electron", "runtime", ".env.production"),
+    // Allow a user-editable env next to the installed exe / resources.
+    path.join(process.resourcesPath, "photoshoot-worker", ".env.production"),
+    path.join(path.dirname(app.getPath("exe")), ".env.production"),
+    path.join(path.dirname(app.getPath("exe")), ".env.local"),
   ];
 
   for (const candidate of candidates) {
@@ -96,6 +100,7 @@ function loadBundledProductionEnv() {
 
     try {
       applyEnvFile(candidate);
+      process.env.PHOTOSHOOT_LOADED_ENV_FILE = candidate;
       console.info(`[env] Loaded bundled runtime env from: ${candidate}`);
       return;
     } catch (error) {
@@ -103,6 +108,10 @@ function loadBundledProductionEnv() {
       console.warn(`[env] Failed loading bundled runtime env (${candidate}): ${message}`);
     }
   }
+
+  console.warn(
+    "[env] No production env file found. Folder worker will rely on process defaults (D:\\Photos_2026) and any OS-level env vars."
+  );
 }
 
 const IPC_CHANNELS = {
@@ -432,9 +441,17 @@ function resolvePhotoWorkerLaunchSpec() {
   const appRoot = resolveAppRoot();
   const workerScript = resolvePhotoWorkerScript();
   const nodeModulesPath = resolveStandaloneNodeModulesPath();
+  const defaultShootRoot = "D:\\Photos_2026";
   const sharedEnv = {
     NODE_ENV: process.env.NODE_ENV || (isDev ? "development" : "production"),
     ...(nodeModulesPath ? { NODE_PATH: nodeModulesPath } : {}),
+    // Ensure packaged builds always have a concrete shoot-root even if env files are missing.
+    BASE_DIR: process.env.BASE_DIR?.trim() || defaultShootRoot,
+    PHOTOS_ROOT: process.env.PHOTOS_ROOT?.trim() || process.env.BASE_DIR?.trim() || defaultShootRoot,
+    PHOTOSHOOT_IS_PACKAGED: app.isPackaged ? "1" : "0",
+    ...(process.env.PHOTOSHOOT_LOADED_ENV_FILE
+      ? { PHOTOSHOOT_ENV_FILE: process.env.PHOTOSHOOT_LOADED_ENV_FILE }
+      : {}),
   };
 
   if (canUseNpmWorker(appRoot)) {
@@ -552,15 +569,43 @@ function resolveComfyUiLaunch() {
 }
 
 function pipeChildLogs(label, child) {
-  if (!child.stdout) {
+  if (!child.stdout && !child.stderr) {
     return;
   }
-  child.stdout.on("data", (chunk) => {
-    process.stdout.write(`[${label}] ${chunk}`);
-  });
-  child.stderr.on("data", (chunk) => {
-    process.stderr.write(`[${label}] ${chunk}`);
-  });
+
+  const handleChunk = (streamName, chunk) => {
+    const text = chunk.toString();
+    if (streamName === "stdout") {
+      process.stdout.write(`[${label}] ${text}`);
+    } else {
+      process.stderr.write(`[${label}] ${text}`);
+    }
+
+    if (label !== "photo-worker" || !app.isPackaged) {
+      return;
+    }
+
+    // Structured marker from processing-worker.mjs folder creation catch.
+    for (const line of text.split(/\r?\n/)) {
+      const marker = line.match(/FOLDER_CREATE_ERROR\|([^|]*)\|(.*)$/);
+      if (!marker) {
+        continue;
+      }
+      const taskId = marker[1]?.trim() || "unknown";
+      const detail = marker[2]?.trim() || "Unknown folder creation error.";
+      dialog.showErrorBox(
+        "Folder Creation Error",
+        `Failed to create local shoot folders for task ${taskId}.\n\n${detail}\n\nCheck that D:\\Photos_2026 exists and is writable.`
+      );
+    }
+  };
+
+  if (child.stdout) {
+    child.stdout.on("data", (chunk) => handleChunk("stdout", chunk));
+  }
+  if (child.stderr) {
+    child.stderr.on("data", (chunk) => handleChunk("stderr", chunk));
+  }
 }
 
 function spawnManagedProcess(spec) {
@@ -640,15 +685,28 @@ function startPhotoWorker() {
 
   const launchSpec = resolvePhotoWorkerLaunchSpec();
   if (!launchSpec) {
-    console.warn(
-      "[photo-worker] Could not resolve worker launch command. Set PHOTO_WORKER_SCRIPT or run from the project root with package.json scripts.worker."
-    );
+    const message =
+      "Could not resolve worker launch command. Set PHOTO_WORKER_SCRIPT or run from the project root with package.json scripts.worker.";
+    console.warn(`[photo-worker] ${message}`);
+    if (app.isPackaged) {
+      dialog.showErrorBox("Photo Worker Error", message);
+    }
     return null;
   }
 
-  photoWorkerProcess = spawnManagedProcess(launchSpec);
+  try {
+    photoWorkerProcess = spawnManagedProcess(launchSpec);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[photo-worker] Failed to start: ${message}`);
+    if (app.isPackaged) {
+      dialog.showErrorBox("Photo Worker Error", message);
+    }
+    return null;
+  }
+
   console.info(
-    `[photo-worker] Started (pid=${photoWorkerProcess.pid}) -> ${launchSpec.command} ${launchSpec.args.join(" ")} (cwd=${launchSpec.cwd})`
+    `[photo-worker] Started (pid=${photoWorkerProcess.pid}) -> ${launchSpec.command} ${launchSpec.args.join(" ")} (cwd=${launchSpec.cwd}) BASE_DIR=${launchSpec.env?.BASE_DIR ?? "(unset)"}`
   );
   return photoWorkerProcess;
 }

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import chokidar from "chokidar";
@@ -15,7 +16,40 @@ import { buildLocalFolderNameFromTask } from "./localFolderName.mjs";
 import { buildTimestampBracketsFromDir } from "../lib/bracketGrouping.mjs";
 import { sanitizeStoragePath } from "../lib/sanitizeStoragePath.mjs";
 
-dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function loadWorkerEnvFiles() {
+  const candidates = [
+    process.env.PHOTOSHOOT_ENV_FILE?.trim(),
+    path.resolve(process.cwd(), ".env.local"),
+    path.resolve(process.cwd(), ".env.production"),
+    path.resolve(__dirname, "..", ".env.local"),
+    path.resolve(__dirname, "..", ".env.production"),
+    path.resolve(__dirname, "..", "electron", "runtime", ".env.production"),
+  ].filter(Boolean);
+
+  const loaded = [];
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+    const result = dotenv.config({ path: candidate, override: false });
+    if (!result.error) {
+      loaded.push(candidate);
+    }
+  }
+
+  if (loaded.length > 0) {
+    console.info(`[worker] Loaded env file(s): ${loaded.join(" | ")}`);
+  } else {
+    console.warn(
+      `[worker] No .env file found (cwd=${process.cwd()}, scriptDir=${__dirname}). Using inherited process env + defaults.`
+    );
+  }
+}
+
+loadWorkerEnvFiles();
 const execFileAsync = promisify(execFile);
 
 const FOLDER_POLL_INTERVAL_MS = 15 * 1000;
@@ -61,7 +95,8 @@ const DEFAULT_PHOTOS_ROOT = "D:\\Photos_2026";
  */
 function getShootFoldersRoot() {
   const fromBaseDir = process.env.BASE_DIR?.trim();
-  const configuredRoot = fromBaseDir || DEFAULT_PHOTOS_ROOT;
+  const fromPhotosRoot = process.env.PHOTOS_ROOT?.trim();
+  const configuredRoot = fromBaseDir || fromPhotosRoot || DEFAULT_PHOTOS_ROOT;
 
   const defaultResolved = path.resolve(DEFAULT_PHOTOS_ROOT);
   const configuredResolved = path.resolve(configuredRoot);
@@ -70,7 +105,7 @@ function getShootFoldersRoot() {
 
   if (!isWithinDefaultRoot) {
     console.warn(
-      `[worker] Ignoring BASE_DIR="${configuredRoot}" because local task folders must stay under ${DEFAULT_PHOTOS_ROOT}.`
+      `[worker] Ignoring BASE_DIR/PHOTOS_ROOT="${configuredRoot}" because local task folders must stay under ${DEFAULT_PHOTOS_ROOT}.`
     );
     return DEFAULT_PHOTOS_ROOT;
   }
@@ -1562,6 +1597,14 @@ async function processAwaitingFolderCreation(supabase) {
   console.info(`[worker] Found ${queue.length} task(s) awaiting local folder creation.`);
   const root = getShootFoldersRoot();
 
+  try {
+    fs.mkdirSync(root, { recursive: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[worker] FOLDER_CREATE_ERROR|root|Cannot create/access shoot root "${root}": ${message}`);
+    throw new Error(`Cannot create/access shoot root "${root}": ${message}`);
+  }
+
   for (const row of queue) {
     const taskId = String(row.id);
     try {
@@ -1569,7 +1612,12 @@ async function processAwaitingFolderCreation(supabase) {
       const base = path.join(root, folderName);
 
       for (const sub of ["1_Raw", "2_Selects", "3_Merged", "4_Final"]) {
-        fs.mkdirSync(path.join(base, sub), { recursive: true });
+        try {
+          fs.mkdirSync(path.join(base, sub), { recursive: true });
+        } catch (mkdirErr) {
+          const message = mkdirErr instanceof Error ? mkdirErr.message : String(mkdirErr);
+          throw new Error(`mkdir failed for "${path.join(base, sub)}": ${message}`);
+        }
       }
 
       const { error: updateError } = await supabase
@@ -1585,7 +1633,10 @@ async function processAwaitingFolderCreation(supabase) {
 
       console.info(`[worker] Created shoot folders for task ${taskId} under ${base}`);
     } catch (err) {
-      console.error(`[worker] Folder creation failed for task ${taskId}:`, err instanceof Error ? err.message : err);
+      const message = err instanceof Error ? err.message : String(err);
+      // Marker consumed by electron/main.js (packaged builds show dialog.showErrorBox).
+      console.error(`[worker] FOLDER_CREATE_ERROR|${taskId}|${message}`);
+      console.error(`[worker] Folder creation failed for task ${taskId}:`, message);
     }
   }
 }
@@ -1922,6 +1973,10 @@ async function processSelectionAvailable(supabase) {
 
 async function main() {
   console.info("[worker] Starting processing worker...");
+  console.info(`[worker] cwd=${process.cwd()} scriptDir=${__dirname}`);
+  console.info(
+    `[worker] packaged=${process.env.PHOTOSHOOT_IS_PACKAGED === "1" ? "yes" : "no"} BASE_DIR=${process.env.BASE_DIR ?? "(unset)"} PHOTOS_ROOT=${process.env.PHOTOS_ROOT ?? "(unset)"}`
+  );
   console.info(`[worker] Shoot folders root: ${getShootFoldersRoot()}`);
   console.info(
     `[worker] Retry config: attempts=${RETRY_ATTEMPTS}, base_ms=${RETRY_BASE_MS}, processing_poll_ms=${PROCESSING_POLL_INTERVAL_MS}`

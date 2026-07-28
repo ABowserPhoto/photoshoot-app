@@ -152,10 +152,17 @@
           "previewMagick.mjs"
         ]
       },
-      {
-        "from": "electron/photoshoot-worker.package.json",
-        "to": "photoshoot-worker/package.json"
-      }
+  {
+    "from": "electron/photoshoot-worker.package.json",
+    "to": "photoshoot-worker/package.json"
+  },
+  {
+    "from": "electron/runtime",
+    "to": "photoshoot-worker",
+    "filter": [
+      ".env.production"
+    ]
+  }
     ],
     "win": {
       "target": "nsis",
