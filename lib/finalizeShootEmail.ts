@@ -147,14 +147,13 @@ export function buildFinalizeShootEmailPlainText(input: {
 
 export function buildSeparateInvoiceEmailSubject(input: {
   clientName?: string;
-  shootLocation?: string;
+  invoiceNumber?: string;
   photoshootDate?: string;
-  shootName?: string;
 }): string {
   const client = input.clientName?.trim() || "Client";
-  const location = input.shootLocation?.trim() || input.shootName?.trim() || "Photoshoot";
+  const invoiceNumber = input.invoiceNumber?.trim() || "Rechnung";
   const date = formatGermanShootDate(input.photoshootDate) || "—";
-  return `Invoice | ${client} - ${location} - ${date}`;
+  return `Invoice | ${client} - ${invoiceNumber} - ${date}`;
 }
 
 function formatGermanShootDate(value?: string): string {
@@ -190,15 +189,12 @@ function resolveInvoiceContactSalutationName(input: {
 export function buildSeparateInvoiceEmailHtml(input: {
   contactFirstName?: string;
   contactName?: string;
-  shootLocation?: string;
+  invoiceNumber?: string;
   photoshootDate?: string;
-  shootName?: string;
   invoiceViewUrl?: string | null;
 }): string {
   const contactName = escapeHtml(resolveInvoiceContactSalutationName(input));
-  const location = escapeHtml(
-    input.shootLocation?.trim() || input.shootName?.trim() || "Ihrem Standort"
-  );
+  const invoiceNumber = escapeHtml(input.invoiceNumber?.trim() || "Rechnung");
   const date = escapeHtml(formatGermanShootDate(input.photoshootDate) || "dem Shooting-Termin");
   const invoiceUrl =
     typeof input.invoiceViewUrl === "string" && input.invoiceViewUrl.trim()
@@ -214,7 +210,7 @@ export function buildSeparateInvoiceEmailHtml(input: {
 <body>
   <div dir="ltr" style="font-family:arial,sans-serif;font-size:15px;line-height:1.5;color:rgb(32,33,36);">
     <p>Hallo ${contactName},</p>
-    <p>anbei erhalten Sie die Rechnung für unser Fotoshooting in ${location} vom ${date}.</p>
+    <p>anbei erhalten Sie die Rechnung ${invoiceNumber} für unser Fotoshooting vom ${date}.</p>
     <p>Bitte entnehmen Sie alle weiteren Details sowie die Zahlungsfrist dem angehängten PDF.</p>
     ${linkBlock}
     <p>Vielen Dank für die gute Zusammenarbeit!</p>
@@ -229,18 +225,17 @@ export function buildSeparateInvoiceEmailHtml(input: {
 export function buildSeparateInvoiceEmailPlainText(input: {
   contactFirstName?: string;
   contactName?: string;
-  shootLocation?: string;
+  invoiceNumber?: string;
   photoshootDate?: string;
-  shootName?: string;
   invoiceViewUrl?: string | null;
 }): string {
   const contactName = resolveInvoiceContactSalutationName(input);
-  const location = input.shootLocation?.trim() || input.shootName?.trim() || "Ihrem Standort";
+  const invoiceNumber = input.invoiceNumber?.trim() || "Rechnung";
   const date = formatGermanShootDate(input.photoshootDate) || "dem Shooting-Termin";
   const lines = [
     `Hallo ${contactName},`,
     "",
-    `anbei erhalten Sie die Rechnung für unser Fotoshooting in ${location} vom ${date}.`,
+    `anbei erhalten Sie die Rechnung ${invoiceNumber} für unser Fotoshooting vom ${date}.`,
     "",
     "Bitte entnehmen Sie alle weiteren Details sowie die Zahlungsfrist dem angehängten PDF.",
     "",

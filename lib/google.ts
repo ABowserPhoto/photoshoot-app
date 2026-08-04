@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import fs from "node:fs";
 import path from "node:path";
+import { domainToASCII } from "node:url";
 
 import { google } from "googleapis";
 import type { JWT } from "google-auth-library";
@@ -106,6 +107,59 @@ function foldBase64(value: string): string {
 
 function sanitizeHeaderValue(value: string): string {
   return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+/**
+ * Normalize a recipient for Gmail MIME `To` headers.
+ * - Prefer bare addr-spec (no display name) when name is missing/invalid
+ * - Convert IDN domains (ä/ö/ü/ß) to punycode so Gmail does not return "Invalid To header"
+ */
+export function normalizeGmailRecipient(to: string): string | null {
+  const raw = to.trim();
+  if (!raw) {
+    return null;
+  }
+
+  const angleMatch = raw.match(/<([^>]*)>/);
+  let candidate = (angleMatch ? angleMatch[1] : raw).trim().replace(/^mailto:/i, "").trim();
+  candidate = candidate.split(/[;,]/)[0]?.trim() ?? "";
+
+  const lowered = candidate.toLowerCase();
+  if (!candidate || lowered === "undefined" || lowered === "null") {
+    return null;
+  }
+
+  if (/[\r\n<>]/.test(candidate)) {
+    return null;
+  }
+
+  const at = candidate.lastIndexOf("@");
+  if (at <= 0 || at === candidate.length - 1) {
+    return null;
+  }
+
+  const local = candidate.slice(0, at).trim();
+  const domainRaw = candidate.slice(at + 1).trim().replace(/\.$/, "");
+  if (!local || !domainRaw || local.includes("..") || domainRaw.includes("..")) {
+    return null;
+  }
+
+  let domainAscii: string;
+  try {
+    domainAscii = domainToASCII(domainRaw);
+  } catch {
+    return null;
+  }
+  if (!domainAscii) {
+    return null;
+  }
+
+  const labels = domainAscii.split(".");
+  if (labels.length < 2 || labels.some((label) => !label) || (labels[labels.length - 1]?.length ?? 0) < 2) {
+    return null;
+  }
+
+  return `${local}@${domainAscii}`;
 }
 
 function encodeSubject(subject: string): string {
@@ -369,9 +423,12 @@ export async function createGmailDraft(
   attachmentFileName?: string,
   options?: { plainTextFallback?: string; cc?: string }
 ): Promise<CreateGmailDraftResult> {
-  const recipient = to.trim();
+  // Bare addr-spec only — never `"Name" <undefined>` / empty angle brackets.
+  const recipient = normalizeGmailRecipient(to);
   if (!recipient) {
-    throw new Error("Recipient email address is required.");
+    throw new Error(
+      `Recipient email address is required or invalid for Gmail To header (got: ${JSON.stringify(to)}).`
+    );
   }
   if (!subject.trim()) {
     throw new Error("Email subject is required.");
@@ -412,6 +469,8 @@ export async function createGmailDraft(
 
     return { id };
   } catch (error) {
-    throw new Error(`Gmail draft creation failed: ${extractGoogleApiError(error)}`);
+    throw new Error(
+      `Gmail draft creation failed: ${extractGoogleApiError(error)} (To: ${recipient})`
+    );
   }
 }

@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { formatEuro } from "@/lib/adminStatsFormat";
@@ -15,6 +16,9 @@ type UnpaidBillingItem = {
   id: string;
   type: "lexoffice" | "credit_note";
   clientName: string;
+  companyName: string | null;
+  contactName: string | null;
+  invoiceNumber: string | null;
   documentName: string;
   date: string | null;
   dateLabel: string;
@@ -28,6 +32,25 @@ type UnpaidBillingItem = {
   linkedJobName: string | null;
 };
 
+function matchesUnpaidBillingSearch(item: UnpaidBillingItem, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) {
+    return true;
+  }
+
+  const haystack = [
+    item.clientName,
+    item.companyName,
+    item.contactName,
+    item.invoiceNumber,
+    item.documentName,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.toLowerCase());
+
+  return haystack.some((value) => value.includes(needle));
+}
+
 const TAB_ITEMS: { id: CrmTab; label: string }[] = [
   { id: "billing", label: "Unpaid Billing" },
   { id: "clients", label: "Client Manager" },
@@ -38,6 +61,7 @@ export default function AdminCrmPage() {
   const { isLoading: authLoading } = useAuthRole();
   const [activeTab, setActiveTab] = useState<CrmTab>("billing");
   const [items, setItems] = useState<UnpaidBillingItem[]>([]);
+  const [billingSearch, setBillingSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
@@ -46,6 +70,11 @@ export default function AdminCrmPage() {
     taskId: string;
     label: string;
   } | null>(null);
+
+  const filteredItems = useMemo(
+    () => items.filter((item) => matchesUnpaidBillingSearch(item, billingSearch)),
+    [items, billingSearch]
+  );
 
   const loadUnpaid = useCallback(async () => {
     setLoading(true);
@@ -133,6 +162,8 @@ export default function AdminCrmPage() {
     );
   }
 
+  const trimmedBillingSearch = billingSearch.trim();
+
   return (
     <main className="min-h-[calc(100dvh-64px)] bg-zinc-950 px-4 py-6 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-[1600px] space-y-6">
@@ -205,6 +236,21 @@ export default function AdminCrmPage() {
               </button>
             </div>
 
+            <div className="relative mb-4">
+              <Search
+                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500"
+                aria-hidden="true"
+              />
+              <input
+                type="search"
+                value={billingSearch}
+                onChange={(event) => setBillingSearch(event.target.value)}
+                placeholder="Search by client, company, or invoice number..."
+                aria-label="Search unpaid invoices"
+                className="h-10 w-full rounded-lg border border-zinc-700 bg-zinc-950 py-2 pl-10 pr-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-violet-500"
+              />
+            </div>
+
             <div className="overflow-x-auto rounded-xl border border-zinc-800">
               <table className="min-w-full divide-y divide-zinc-800 text-sm">
                 <thead className="bg-zinc-950/70">
@@ -236,14 +282,16 @@ export default function AdminCrmPage() {
                         Loading unpaid billing…
                       </td>
                     </tr>
-                  ) : items.length === 0 ? (
+                  ) : filteredItems.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="px-4 py-8 text-center text-zinc-500">
-                        No unpaid billing items found.
+                        {trimmedBillingSearch
+                          ? `No unpaid invoices found for "${trimmedBillingSearch}"`
+                          : "No unpaid billing items found."}
                       </td>
                     </tr>
                   ) : (
-                    items.map((item) => (
+                    filteredItems.map((item) => (
                       <tr key={item.id} className="hover:bg-zinc-950/40">
                         <td className="px-4 py-3 font-medium text-zinc-100">{item.clientName}</td>
                         <td className="px-4 py-3 text-zinc-300">

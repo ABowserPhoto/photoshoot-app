@@ -101,6 +101,7 @@ export interface CreateLexofficeInvoiceResult {
   documentFileId: string | null;
   resourceUri: string | null;
   invoiceViewUrl: string;
+  voucherNumber: string | null;
 }
 
 export interface LexofficeInvoiceDetails {
@@ -752,6 +753,7 @@ export async function createLexofficeInvoice(
   const invoiceViewUrl = buildLexofficeInvoiceViewUrl(id);
 
   let documentFileId: string | null = null;
+  let voucherNumber: string | null = null;
   try {
     documentFileId = await fetchInvoiceDocumentFileId(apiKey, id);
   } catch (error) {
@@ -762,7 +764,18 @@ export async function createLexofficeInvoice(
     console.warn(`[lexoffice] Invoice ${id} created, but documentFileId is not available yet: ${message}`);
   }
 
-  return { id, documentFileId, resourceUri, invoiceViewUrl };
+  try {
+    const details = await getLexofficeInvoice(id);
+    voucherNumber = details.voucherNumber;
+    if (!documentFileId && details.documentFileId) {
+      documentFileId = details.documentFileId;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[lexoffice] Invoice ${id} created, but voucherNumber lookup failed: ${message}`);
+  }
+
+  return { id, documentFileId, resourceUri, invoiceViewUrl, voucherNumber };
 }
 
 export function isLexofficeInvoicePaid(voucherStatus: string | null | undefined): boolean {

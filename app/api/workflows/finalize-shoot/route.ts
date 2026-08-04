@@ -318,6 +318,7 @@ export async function POST(request: Request) {
           documentFileId: string | null;
           resourceUri: string | null;
           invoiceViewUrl: string;
+          voucherNumber: string | null;
         }
       | undefined;
 
@@ -404,26 +405,24 @@ export async function POST(request: Request) {
     let invoiceGmailDraftId: string | null = null;
     if (splitInvoiceEmail && pdfBuffer) {
       currentStep = "gmail-create-invoice-draft";
+      const invoiceNumber = invoice?.voucherNumber?.trim() || invoice?.id || "Rechnung";
       const invoiceSubject = buildSeparateInvoiceEmailSubject({
         clientName: input.invoiceName || input.clientName,
-        shootLocation: input.shootLocation,
+        invoiceNumber,
         photoshootDate: input.photoshootDate,
-        shootName: input.shootName,
       });
       const invoiceHtml = buildSeparateInvoiceEmailHtml({
         contactFirstName: input.contactFirstName || input.clientName.split(/\s+/).filter(Boolean)[0],
         contactName: input.clientName,
-        shootLocation: input.shootLocation,
+        invoiceNumber,
         photoshootDate: input.photoshootDate,
-        shootName: input.shootName,
         invoiceViewUrl: invoice?.invoiceViewUrl,
       });
       const invoicePlain = buildSeparateInvoiceEmailPlainText({
         contactFirstName: input.contactFirstName || input.clientName.split(/\s+/).filter(Boolean)[0],
         contactName: input.clientName,
-        shootLocation: input.shootLocation,
+        invoiceNumber,
         photoshootDate: input.photoshootDate,
-        shootName: input.shootName,
         invoiceViewUrl: invoice?.invoiceViewUrl,
       });
       const invoiceDraft = await createGmailDraft(
@@ -431,7 +430,7 @@ export async function POST(request: Request) {
         invoiceSubject,
         invoiceHtml,
         pdfBuffer,
-        `Invoice-${sanitizeFileName(input.shootName)}.pdf`,
+        `Invoice-${sanitizeFileName(invoiceNumber)}.pdf`,
         { plainTextFallback: invoicePlain }
       );
       invoiceGmailDraftId = invoiceDraft.id;

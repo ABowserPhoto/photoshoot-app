@@ -1,6 +1,6 @@
 import type { LexofficeVoucherListItem } from "@/lib/lexoffice";
 import { isCrmExcludedBillingLabel, isCrmExcludedBillingTask } from "@/lib/crmTaskFilters";
-import { resolveReminderClientName, resolveReminderShootName, type ReminderTaskRow } from "@/lib/invoiceReminderWorkflow";
+import { resolveReminderClientName, resolveReminderRecipientFromTask, resolveReminderShootName, type ReminderTaskRow } from "@/lib/invoiceReminderWorkflow";
 
 export type UnpaidBillingItemType = "lexoffice" | "credit_note";
 
@@ -8,6 +8,12 @@ export type UnpaidBillingItem = {
   id: string;
   type: UnpaidBillingItemType;
   clientName: string;
+  /** Company / business name when available (for search). */
+  companyName: string | null;
+  /** Contact person full name when available (for search). */
+  contactName: string | null;
+  /** Invoice / voucher number when available (for search). */
+  invoiceNumber: string | null;
   documentName: string;
   date: string | null;
   dateLabel: string;
@@ -63,19 +69,30 @@ export function mapLexofficeInvoiceToUnpaidBillingItem(
   item: LexofficeVoucherListItem,
   linkedTask: CreditNoteTaskRow | null
 ): UnpaidBillingItem | null {
-  const clientName = item.contactName?.trim() || linkedTask?.company_name?.trim() || "Kunde";
+  const companyName = linkedTask?.company_name?.trim() || item.contactName?.trim() || null;
+  const contactName =
+    [linkedTask?.contact_first_name, linkedTask?.contact_last_name]
+      .map((part) => part?.trim() ?? "")
+      .filter(Boolean)
+      .join(" ")
+      .trim() || null;
+  const invoiceNumber = item.voucherNumber?.trim() || null;
+  const clientName = item.contactName?.trim() || companyName || contactName || "Kunde";
   if (isCrmExcludedBillingLabel(clientName)) {
     return null;
   }
 
-  const clientEmail = linkedTask?.email?.trim() || null;
+  const clientEmail = resolveReminderRecipientFromTask(linkedTask);
   const contactId = item.contactId?.trim() || null;
 
   return {
     id: `lexoffice:${item.id}`,
     type: "lexoffice",
     clientName,
-    documentName: item.voucherNumber?.trim() || "Lexoffice invoice",
+    companyName,
+    contactName,
+    invoiceNumber,
+    documentName: invoiceNumber || "Lexoffice invoice",
     date: item.voucherDate,
     dateLabel: formatCrmBillingDateLabel(item.voucherDate),
     amount: resolveOpenAmount(item),
@@ -99,19 +116,29 @@ export function mapCreditNoteTaskToUnpaidBillingItem(row: CreditNoteTaskRow): Un
     return null;
   }
 
-  const clientEmail = row.email?.trim() || null;
+  const clientEmail = resolveReminderRecipientFromTask(row);
+  const companyName = row.company_name?.trim() || null;
+  const contactName = [row.contact_first_name, row.contact_last_name]
+    .map((part) => part?.trim() ?? "")
+    .filter(Boolean)
+    .join(" ")
+    .trim() || null;
+  const invoiceNumber = row.lexoffice_invoice_id?.trim() || null;
 
   return {
     id: `credit_note:${row.id}`,
     type: "credit_note",
     clientName: resolveReminderClientName(row),
+    companyName,
+    contactName,
+    invoiceNumber,
     documentName: resolveReminderShootName(row),
     date: row.photoshoot_date ?? row.invoice_date ?? null,
     dateLabel: formatCrmBillingDateLabel(row.photoshoot_date ?? row.invoice_date),
     amount: expectedRevenue,
     clientEmail,
     canSendReminder: Boolean(clientEmail),
-    lexofficeInvoiceId: row.lexoffice_invoice_id?.trim() || null,
+    lexofficeInvoiceId: invoiceNumber,
     taskId: row.id,
     contactId: null,
     voucherStatus: null,

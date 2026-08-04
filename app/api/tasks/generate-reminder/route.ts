@@ -63,7 +63,7 @@ export async function POST(request: Request) {
       const { data, error } = await supabase
         .from("tasks")
         .select(
-          "id, title, company_name, contact_first_name, contact_last_name, email, photoshoot_type, shoot_location, photoshoot_date, lexoffice_invoice_id, lexoffice_document_file_id, invoice_date, is_paid, skip_invoice, expected_revenue, is_credit_note"
+          "id, title, company_name, contact_first_name, contact_last_name, email, has_separate_invoice_email, invoice_email_address, photoshoot_type, shoot_location, photoshoot_date, lexoffice_invoice_id, lexoffice_document_file_id, invoice_date, is_paid, skip_invoice, expected_revenue, is_credit_note"
         )
         .eq("id", taskId)
         .maybeSingle();
@@ -75,7 +75,7 @@ export async function POST(request: Request) {
       const { data } = await supabase
         .from("tasks")
         .select(
-          "id, title, company_name, contact_first_name, contact_last_name, email, photoshoot_type, shoot_location, photoshoot_date, lexoffice_invoice_id, lexoffice_document_file_id, invoice_date, is_paid, skip_invoice, expected_revenue, is_credit_note"
+          "id, title, company_name, contact_first_name, contact_last_name, email, has_separate_invoice_email, invoice_email_address, photoshoot_type, shoot_location, photoshoot_date, lexoffice_invoice_id, lexoffice_document_file_id, invoice_date, is_paid, skip_invoice, expected_revenue, is_credit_note"
         )
         .eq("lexoffice_invoice_id", invoiceId)
         .maybeSingle();
@@ -127,7 +127,7 @@ export async function POST(request: Request) {
   const { data, error } = await supabase
     .from("tasks")
     .select(
-      "id, title, company_name, contact_first_name, contact_last_name, email, photoshoot_type, shoot_location, photoshoot_date, lexoffice_invoice_id, lexoffice_document_file_id, invoice_date, is_paid, skip_invoice, expected_revenue, is_credit_note"
+      "id, title, company_name, contact_first_name, contact_last_name, email, has_separate_invoice_email, invoice_email_address, photoshoot_type, shoot_location, photoshoot_date, lexoffice_invoice_id, lexoffice_document_file_id, invoice_date, is_paid, skip_invoice, expected_revenue, is_credit_note"
     )
     .eq("id", resolvedTaskId)
     .maybeSingle();

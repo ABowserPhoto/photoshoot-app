@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { createGmailDraft } from "@/lib/google";
+import { createGmailDraft, normalizeGmailRecipient } from "@/lib/google";
 import { generateInvoiceReminderEmail } from "@/lib/invoiceReminderAi";
 import {
   getLexofficeContactEmail,
@@ -17,6 +17,8 @@ export type ReminderTaskRow = {
   contact_first_name: string | null;
   contact_last_name: string | null;
   email: string | null;
+  has_separate_invoice_email?: boolean | null;
+  invoice_email_address?: string | null;
   photoshoot_type: string | null;
   shoot_location: string | null;
   photoshoot_date: string | null;
@@ -75,11 +77,47 @@ export function resolveReminderShootName(row: ReminderTaskRow): string {
   return parts.length > 0 ? parts.join(" – ") : "Fotoshooting";
 }
 
+/**
+ * Extract a bare email address suitable for a Gmail `To` header.
+ * Converts IDN domains (e.g. `ß`) to punycode so Gmail accepts the header.
+ */
+export function normalizeReminderRecipientEmail(value: string | null | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  return normalizeGmailRecipient(value);
+}
+
+function isTruthyFlag(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+  }
+  if (typeof value === "number") return value === 1;
+  return false;
+}
+
+/** Prefer separate invoice email when configured; otherwise primary task email. */
+export function resolveReminderRecipientFromTask(task: ReminderTaskRow | null | undefined): string | null {
+  if (!task) {
+    return null;
+  }
+
+  if (isTruthyFlag(task.has_separate_invoice_email)) {
+    const invoiceEmail = normalizeReminderRecipientEmail(task.invoice_email_address);
+    if (invoiceEmail) {
+      return invoiceEmail;
+    }
+  }
+
+  return normalizeReminderRecipientEmail(task.email);
+}
+
 export async function resolveLexofficeReminderRecipient(
   task: ReminderTaskRow | null,
   contactId: string | null | undefined
 ): Promise<string | null> {
-  const fromTask = task?.email?.trim();
+  const fromTask = resolveReminderRecipientFromTask(task);
   if (fromTask) {
     return fromTask;
   }
@@ -89,7 +127,15 @@ export async function resolveLexofficeReminderRecipient(
     return null;
   }
 
-  return getLexofficeContactEmail(trimmedContactId);
+  return normalizeReminderRecipientEmail(await getLexofficeContactEmail(trimmedContactId));
+}
+
+function requireReminderRecipientEmail(value: string | null | undefined): string {
+  const email = normalizeReminderRecipientEmail(value);
+  if (!email) {
+    throw new Error("Cannot create reminder draft: No valid email address found for this client.");
+  }
+  return email;
 }
 
 function sanitizeFileName(value: string): string {
@@ -99,18 +145,14 @@ function sanitizeFileName(value: string): string {
 export async function createInvoiceReminderDraftForTask(
   supabase: SupabaseClient,
   task: ReminderTaskRow,
-  options?: { skipOverdueCheck?: boolean }
+  options?: { skipOverdueCheck?: boolean; lexofficeContactId?: string | null }
 ): Promise<CreateReminderDraftResult> {
   const taskId = task.id;
-  const recipient = task.email?.trim() ?? "";
-  if (!recipient) {
-    return { ok: false, error: "Client email is missing on this task.", code: "missing_email" };
-  }
-
   const invoiceId = task.lexoffice_invoice_id?.trim() ?? "";
   let invoiceNumber = invoiceId || "Rechnung";
   let documentFileId = task.lexoffice_document_file_id?.trim() || "";
   let invoiceDate = parseDate(task.invoice_date);
+  let lexofficeContactId = options?.lexofficeContactId?.trim() || "";
 
   if (invoiceId) {
     const invoice = await getLexofficeInvoice(invoiceId);
@@ -141,6 +183,7 @@ export async function createInvoiceReminderDraftForTask(
     invoiceNumber = invoice.voucherNumber ?? invoiceId;
     documentFileId = documentFileId || invoice.documentFileId?.trim() || "";
     invoiceDate = parseDate(invoice.voucherDate) ?? invoiceDate;
+    lexofficeContactId = lexofficeContactId || invoice.contactId?.trim() || "";
   } else if (Number(task.expected_revenue ?? 0) > 0 || task.is_credit_note) {
     invoiceNumber = "Credit Note";
     invoiceDate = invoiceDate ?? new Date();
@@ -148,12 +191,16 @@ export async function createInvoiceReminderDraftForTask(
     return { ok: false, error: "No Lexoffice invoice or credit-note amount on this task.", code: "missing_invoice" };
   }
 
-  const location = task.shoot_location?.trim() || resolveReminderShootName(task);
+  const resolvedRecipient = await resolveLexofficeReminderRecipient(task, lexofficeContactId || null);
+  if (!resolvedRecipient) {
+    return { ok: false, error: "Client email is missing on this task.", code: "missing_email" };
+  }
+  const recipient = requireReminderRecipientEmail(resolvedRecipient);
+
   const reminder = generateInvoiceReminderEmail({
     invoiceNumber,
     clientName: resolveReminderClientName(task),
     contactNameOrBusinessName: resolveReminderGreetingName(task),
-    location,
     photoshootDate: task.photoshoot_date?.trim() || task.invoice_date?.trim() || undefined,
   });
 
@@ -233,10 +280,11 @@ export async function createInvoiceReminderDraftForLexofficeInvoice(
     };
   }
 
-  const recipient = await resolveLexofficeReminderRecipient(null, invoice.contactId);
-  if (!recipient) {
+  const resolvedRecipient = await resolveLexofficeReminderRecipient(null, invoice.contactId);
+  if (!resolvedRecipient) {
     return { ok: false, error: "Client email is missing for this Lexoffice invoice.", code: "missing_email" };
   }
+  const recipient = requireReminderRecipientEmail(resolvedRecipient);
 
   const invoiceNumber = invoice.voucherNumber ?? trimmedInvoiceId;
   const clientName = invoice.contactName?.trim() || "Kunde";
@@ -245,7 +293,6 @@ export async function createInvoiceReminderDraftForLexofficeInvoice(
     invoiceNumber,
     clientName,
     contactNameOrBusinessName: clientName,
-    location: "Ihrem Standort",
     photoshootDate: invoice.voucherDate?.trim() || undefined,
   });
 

@@ -75,22 +75,20 @@ export function generateInvoiceReminderEmail(input: {
   clientName: string;
   /** Greeting: contact person if available, otherwise business name. */
   contactNameOrBusinessName: string;
-  location: string;
   photoshootDate?: string;
 }): InvoiceReminderEmailDraft {
   const client = input.clientName.trim() || "Kunde";
-  const location = input.location.trim() || "Ihrem Standort";
   const date = formatGermanShootDate(input.photoshootDate) || "—";
   const contactNameOrBusinessName =
     input.contactNameOrBusinessName.trim() || input.clientName.trim() || "Kunde";
   const invoiceNumber = input.invoiceNumber.trim() || "Rechnung";
 
-  const subject = `Zahlungserinnerung | ${client} - ${location} - ${date}`;
+  const subject = `Zahlungserinnerung | ${client} - ${invoiceNumber} - ${date}`;
 
   const bodyPlain = [
     `Hallo ${contactNameOrBusinessName},`,
     "",
-    `dies ist eine freundliche Erinnerung, dass die Rechnung ${invoiceNumber} für unser Shooting in ${location} noch offen ist.`,
+    `dies ist eine freundliche Erinnerung, dass die Rechnung ${invoiceNumber} noch offen ist.`,
     "",
     "Sollten Sie den Betrag in der Zwischenzeit bereits überwiesen haben, betrachten Sie diese Nachricht bitte als gegenstandslos.",
     "",
