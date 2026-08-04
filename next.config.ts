@@ -14,10 +14,13 @@ const nextConfig: NextConfig = {
   },
   allowedDevOrigins: allowedDevOrigins.length > 0 ? allowedDevOrigins : undefined,
   experimental: {
+    // Large Edited-stage uploads (video/PDF) go through /api/upload as multipart FormData.
+    // Both limits must be high enough — Next truncates oversized bodies, which then fails
+    // FormData parsing with "Failed to parse body as FormData" / missing boundary errors.
     serverActions: {
-      bodySizeLimit: "50mb",
+      bodySizeLimit: "2000mb",
     },
-    proxyClientMaxBodySize: 1024 * 1024 * 1024,
+    proxyClientMaxBodySize: "2000mb",
   },
 };
 

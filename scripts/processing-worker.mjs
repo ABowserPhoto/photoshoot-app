@@ -1458,11 +1458,45 @@ async function finalizeTask(supabase, taskId, status) {
   }
 }
 
+function guessStorageContentType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".tif":
+    case ".tiff":
+      return "image/tiff";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    case ".bmp":
+      return "image/bmp";
+    case ".mp4":
+      return "video/mp4";
+    case ".mov":
+      return "video/quicktime";
+    case ".avi":
+      return "video/x-msvideo";
+    case ".mkv":
+      return "video/x-matroska";
+    case ".webm":
+      return "video/webm";
+    case ".pdf":
+      return "application/pdf";
+    default:
+      return "application/octet-stream";
+  }
+}
+
 async function uploadFileToBucket(supabase, bucket, storagePath, filePath) {
   const buffer = await fs.promises.readFile(filePath);
   const { error } = await supabase.storage.from(bucket).upload(storagePath, buffer, {
     upsert: true,
-    contentType: "image/jpeg",
+    contentType: guessStorageContentType(filePath),
     cacheControl: "3600",
   });
   if (error) {
@@ -1541,7 +1575,8 @@ async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
   const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
   const mergedDir = path.join(taskRoot, "3_Merged");
   const finalDir = path.join(taskRoot, "4_Final");
-  const imageMatcher = /\.(jpe?g|png|tiff?|webp|bmp|gif)$/i;
+  // Include images plus Edited-stage deliverables (video/PDF) for 4_Final sync.
+  const finalDeliverableMatcher = /\.(jpe?g|png|tiff?|webp|bmp|gif|mp4|mov|avi|mkv|webm|pdf)$/i;
 
   console.info(`[worker] Finals upload scan: mergedDir=${mergedDir}, finalDir=${finalDir}`);
   const mergedFiles = readNaturallySortedImageFiles(mergedDir);
@@ -1557,7 +1592,7 @@ async function uploadMergedAndFinalsForReview(supabase, localFolderName) {
 
   const finalEntries = fs.existsSync(finalDir) ? await fs.promises.readdir(finalDir, { withFileTypes: true }) : [];
   const finalFiles = finalEntries
-    .filter((entry) => entry.isFile() && imageMatcher.test(entry.name))
+    .filter((entry) => entry.isFile() && finalDeliverableMatcher.test(entry.name))
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
   let finalUploaded = 0;

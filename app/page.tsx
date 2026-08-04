@@ -15,6 +15,7 @@ import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { PERMISSION_DENIED_QUERY } from "@/lib/permissionDenied";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
+import { DELIVERABLE_FILE_INPUT_ACCEPT, isEditedUploadFile } from "@/lib/deliverableFiles";
 import { buildFinalizeShootPayload } from "@/lib/finalizeShootPayload";
 
 type AmountType = "Net" | "Gross";
@@ -1218,6 +1219,8 @@ function HomeContent() {
     formData.append("taskData", JSON.stringify(uploadPayload));
 
     try {
+      // Do NOT set Content-Type manually. The browser must add
+      // multipart/form-data with the correct boundary=... for FormData.
       const uploadResponse = await fetch("/api/upload", {
         method: "POST",
         body: formData,
@@ -2175,28 +2178,33 @@ function HomeContent() {
               onDragOver={(event) => event.preventDefault()}
               onDrop={(event) => {
                 event.preventDefault();
-                const dropped = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith("image/"));
+                const dropped = Array.from(event.dataTransfer.files).filter(isEditedUploadFile);
                 if (dropped.length > 0) {
                   setUploadFiles((prev) => [...prev, ...dropped]);
                   setUploadError(null);
+                } else {
+                  setUploadError("Only JPG/JPEG images, videos, and PDF files are supported.");
                 }
               }}
               className="rounded-xl border-2 border-dashed border-zinc-300 bg-zinc-50 p-8 text-center dark:border-zinc-700 dark:bg-zinc-800/60"
             >
               <p className="text-sm font-medium text-zinc-700 dark:text-zinc-200">
-                Drag & drop image files here
+                Drag & drop JPG, video, or PDF files here
               </p>
               <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">or choose files manually</p>
               <input
                 type="file"
                 multiple
-                accept="image/*"
+                accept={DELIVERABLE_FILE_INPUT_ACCEPT}
                 onChange={(event) => {
-                  const selected = Array.from(event.target.files ?? []);
+                  const selected = Array.from(event.target.files ?? []).filter(isEditedUploadFile);
                   if (selected.length > 0) {
                     setUploadFiles((prev) => [...prev, ...selected]);
                     setUploadError(null);
+                  } else if ((event.target.files?.length ?? 0) > 0) {
+                    setUploadError("Only JPG/JPEG images, videos, and PDF files are supported.");
                   }
+                  event.target.value = "";
                 }}
                 className="mt-4 block w-full text-sm text-zinc-700 file:mr-4 file:rounded-md file:border-0 file:bg-zinc-900 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-zinc-700 dark:text-zinc-200 dark:file:bg-zinc-100 dark:file:text-zinc-900"
               />

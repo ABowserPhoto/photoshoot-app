@@ -2,9 +2,11 @@ import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
+import { isDeliverableFileName } from "@/lib/deliverableFiles";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 const ILLEGAL_FOLDER_CHARS = /[<>:"/\\|?*]/g;
 
@@ -97,7 +99,23 @@ function sanitizeFolderSegment(value: string): string {
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch (parseError) {
+      const detail = parseError instanceof Error ? parseError.message : String(parseError);
+      console.error("[upload] Failed to parse multipart body:", detail);
+      return Response.json(
+        {
+          error:
+            "Failed to parse upload body as FormData. This usually means the request was truncated " +
+            "(file too large for the server body limit) or Content-Type was set without a multipart boundary. " +
+            `Details: ${detail}`,
+        },
+        { status: 413 }
+      );
+    }
+
     const taskDataRaw = formData.get("taskData");
     if (typeof taskDataRaw !== "string") {
       return Response.json({ error: "Missing taskData payload." }, { status: 400 });
@@ -216,10 +234,14 @@ export async function POST(request: Request) {
 
     const files = formData
       .getAll("files")
-      .filter((entry): entry is File => entry instanceof File && entry.size > 0);
+      .filter((entry): entry is File => entry instanceof File && entry.size > 0)
+      .filter((file) => isDeliverableFileName(file.name));
 
     if (files.length === 0) {
-      return Response.json({ error: "No files uploaded." }, { status: 400 });
+      return Response.json(
+        { error: "No supported files uploaded. Allowed: JPG/JPEG, video (mp4/mov/avi/mkv/webm), PDF." },
+        { status: 400 }
+      );
     }
 
     const baseDirectory = getBaseDirectory(photoshootType);
