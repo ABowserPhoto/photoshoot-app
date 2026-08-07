@@ -15,6 +15,7 @@ type GalleryResponse = {
   success?: boolean;
   localFolderName?: string;
   status?: string;
+  photoshootType?: string;
   bracketSize?: number;
   totalChunks?: number;
   gallery?: GalleryItem[];
@@ -67,6 +68,7 @@ export default function GalleryPage() {
 
   const [localFolderName, setLocalFolderName] = useState("");
   const [taskStatus, setTaskStatus] = useState<string | null>(null);
+  const [photoshootType, setPhotoshootType] = useState("");
   const [gallery, setGallery] = useState<GalleryItem[]>([]);
   const [selectedChunks, setSelectedChunks] = useState<Set<number>>(new Set());
   const [ratingsByChunk, setRatingsByChunk] = useState<Record<number, number>>({});
@@ -83,6 +85,10 @@ export default function GalleryPage() {
   const [rotatingByChunk, setRotatingByChunk] = useState<Record<number, RotateDirection | undefined>>({});
 
   const selectedCount = selectedChunks.size;
+  const isLandscape = useMemo(() => {
+    const type = photoshootType.trim().toLowerCase();
+    return ["immobilien", "food", "real estate"].includes(type);
+  }, [photoshootType]);
   const selectedIndices = useMemo(
     () => Array.from(selectedChunks).sort((a, b) => a - b),
     [selectedChunks]
@@ -211,6 +217,7 @@ export default function GalleryPage() {
       }
       setLocalFolderName(payload?.localFolderName ?? "");
       setTaskStatus(typeof payload?.status === "string" ? payload.status : "");
+      setPhotoshootType(typeof payload?.photoshootType === "string" ? payload.photoshootType : "");
       setGallery(payload?.gallery ?? []);
       const serverSelectedIndices = Array.from(
         new Set(
@@ -522,7 +529,13 @@ export default function GalleryPage() {
             Keine Vorschauen für den aktuellen Filter gefunden.
           </p>
         ) : (
-          <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+          <section
+            className={
+              isLandscape
+                ? "grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
+                : "grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5"
+            }
+          >
             {gridItems.map((item) => {
               const selected = selectedChunks.has(item.chunkIndex);
               const activeRotateDirection = rotatingByChunk[item.chunkIndex];
@@ -541,7 +554,11 @@ export default function GalleryPage() {
                     <img
                       src={item.previewUrl}
                       alt={`Scene ${item.chunkIndex + 1}`}
-                      className="h-32 w-full bg-black object-contain transition duration-200 group-hover:opacity-95"
+                      className={
+                        isLandscape
+                          ? "h-32 w-full bg-black object-contain transition duration-200 group-hover:opacity-95"
+                          : "aspect-[3/4] h-auto w-full bg-black object-contain transition duration-200 group-hover:opacity-95"
+                      }
                       loading="lazy"
                     />
                   </button>

@@ -1,3 +1,5 @@
+import { resolveFinalEmailCoverImageUrl } from "@/lib/emailTemplateAssets";
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -29,8 +31,10 @@ export function buildFinalizeShootEmailSubject(input: {
 export function buildFinalizeShootEmailHtml(input: {
   googleDriveLink: string;
   includeInvoiceNote?: boolean;
+  photoshootType?: string;
 }): string {
   const driveLink = escapeHtml(input.googleDriveLink.trim());
+  const coverImageUrl = escapeHtml(resolveFinalEmailCoverImageUrl(input.photoshootType));
   const bodyText =
     input.includeInvoiceNote === false
       ? "Ich habe gute Nachrichten! Deine Fotos kannst du hier herunterladen."
@@ -52,7 +56,7 @@ export function buildFinalizeShootEmailHtml(input: {
                       <tbody>
                         <tr>
                           <td align="center" style="padding:26px 20px; background-color:#ffffff;">
-                            <img src="https://res.cloudinary.com/dggils0xr/image/upload/v1778187091/FotosDa_cmxr5c.png" alt="CoverImage" width="100%" style="display:block; height:auto;">
+                            <img src="${coverImageUrl}" alt="CoverImage" width="100%" style="display:block; width:100%; max-width:100%; height:auto; border:0; outline:none; text-decoration:none;">
                           </td>
                         </tr>
                       </tbody>
@@ -146,14 +150,21 @@ export function buildFinalizeShootEmailPlainText(input: {
 }
 
 export function buildSeparateInvoiceEmailSubject(input: {
+  /** Billing entity / company name for the subject. */
+  billingEntityName?: string;
+  /** @deprecated Prefer billingEntityName. */
   clientName?: string;
   invoiceNumber?: string;
+  /** Photoshoot location shown at a glance for accounting. */
+  shootLocation?: string;
   photoshootDate?: string;
 }): string {
-  const client = input.clientName?.trim() || "Client";
+  const client = input.billingEntityName?.trim() || input.clientName?.trim() || "Client";
   const invoiceNumber = input.invoiceNumber?.trim() || "Rechnung";
+  const location = input.shootLocation?.trim() || "";
   const date = formatGermanShootDate(input.photoshootDate) || "—";
-  return `Invoice | ${client} - ${invoiceNumber} - ${date}`;
+  const parts = [client, invoiceNumber, ...(location ? [location] : []), date];
+  return `Invoice | ${parts.join(" - ")}`;
 }
 
 function formatGermanShootDate(value?: string): string {
@@ -175,27 +186,36 @@ function formatGermanShootDate(value?: string): string {
   }).format(parsed);
 }
 
-function resolveInvoiceContactSalutationName(input: {
-  contactFirstName?: string;
-  contactName?: string;
+function resolveBillingEntitySalutationName(input: {
+  billingEntityName?: string;
 }): string {
-  const first = input.contactFirstName?.trim();
-  if (first) return first;
-  const full = input.contactName?.trim();
-  if (!full) return "Kunde";
-  return full.split(/\s+/).filter(Boolean)[0] || full;
+  return input.billingEntityName?.trim() || "Kunde";
+}
+
+function buildSeparateInvoiceIntroSentence(input: {
+  invoiceNumber?: string;
+  shootLocation?: string;
+  photoshootDate?: string;
+}): string {
+  const invoiceNumber = input.invoiceNumber?.trim() || "Rechnung";
+  const location = input.shootLocation?.trim() || "";
+  const date = formatGermanShootDate(input.photoshootDate) || "dem Shooting-Termin";
+  if (location) {
+    return `anbei erhalten Sie die Rechnung ${invoiceNumber} für unser Fotoshooting in ${location} vom ${date}.`;
+  }
+  return `anbei erhalten Sie die Rechnung ${invoiceNumber} für unser Fotoshooting vom ${date}.`;
 }
 
 export function buildSeparateInvoiceEmailHtml(input: {
-  contactFirstName?: string;
-  contactName?: string;
+  /** Billing entity / company name used in "Hallo …," */
+  billingEntityName?: string;
   invoiceNumber?: string;
+  shootLocation?: string;
   photoshootDate?: string;
   invoiceViewUrl?: string | null;
 }): string {
-  const contactName = escapeHtml(resolveInvoiceContactSalutationName(input));
-  const invoiceNumber = escapeHtml(input.invoiceNumber?.trim() || "Rechnung");
-  const date = escapeHtml(formatGermanShootDate(input.photoshootDate) || "dem Shooting-Termin");
+  const billingEntityName = escapeHtml(resolveBillingEntitySalutationName(input));
+  const intro = escapeHtml(buildSeparateInvoiceIntroSentence(input));
   const invoiceUrl =
     typeof input.invoiceViewUrl === "string" && input.invoiceViewUrl.trim()
       ? escapeHtml(input.invoiceViewUrl.trim())
@@ -209,8 +229,8 @@ export function buildSeparateInvoiceEmailHtml(input: {
 <head></head>
 <body>
   <div dir="ltr" style="font-family:arial,sans-serif;font-size:15px;line-height:1.5;color:rgb(32,33,36);">
-    <p>Hallo ${contactName},</p>
-    <p>anbei erhalten Sie die Rechnung ${invoiceNumber} für unser Fotoshooting vom ${date}.</p>
+    <p>Hallo ${billingEntityName},</p>
+    <p>${intro}</p>
     <p>Bitte entnehmen Sie alle weiteren Details sowie die Zahlungsfrist dem angehängten PDF.</p>
     ${linkBlock}
     <p>Vielen Dank für die gute Zusammenarbeit!</p>
@@ -223,19 +243,17 @@ export function buildSeparateInvoiceEmailHtml(input: {
 }
 
 export function buildSeparateInvoiceEmailPlainText(input: {
-  contactFirstName?: string;
-  contactName?: string;
+  billingEntityName?: string;
   invoiceNumber?: string;
+  shootLocation?: string;
   photoshootDate?: string;
   invoiceViewUrl?: string | null;
 }): string {
-  const contactName = resolveInvoiceContactSalutationName(input);
-  const invoiceNumber = input.invoiceNumber?.trim() || "Rechnung";
-  const date = formatGermanShootDate(input.photoshootDate) || "dem Shooting-Termin";
+  const billingEntityName = resolveBillingEntitySalutationName(input);
   const lines = [
-    `Hallo ${contactName},`,
+    `Hallo ${billingEntityName},`,
     "",
-    `anbei erhalten Sie die Rechnung ${invoiceNumber} für unser Fotoshooting vom ${date}.`,
+    buildSeparateInvoiceIntroSentence(input),
     "",
     "Bitte entnehmen Sie alle weiteren Details sowie die Zahlungsfrist dem angehängten PDF.",
     "",

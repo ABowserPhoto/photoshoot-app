@@ -64,12 +64,15 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
 
   const { data, error } = await supabase
     .from("tasks")
-    .select("local_folder_name, gallery_previews, gallery_selection, status")
+    .select("local_folder_name, gallery_previews, gallery_selection, status, photoshoot_type")
     .eq("id", shootId)
     .maybeSingle();
   if (error) {
     throw new Error(`Failed to load gallery previews: ${error.message}`);
   }
+
+  const photoshootType =
+    typeof data?.photoshoot_type === "string" ? data.photoshoot_type.trim() : "";
 
   const items: unknown[] = Array.isArray(data?.gallery_previews?.items) ? data.gallery_previews.items : [];
   const { selectedChunkIndices } = parseSelectionPayload(data?.gallery_selection);
@@ -139,6 +142,7 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
     success: true,
     localFolderName: data?.local_folder_name ?? "",
     status: typeof data?.status === "string" ? data.status : "",
+    photoshootType,
     bracketSize,
     totalChunks: gallery.length,
     gallery,

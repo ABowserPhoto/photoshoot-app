@@ -7,7 +7,12 @@ import { getAuthRole } from "@/lib/server/getAuthRole";
 
 type SchedulerActionResult = { ok: true } | { ok: false; error: string };
 
-export type SchedulerPostStatus = "pending" | "scheduled" | "published" | "failed";
+export type SchedulerPostStatus =
+  | "pending"
+  | "scheduled"
+  | "scheduled_with_meta"
+  | "published"
+  | "failed";
 
 function serviceSupabase() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();

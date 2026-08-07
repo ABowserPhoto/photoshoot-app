@@ -32,6 +32,8 @@ export type FinalizeShootTask = {
   services: Array<{ name: string; quantity: number; price: number }>;
   products: Array<{ name: string; quantity: number; price: number }>;
   taxPercentage: number;
+  /** Whether line item prices are net or gross (drives Lexoffice taxType). */
+  amountType?: "Net" | "Gross";
   discount: number;
   photoshootType: string;
   shootLocation: string;
@@ -50,10 +52,19 @@ export type FinalizeShootLineItem = {
 export type FinalizeShootPayload = {
   taskId: string;
   shootName: string;
+  /** Billing entity / company name (invoice subject + separate-invoice greeting). */
   invoiceName: string;
+  billingEntityName: string;
+  /** Contact person display name (kept for Lexoffice contact person). */
   clientName: string;
   contactFirstName?: string;
+  /** Contact person email — gallery/deliverables To. */
+  contactEmail: string;
+  /** @deprecated Use contactEmail. Kept for older callers. */
   clientEmail: string;
+  /** Comma-separated CC list for gallery/deliverables. */
+  ccEmails?: string;
+  /** @deprecated Use ccEmails. Kept for older callers. */
   clientEmailCc?: string;
   photoshootType: string;
   shootLocation: string;
@@ -61,6 +72,9 @@ export type FinalizeShootPayload = {
   addressSupplement?: string;
   galleryLink?: string;
   hasSeparateInvoiceEmail?: boolean;
+  /** Billing entity email — separate invoice To. */
+  billingEmail?: string;
+  /** @deprecated Use billingEmail. Kept for older callers. */
   invoiceEmailAddress?: string;
   clientAddress: {
     street?: string;
@@ -71,6 +85,8 @@ export type FinalizeShootPayload = {
   };
   lineItems: FinalizeShootLineItem[];
   taxRate: number;
+  /** Lexoffice tax mode matching booking amount type. */
+  taxType?: "net" | "gross";
   skipInvoice: boolean;
   localFolderName: string;
   lexofficeContactId?: string;
@@ -130,7 +146,12 @@ export function resolveCountryCode(country: string): string {
 
 export function calculateTaskInvoiceNetPrice(task: FinalizeShootTask): number {
   const subtotal = sumLineItems(task.services) + sumLineItems(task.products);
-  return Math.max(0, subtotal - (Number(task.discount) || 0));
+  const adjusted = Math.max(0, subtotal - (Number(task.discount) || 0));
+  const taxRate = (Number.isFinite(task.taxPercentage) ? task.taxPercentage : 0) / 100;
+  if (task.amountType === "Gross") {
+    return taxRate > 0 ? adjusted / (1 + taxRate) : adjusted;
+  }
+  return adjusted;
 }
 
 export function buildTaskLineItems(task: FinalizeShootTask): FinalizeShootLineItem[] {
@@ -170,22 +191,25 @@ export function buildTaskLineItems(task: FinalizeShootTask): FinalizeShootLineIt
 }
 
 export function buildFinalizeShootPayload(task: FinalizeShootTask): FinalizeShootPayload {
-  const invoiceName = task.companyName.trim();
+  const billingEntityName = task.companyName.trim();
   const contactPerson = buildContactPersonName(task);
+  const contactEmail = task.email.trim();
+  const ccEmails = (task.emailCc ?? "").trim();
   const galleryLink = (task.galleryLink ?? "").trim();
-  const emailCc = (task.emailCc ?? "").trim();
   const countryCode = resolveCountryCode(task.country);
   const hasSeparateInvoiceEmail = Boolean(task.hasSeparateInvoiceEmail);
-  const invoiceEmailAddress = (task.invoiceEmailAddress ?? "").trim();
+  const billingEmail = (task.invoiceEmailAddress ?? "").trim();
 
   return {
     taskId: task.id,
     shootName: buildShootDisplayName(task),
-    invoiceName,
-    clientName: contactPerson || invoiceName || "Client",
+    invoiceName: billingEntityName,
+    billingEntityName,
+    clientName: contactPerson || billingEntityName || "Client",
     ...(task.contactFirstName.trim() ? { contactFirstName: task.contactFirstName.trim() } : {}),
-    clientEmail: task.email.trim(),
-    ...(emailCc ? { clientEmailCc: emailCc } : {}),
+    contactEmail,
+    clientEmail: contactEmail,
+    ...(ccEmails ? { ccEmails, clientEmailCc: ccEmails } : {}),
     photoshootType: task.photoshootType,
     shootLocation: task.shootLocation.trim(),
     ...(task.photoshootDate?.trim() ? { photoshootDate: task.photoshootDate.trim() } : {}),
@@ -194,7 +218,7 @@ export function buildFinalizeShootPayload(task: FinalizeShootTask): FinalizeShoo
     ...(hasSeparateInvoiceEmail
       ? {
           hasSeparateInvoiceEmail: true,
-          ...(invoiceEmailAddress ? { invoiceEmailAddress } : {}),
+          ...(billingEmail ? { billingEmail, invoiceEmailAddress: billingEmail } : {}),
         }
       : {}),
     clientAddress: {
@@ -206,6 +230,7 @@ export function buildFinalizeShootPayload(task: FinalizeShootTask): FinalizeShoo
     },
     lineItems: buildTaskLineItems(task),
     taxRate: Number.isFinite(task.taxPercentage) ? task.taxPercentage : 19,
+    taxType: task.amountType === "Gross" ? "gross" : "net",
     skipInvoice: task.skipInvoice,
     localFolderName: task.localFolderName.trim(),
     ...(task.lexofficeContactId.trim() ? { lexofficeContactId: task.lexofficeContactId.trim() } : {}),

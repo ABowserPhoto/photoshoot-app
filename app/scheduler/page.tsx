@@ -13,6 +13,11 @@ import { publishToTikTok } from "@/app/actions/publish-tiktok";
 import SocialConnectionsModal from "@/app/components/SocialConnectionsModal";
 import type { SchedulerSocialProfileRow } from "@/lib/schedulerSocialProfile";
 import {
+  normalizeInstagramPostType,
+  validateMediaForPostType,
+  type InstagramPostType,
+} from "@/lib/instagramMedia";
+import {
   assertFutureScheduledAt,
   dateTimeLocalValueToDate,
   dateToDateTimeLocalValue,
@@ -41,9 +46,13 @@ type Slot = {
   id: string;
   fileUrl: string;
   scheduledAt: Date | null;
+  /** Manual override — auto "Calculate Schedule" leaves these alone. */
+  isCustomSchedule?: boolean;
   caption?: string;
+  postType?: InstagramPostType;
   status?: string | null;
   publishError?: string | null;
+  metaCreationId?: string | null;
 } | null;
 
 type SchedulingRules = {
@@ -84,8 +93,22 @@ type SocialPostRow = {
   caption: string | null;
   scheduled_at: string | null;
   absolute_index: number;
+  is_custom_schedule?: boolean | null;
+  post_type?: string | null;
+  meta_creation_id?: string | null;
   status?: string | null;
   publish_error?: string | null;
+};
+
+type ScheduleApiOutcome = {
+  postId: string;
+  status: string;
+  scheduledAt: string | null;
+  postType: InstagramPostType;
+  scheduleMode: "meta" | "local" | "none";
+  metaCreationId?: string | null;
+  metaScheduleError?: string | null;
+  message?: string;
 };
 
 type SocialProfileRow = SchedulerSocialProfileRow;
@@ -122,10 +145,12 @@ async function persistScheduleUpdates(
     scheduledAt: Date | null;
     absoluteIndex?: number;
     caption?: string | null;
+    isCustomSchedule?: boolean;
+    postType?: InstagramPostType;
   }>
-): Promise<void> {
+): Promise<ScheduleApiOutcome[]> {
   if (updates.length === 0) {
-    return;
+    return [];
   }
   const res = await fetch("/api/social/schedule", {
     method: "POST",
@@ -136,13 +161,21 @@ async function persistScheduleUpdates(
         scheduledAt: update.scheduledAt ? update.scheduledAt.toISOString() : null,
         absoluteIndex: update.absoluteIndex,
         caption: update.caption,
+        ...(update.isCustomSchedule !== undefined
+          ? { isCustomSchedule: update.isCustomSchedule }
+          : {}),
+        ...(update.postType !== undefined ? { postType: update.postType } : {}),
       })),
     }),
   });
-  const data = (await res.json().catch(() => null)) as { error?: string } | null;
+  const data = (await res.json().catch(() => null)) as {
+    error?: string;
+    outcomes?: ScheduleApiOutcome[];
+  } | null;
   if (!res.ok) {
     throw new Error(data?.error ?? "Failed to save schedule.");
   }
+  return Array.isArray(data?.outcomes) ? data.outcomes : [];
 }
 
 function bumpScheduleToFuture(scheduledAt: Date, rules: SchedulingRules, now = new Date()): Date {
@@ -274,8 +307,11 @@ function mapPostsToSlots(posts: SocialPostRow[]): Slot[] {
       fileUrl: post.file_url,
       caption: post.caption ?? "",
       scheduledAt: post.scheduled_at ? new Date(post.scheduled_at) : null,
+      isCustomSchedule: Boolean(post.is_custom_schedule),
+      postType: normalizeInstagramPostType(post.post_type),
       status: post.status ?? null,
       publishError: post.publish_error ?? null,
+      metaCreationId: post.meta_creation_id ?? null,
     };
   });
   return nextSlots;
@@ -284,7 +320,13 @@ function mapPostsToSlots(posts: SocialPostRow[]): Slot[] {
 function scheduleSlots(inputSlots: Slot[], rules: SchedulingRules): Slot[] {
   const validDays = rules.validDays;
   if (validDays.length === 0) {
-    return inputSlots.map((slot) => (slot ? { ...slot, scheduledAt: null } : null));
+    return inputSlots.map((slot) =>
+      slot
+        ? slot.isCustomSchedule
+          ? slot
+          : { ...slot, scheduledAt: null, isCustomSchedule: false }
+        : null
+    );
   }
 
   const startMinutes = toMinutes(rules.startTime);
@@ -339,8 +381,14 @@ function scheduleSlots(inputSlots: Slot[], rules: SchedulingRules): Slot[] {
       continue;
     }
 
+    // Preserve manually chosen times; still use them for spacing of later auto slots.
+    if (slot.isCustomSchedule && slot.scheduledAt) {
+      previousScheduled = slot.scheduledAt;
+      continue;
+    }
+
     if (targetIndex >= targetDays.length) {
-      next[i] = { ...slot, scheduledAt: null };
+      next[i] = { ...slot, scheduledAt: null, isCustomSchedule: false };
       continue;
     }
 
@@ -373,7 +421,7 @@ function scheduleSlots(inputSlots: Slot[], rules: SchedulingRules): Slot[] {
         }
 
         if (selectedTargetIndex >= targetDays.length) {
-          next[i] = { ...slot, scheduledAt: null };
+          next[i] = { ...slot, scheduledAt: null, isCustomSchedule: false };
           continue;
         }
 
@@ -384,7 +432,7 @@ function scheduleSlots(inputSlots: Slot[], rules: SchedulingRules): Slot[] {
     scheduledAt = bumpScheduleToFuture(scheduledAt, rules);
 
     previousScheduled = scheduledAt;
-    next[i] = { ...slot, scheduledAt };
+    next[i] = { ...slot, scheduledAt, isCustomSchedule: false };
     targetIndex = selectedTargetIndex + 1;
   }
 
@@ -403,7 +451,9 @@ export default function SchedulerPage() {
   const [draggingSlot, setDraggingSlot] = useState<number | null>(null);
   const [editingSlotIndex, setEditingSlotIndex] = useState<number | null>(null);
   const [captionDraft, setCaptionDraft] = useState("");
-  const [scheduledDraft, setScheduledDraft] = useState("");
+  const [postTypeDraft, setPostTypeDraft] = useState<InstagramPostType>("FEED");
+  const [useCustomSchedule, setUseCustomSchedule] = useState(false);
+  const [customScheduledAtDraft, setCustomScheduledAtDraft] = useState("");
   const [isSavingSchedule, setIsSavingSchedule] = useState(false);
   const [isGeneratingTags, setIsGeneratingTags] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
@@ -572,6 +622,8 @@ export default function SchedulerPage() {
       postId: string;
       scheduledAt: Date | null;
       absoluteIndex: number;
+      isCustomSchedule: boolean;
+      postType?: InstagramPostType;
     }> = [];
     slotsToSync.forEach((slot, index) => {
       if (!slot || slot.id.startsWith("temp-")) {
@@ -581,12 +633,34 @@ export default function SchedulerPage() {
         postId: slot.id,
         scheduledAt: slot.scheduledAt,
         absoluteIndex: index,
+        isCustomSchedule: Boolean(slot.isCustomSchedule),
+        postType: normalizeInstagramPostType(slot.postType),
       });
     });
     if (updates.length === 0) {
       return;
     }
-    await persistScheduleUpdates(updates);
+    const outcomes = await persistScheduleUpdates(updates);
+    if (outcomes.length === 0) {
+      return;
+    }
+    const byId = new Map(outcomes.map((o) => [o.postId, o]));
+    updateActiveData((data) => {
+      const next = data.slots.map((slot) => {
+        if (!slot) return slot;
+        const outcome = byId.get(slot.id);
+        if (!outcome) return slot;
+        return {
+          ...slot,
+          postType: outcome.postType,
+          status: outcome.status,
+          scheduledAt: outcome.scheduledAt ? new Date(outcome.scheduledAt) : null,
+          metaCreationId: outcome.metaCreationId ?? null,
+          publishError: outcome.metaScheduleError ?? null,
+        };
+      });
+      return { ...data, slots: next };
+    });
   };
 
   const updateRules = (updater: (currentRules: SchedulingRules) => SchedulingRules) => {
@@ -780,12 +854,19 @@ export default function SchedulerPage() {
   useEffect(() => {
     if (editingSlotIndex === null) {
       setCaptionDraft("");
-      setScheduledDraft("");
+      setPostTypeDraft("FEED");
+      setUseCustomSchedule(false);
+      setCustomScheduledAtDraft("");
       return;
     }
     const slot = slots[editingSlotIndex];
     setCaptionDraft(slot?.caption ?? "");
-    setScheduledDraft(slot?.scheduledAt ? dateToDateTimeLocalValue(slot.scheduledAt) : "");
+    setPostTypeDraft(normalizeInstagramPostType(slot?.postType));
+    const isCustom = Boolean(slot?.isCustomSchedule);
+    setUseCustomSchedule(isCustom);
+    setCustomScheduledAtDraft(
+      isCustom && slot?.scheduledAt ? dateToDateTimeLocalValue(slot.scheduledAt) : ""
+    );
   }, [editingSlotIndex, slots]);
 
   const calculateSchedule = () => {
@@ -838,11 +919,50 @@ export default function SchedulerPage() {
     if (editingSlotIndex === null || !editingSlot) {
       return;
     }
-    const nextScheduledAt = scheduledDraft.trim() ? dateTimeLocalValueToDate(scheduledDraft) : null;
-    const validationError = assertFutureScheduledAt(nextScheduledAt);
-    if (validationError) {
-      window.alert(validationError);
+
+    if (editingSlot.id.startsWith("temp-")) {
+      const message =
+        "This post is not saved yet. Upload/save the media first, then set the schedule.";
+      setPersistenceError(message);
+      window.alert(message);
       return;
+    }
+
+    const mediaError = validateMediaForPostType(postTypeDraft, editingSlot.fileUrl);
+    if (mediaError) {
+      setPersistenceError(mediaError);
+      window.alert(mediaError);
+      return;
+    }
+
+    let nextScheduledAt = editingSlot.scheduledAt;
+    let nextIsCustom = Boolean(editingSlot.isCustomSchedule);
+
+    if (useCustomSchedule) {
+      const parsed = customScheduledAtDraft.trim()
+        ? dateTimeLocalValueToDate(customScheduledAtDraft)
+        : null;
+      if (!parsed) {
+        const message = "Pick a custom date and time, or turn off the custom schedule toggle.";
+        setPersistenceError(message);
+        window.alert(message);
+        return;
+      }
+      const validationError = assertFutureScheduledAt(parsed);
+      if (validationError) {
+        console.error("[scheduler] Custom schedule validation failed:", validationError, {
+          draft: customScheduledAtDraft,
+          parsedIso: parsed.toISOString(),
+        });
+        setPersistenceError(validationError);
+        window.alert(validationError);
+        return;
+      }
+      nextScheduledAt = parsed;
+      nextIsCustom = true;
+    } else {
+      // Leave auto-generated time untouched; only clear the custom lock.
+      nextIsCustom = false;
     }
 
     updateActiveData((data) => {
@@ -857,36 +977,86 @@ export default function SchedulerPage() {
       nextSlots[editingSlotIndex] = {
         ...currentSlot,
         scheduledAt: nextScheduledAt,
+        isCustomSchedule: nextIsCustom,
+        postType: postTypeDraft,
         status: nextScheduledAt ? "scheduled" : "pending",
         publishError: null,
       };
       return { ...data, slots: nextSlots };
     });
 
-    if (!editingSlot.id.startsWith("temp-")) {
-      setIsSavingSchedule(true);
-      try {
-        await persistScheduleUpdates([
-          {
-            postId: editingSlot.id,
-            scheduledAt: nextScheduledAt,
-            absoluteIndex: editingSlotIndex,
-          },
-        ]);
-        setPersistenceError(null);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Could not save schedule.";
-        setPersistenceError(message);
-        window.alert(message);
-      } finally {
-        setIsSavingSchedule(false);
+    setIsSavingSchedule(true);
+    try {
+      const outcomes = await persistScheduleUpdates([
+        {
+          postId: editingSlot.id,
+          scheduledAt: nextScheduledAt,
+          absoluteIndex: editingSlotIndex,
+          isCustomSchedule: nextIsCustom,
+          postType: postTypeDraft,
+        },
+      ]);
+      const outcome = outcomes[0];
+      if (outcome) {
+        updateActiveData((data) => {
+          const next = [...data.slots];
+          const rowIndex = next.findIndex((row) => row?.id === editingSlot.id);
+          if (rowIndex >= 0 && next[rowIndex]) {
+            next[rowIndex] = {
+              ...next[rowIndex]!,
+              postType: outcome.postType,
+              status: outcome.status,
+              scheduledAt: outcome.scheduledAt ? new Date(outcome.scheduledAt) : null,
+              metaCreationId: outcome.metaCreationId ?? null,
+              publishError: outcome.metaScheduleError ?? null,
+            };
+          }
+          return { ...data, slots: next };
+        });
       }
+      setPersistenceError(null);
+      if (!nextScheduledAt) {
+        window.alert(
+          "No schedule time yet. Run “Calculate Schedule” for an auto time, or enable a custom time."
+        );
+      } else if (outcome?.scheduleMode === "meta") {
+        window.alert(
+          `Scheduled with Instagram for ${badgeFormatter.format(nextScheduledAt)}.\nThis will publish even if the local app is closed.`
+        );
+      } else {
+        const fallbackNote =
+          outcome?.message ??
+          "Using local worker fallback (publishes while the app/worker is running).";
+        window.alert(
+          `Schedule saved for ${badgeFormatter.format(nextScheduledAt)}.\n${fallbackNote}`
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not save schedule.";
+      console.error("[scheduler] Failed to persist schedule:", message, {
+        postId: editingSlot.id,
+        scheduledAt: nextScheduledAt?.toISOString() ?? null,
+        isCustomSchedule: nextIsCustom,
+        postType: postTypeDraft,
+      });
+      setPersistenceError(message);
+      window.alert(message);
+    } finally {
+      setIsSavingSchedule(false);
     }
   };
 
   const handleSaveCaption = () => {
     if (editingSlotIndex === null) {
       return;
+    }
+    if (editingSlot) {
+      const mediaError = validateMediaForPostType(postTypeDraft, editingSlot.fileUrl);
+      if (mediaError) {
+        setPersistenceError(mediaError);
+        window.alert(mediaError);
+        return;
+      }
     }
     updateActiveData((data) => {
       if (editingSlotIndex < 0 || editingSlotIndex >= data.slots.length) {
@@ -900,19 +1070,38 @@ export default function SchedulerPage() {
       nextSlots[editingSlotIndex] = {
         ...currentSlot,
         caption: captionDraft.trim(),
+        postType: postTypeDraft,
       };
       return {
         ...data,
         slots: nextSlots,
       };
     });
-    if (supabase && editingSlot && !editingSlot.id.startsWith("temp-")) {
-      void supabase
+    const client = supabase;
+    if (client && editingSlot && !editingSlot.id.startsWith("temp-")) {
+      const postId = editingSlot.id;
+      void client
         .from("social_posts")
-        .update({ caption: captionDraft.trim() || null })
-        .eq("id", editingSlot.id)
+        .update({
+          caption: captionDraft.trim() || null,
+          post_type: postTypeDraft,
+        })
+        .eq("id", postId)
         .then((result) => {
           if (result.error) {
+            // Older DBs without post_type.
+            if (/post_type|column|schema|Could not find/i.test(result.error.message)) {
+              void client
+                .from("social_posts")
+                .update({ caption: captionDraft.trim() || null })
+                .eq("id", postId)
+                .then((retry) => {
+                  if (retry.error) {
+                    setPersistenceError(`Could not save caption: ${retry.error.message}`);
+                  }
+                });
+              return;
+            }
             setPersistenceError(`Could not save caption: ${result.error.message}`);
           }
         });
@@ -1042,25 +1231,56 @@ export default function SchedulerPage() {
         return;
       }
 
-      const inserted = await supabase
-        .from("social_posts")
-        .insert({
-          profile_id: activeProfileId,
-          absolute_index: index,
-          file_url: publicUrl,
-          caption: null,
-          scheduled_at: scheduledAt ? scheduledAt.toISOString() : null,
-          status: scheduledAt ? "scheduled" : "pending",
-        })
-        .select("*")
-        .single();
+      let insertedRow: SocialPostRow | null = null;
+      {
+        const inserted = await supabase
+          .from("social_posts")
+          .insert({
+            profile_id: activeProfileId,
+            absolute_index: index,
+            file_url: publicUrl,
+            caption: null,
+            scheduled_at: scheduledAt ? scheduledAt.toISOString() : null,
+            status: scheduledAt ? "scheduled" : "pending",
+            is_custom_schedule: false,
+            post_type: "FEED",
+          })
+          .select("*")
+          .single();
 
-      if (inserted.error) {
-        setPersistenceError(`Could not create social post record: ${inserted.error.message}`);
-        return;
+        if (inserted.error) {
+          if (/post_type|column|schema|Could not find/i.test(inserted.error.message)) {
+            const retry = await supabase
+              .from("social_posts")
+              .insert({
+                profile_id: activeProfileId,
+                absolute_index: index,
+                file_url: publicUrl,
+                caption: null,
+                scheduled_at: scheduledAt ? scheduledAt.toISOString() : null,
+                status: scheduledAt ? "scheduled" : "pending",
+                is_custom_schedule: false,
+              })
+              .select("*")
+              .single();
+            if (retry.error || !retry.data) {
+              setPersistenceError(
+                `Could not create social post record: ${retry.error?.message ?? "Unknown error"}`
+              );
+              return;
+            }
+            insertedRow = retry.data as SocialPostRow;
+          } else {
+            setPersistenceError(`Could not create social post record: ${inserted.error.message}`);
+            return;
+          }
+        } else if (!inserted.data) {
+          setPersistenceError("Could not create social post record: empty response.");
+          return;
+        } else {
+          insertedRow = inserted.data as SocialPostRow;
+        }
       }
-
-      const insertedRow = inserted.data as SocialPostRow;
       updateActiveData((data) => {
         const next = [...data.slots];
         const current = next[index];
@@ -1072,8 +1292,11 @@ export default function SchedulerPage() {
           fileUrl: insertedRow.file_url,
           caption: insertedRow.caption ?? "",
           scheduledAt: insertedRow.scheduled_at ? new Date(insertedRow.scheduled_at) : current.scheduledAt,
+          isCustomSchedule: Boolean(insertedRow.is_custom_schedule),
+          postType: normalizeInstagramPostType(insertedRow.post_type),
           status: insertedRow.status ?? (insertedRow.scheduled_at ? "scheduled" : "pending"),
           publishError: insertedRow.publish_error ?? null,
+          metaCreationId: insertedRow.meta_creation_id ?? null,
         };
         return {
           ...data,
@@ -1118,22 +1341,35 @@ export default function SchedulerPage() {
       return;
     }
     if (!editingSlot?.fileUrl) {
-      window.alert("No image for this post.");
+      window.alert("No media for this post.");
       return;
     }
-    const imageUrl = editingSlot.fileUrl;
-    if (imageUrl.startsWith("blob:")) {
-      window.alert("Upload the image so it has a public URL before publishing to Instagram.");
+    const mediaUrl = editingSlot.fileUrl;
+    if (mediaUrl.startsWith("blob:")) {
+      window.alert("Upload the media so it has a public URL before publishing to Instagram.");
+      return;
+    }
+    const mediaError = validateMediaForPostType(postTypeDraft, mediaUrl);
+    if (mediaError) {
+      setPersistenceError(mediaError);
+      window.alert(mediaError);
       return;
     }
     setIsPublishing(true);
     try {
-      const result = await publishToInstagram(
-        activeProfile.ig_account_id.trim(),
-        activeProfile.access_token.trim(),
-        imageUrl,
-        captionDraft.trim(),
-      );
+      if (supabase && !editingSlot.id.startsWith("temp-")) {
+        await supabase
+          .from("social_posts")
+          .update({ post_type: postTypeDraft, caption: captionDraft.trim() || null })
+          .eq("id", editingSlot.id);
+      }
+      const result = await publishToInstagram({
+        igAccountId: activeProfile.ig_account_id.trim(),
+        accessToken: activeProfile.access_token.trim(),
+        mediaUrl,
+        caption: captionDraft.trim(),
+        postType: postTypeDraft,
+      });
       if (!result.ok) {
         if (!editingSlot.id.startsWith("temp-")) {
           await updateSchedulerPostPublishStatus(editingSlot.id, "failed", result.error);
@@ -1143,6 +1379,7 @@ export default function SchedulerPage() {
             if (rowIndex >= 0 && next[rowIndex]) {
               next[rowIndex] = {
                 ...next[rowIndex]!,
+                postType: postTypeDraft,
                 status: "failed",
                 publishError: result.error,
               };
@@ -1161,6 +1398,7 @@ export default function SchedulerPage() {
           if (rowIndex >= 0 && next[rowIndex]) {
             next[rowIndex] = {
               ...next[rowIndex]!,
+              postType: postTypeDraft,
               status: "published",
               publishError: null,
             };
@@ -1807,6 +2045,17 @@ export default function SchedulerPage() {
                           >
                             {getPlatformIcon("instagram", "h-3.5 w-3.5")}
                           </span>
+                        ) : slot.status === "scheduled_with_meta" ? (
+                          <span
+                            className="absolute right-2 top-2 z-10 rounded-full bg-emerald-900/80 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-200"
+                            title={
+                              slot.metaCreationId
+                                ? `Scheduled with Meta (creation_id ${slot.metaCreationId})`
+                                : "Scheduled with Instagram / Meta"
+                            }
+                          >
+                            Meta
+                          </span>
                         ) : slot.status === "failed" ? (
                           <span
                             className="absolute right-2 top-2 z-10 rounded-full bg-black/70 p-1"
@@ -1816,7 +2065,12 @@ export default function SchedulerPage() {
                           </span>
                         ) : null}
                         <span className="absolute bottom-2 left-2 right-2 rounded bg-black/70 px-2 py-0.5 text-[10px] font-medium leading-snug text-zinc-100">
-                          {slot.scheduledAt ? badgeFormatter.format(slot.scheduledAt) : "Pending"}
+                          {slot.postType && slot.postType !== "FEED"
+                            ? `${slot.postType === "REEL" ? "Reel" : "Story"} · `
+                            : ""}
+                          {slot.scheduledAt
+                            ? `${slot.isCustomSchedule ? "Custom · " : ""}${badgeFormatter.format(slot.scheduledAt)}`
+                            : "Pending"}
                         </span>
                       </>
                     ) : (
@@ -1840,24 +2094,59 @@ export default function SchedulerPage() {
                 <img src={editingSlot.fileUrl} alt="Post preview" className="h-full w-full object-cover" />
               </div>
               <p className="mt-3 text-xs text-zinc-400">
-                Scheduled:{" "}
+                {useCustomSchedule ? "Custom schedule: " : "Auto schedule: "}
                 {(() => {
-                  const parsed = scheduledDraft.trim()
-                    ? dateTimeLocalValueToDate(scheduledDraft)
-                    : editingSlot.scheduledAt;
-                  return parsed ? badgeFormatter.format(parsed) : "Pending";
+                  if (useCustomSchedule) {
+                    const parsed = customScheduledAtDraft.trim()
+                      ? dateTimeLocalValueToDate(customScheduledAtDraft)
+                      : null;
+                    return parsed ? badgeFormatter.format(parsed) : "Not set";
+                  }
+                  return editingSlot.scheduledAt
+                    ? badgeFormatter.format(editingSlot.scheduledAt)
+                    : "Pending — run Calculate Schedule";
                 })()}
               </p>
-              <label className="mt-3 block text-[11px] uppercase tracking-wide text-zinc-500">
-                Schedule date & time
+
+              <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-zinc-300">
                 <input
-                  type="datetime-local"
-                  value={scheduledDraft}
-                  min={minDateTimeLocalValue()}
-                  onChange={(event) => setScheduledDraft(event.target.value)}
-                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
+                  type="checkbox"
+                  checked={useCustomSchedule}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setUseCustomSchedule(enabled);
+                    if (enabled) {
+                      setCustomScheduledAtDraft(
+                        editingSlot.scheduledAt
+                          ? dateToDateTimeLocalValue(editingSlot.scheduledAt)
+                          : minDateTimeLocalValue()
+                      );
+                    } else {
+                      setCustomScheduledAtDraft("");
+                    }
+                  }}
+                  className="rounded border-zinc-600 bg-zinc-950"
                 />
+                Set custom post time (optional)
               </label>
+
+              {useCustomSchedule ? (
+                <label className="mt-2 block text-[11px] uppercase tracking-wide text-zinc-500">
+                  Custom date & time
+                  <input
+                    type="datetime-local"
+                    value={customScheduledAtDraft}
+                    min={minDateTimeLocalValue()}
+                    onChange={(event) => setCustomScheduledAtDraft(event.target.value)}
+                    className="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
+                  />
+                </label>
+              ) : (
+                <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+                  Leave this off to keep the auto-generated time from “Calculate Schedule”.
+                </p>
+              )}
+
               <button
                 type="button"
                 onClick={() => void handleSaveSchedule()}
@@ -1870,18 +2159,67 @@ export default function SchedulerPage() {
 
             <div className="flex min-h-[260px] flex-1 flex-col">
               <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-300">Post Details</h3>
+
+              <fieldset className="mb-3">
+                <legend className="mb-1.5 text-[11px] uppercase tracking-wide text-zinc-500">
+                  Instagram format
+                </legend>
+                <div className="flex flex-wrap gap-3 text-xs text-zinc-200">
+                  {(
+                    [
+                      { value: "FEED", label: "Grid Post" },
+                      { value: "REEL", label: "Reel" },
+                      { value: "STORY", label: "Story" },
+                    ] as const
+                  ).map((option) => (
+                    <label key={option.value} className="flex cursor-pointer items-center gap-1.5">
+                      <input
+                        type="radio"
+                        name="instagram-post-type"
+                        value={option.value}
+                        checked={postTypeDraft === option.value}
+                        onChange={() => setPostTypeDraft(option.value)}
+                        className="border-zinc-600 bg-zinc-950"
+                      />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
+                {(() => {
+                  const mediaError = validateMediaForPostType(postTypeDraft, editingSlot.fileUrl);
+                  if (!mediaError) {
+                    return (
+                      <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">
+                        {postTypeDraft === "REEL"
+                          ? "Reels require a public video URL (.mp4 / .mov)."
+                          : postTypeDraft === "STORY"
+                            ? "Stories accept an image or video URL."
+                            : "Grid posts expect an image URL."}
+                      </p>
+                    );
+                  }
+                  return (
+                    <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-relaxed text-red-400">
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+                      <span>{mediaError}</span>
+                    </p>
+                  );
+                })()}
+              </fieldset>
+
               <textarea
                 value={captionDraft}
                 onChange={(event) => setCaptionDraft(event.target.value)}
                 placeholder="Write your caption here..."
-                className="h-full min-h-[200px] flex-1 resize-none rounded-lg border border-white/10 bg-neutral-800 p-4 text-white placeholder-gray-500 outline-none focus:border-blue-500"
+                className="h-full min-h-[160px] flex-1 resize-none rounded-lg border border-white/10 bg-neutral-800 p-4 text-white placeholder-gray-500 outline-none focus:border-blue-500"
               />
               <div className="mt-2 flex items-center justify-between">
                 <button
                   type="button"
                   onClick={handleGenerateHashtags}
-                  disabled={isGeneratingTags}
+                  disabled={isGeneratingTags || postTypeDraft === "STORY"}
                   className="flex items-center gap-1 rounded-md bg-gradient-to-r from-purple-500 to-blue-500 px-3 py-1.5 text-xs text-white transition-all hover:from-purple-600 hover:to-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  title={postTypeDraft === "STORY" ? "Stories typically skip feed captions/hashtags" : undefined}
                 >
                   {isGeneratingTags ? "Generating..." : "✨ Generate Hashtags"}
                 </button>

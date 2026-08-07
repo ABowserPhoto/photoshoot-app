@@ -361,11 +361,22 @@ function HomeContent() {
     }, 0);
     const safeDiscount = Number.isFinite(Number(discount)) ? Number(discount) : 0;
     const safeTaxPercentage = Number.isFinite(Number(taxPercentage)) ? Number(taxPercentage) : 0;
-    const totalNet = Math.max(0, serviceSubtotal + productSubtotal - safeDiscount);
-    const totalTax = totalNet * (safeTaxPercentage / 100);
+    const taxRate = safeTaxPercentage / 100;
+    const adjusted = Math.max(0, serviceSubtotal + productSubtotal - safeDiscount);
+
+    if (amountType === "Gross") {
+      // Line prices are gross: reverse-calculate net and tax from the gross total.
+      const totalGross = adjusted;
+      const totalNet = taxRate > 0 ? totalGross / (1 + taxRate) : totalGross;
+      const totalTax = Math.max(0, totalGross - totalNet);
+      return { totalNet, totalTax, totalGross };
+    }
+
+    const totalNet = adjusted;
+    const totalTax = totalNet * taxRate;
     const totalGross = totalNet + totalTax;
     return { totalNet, totalTax, totalGross };
-  }, [services, products, discount, taxPercentage]);
+  }, [services, products, discount, taxPercentage, amountType]);
   const currencyFormatter = useMemo(
     () =>
       new Intl.NumberFormat("de-DE", {

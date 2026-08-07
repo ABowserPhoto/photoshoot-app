@@ -8,7 +8,7 @@ import {
 } from "@/lib/taskCompletionCelebration";
 import { countTodayCompletions } from "@/lib/kanbanDailyStreak";
 import DailyStreakBadge from "@/app/components/DailyStreakBadge";
-import { triggerPreviewEmail } from "@/app/actions/zapierActions";
+import { triggerPreviewEmail } from "@/app/actions/previewEmail";
 import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
@@ -1452,9 +1452,11 @@ export default function KanbanBoard({
       celebrateTaskCompletion();
       setCelebrationToast(buildRandomDailyCompletionMessage(todayCompletionCount));
     } else if (targetColumn === "preview-sent") {
-      const zapResult = await triggerPreviewEmail(String(dragged.task.id));
-      if (!zapResult.ok) {
-        setStatusMessage(zapResult.error ?? "Preview-E-Mail konnte nicht an Zapier gesendet werden.");
+      const previewResult = await triggerPreviewEmail(String(dragged.task.id));
+      if (!previewResult.ok) {
+        setStatusMessage(
+          previewResult.error ?? "Preview-E-Mail-Entwurf konnte nicht in Gmail erstellt werden."
+        );
       } else {
         setStatusMessage(null);
       }

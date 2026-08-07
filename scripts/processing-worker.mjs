@@ -55,6 +55,8 @@ const execFileAsync = promisify(execFile);
 const FOLDER_POLL_INTERVAL_MS = 15 * 1000;
 const PROCESSING_POLL_INTERVAL_MS = 5 * 60 * 1000;
 const PREVIEW_FALLBACK_SYNC_INTERVAL_MS = 4 * 60 * 1000;
+/** How often the local worker asks Next.js to publish due social_posts. */
+const SOCIAL_PUBLISH_POLL_INTERVAL_MS = readPositiveIntEnv("SOCIAL_PUBLISH_POLL_INTERVAL_MS", 60 * 1000);
 const LOCAL_PROCESS_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const SELECTS_DEBOUNCE_MS = readPositiveIntEnv("SELECTS_DEBOUNCE_MS", 8000);
 const SELECTS_STABILITY_WAIT_MS = readPositiveIntEnv("SELECTS_STABILITY_WAIT_MS", 2500);
@@ -1086,6 +1088,26 @@ function getMergePriorityAt(task) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/** HDR merge/filter pipeline is only for Immobilien (incl. legacy "Real Estate"). */
+function requiresMergePipeline(photoshootType) {
+  const normalized = String(photoshootType ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized === "immobilien" || normalized === "real estate";
+}
+
+function getGallerySelectionObject(gallerySelection) {
+  return gallerySelection && typeof gallerySelection === "object" ? gallerySelection : {};
+}
+
+function selectionAlreadySynced(gallerySelection) {
+  const payload = getGallerySelectionObject(gallerySelection);
+  if (payload.merge_bypassed === true) {
+    return true;
+  }
+  return typeof payload.synced_at === "string" && payload.synced_at.trim().length > 0;
+}
+
 function sortTasksByMergePriority(tasks) {
   return [...tasks].sort((left, right) => {
     const priorityDelta = getMergePriorityAt(right) - getMergePriorityAt(left);
@@ -1313,6 +1335,59 @@ async function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) 
     throw new Error("No selected RAW files were copied to 2_Selects.");
   }
   return { copiedFiles, selectedChunkIndices };
+}
+
+async function publishDueSocialPostsLocally() {
+  const localOrigin = process.env.LOCAL_APP_ORIGIN?.trim() || "http://127.0.0.1:3000";
+  const workerSecret = process.env.LOCAL_WORKER_SECRET?.trim();
+  if (!workerSecret) {
+    console.warn(
+      "[worker] Skipping social publish poll: LOCAL_WORKER_SECRET is not set."
+    );
+    return;
+  }
+
+  const url = `${localOrigin.replace(/\/$/, "")}/api/worker/publish-due-social`;
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-worker-secret": workerSecret,
+        },
+        body: "{}",
+      },
+      60_000
+    );
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = null;
+    }
+    if (!response.ok) {
+      const message =
+        payload?.error ||
+        (text.trim() ? text.trim().slice(0, 300) : null) ||
+        `HTTP ${response.status}`;
+      console.error(`[worker] Social publish poll failed: ${message}`);
+      return;
+    }
+    const processed = Number(payload?.processed) || 0;
+    if (processed > 0) {
+      console.info(
+        `[worker] Social publish poll: processed=${processed} successful=${payload?.successful ?? 0} failed=${payload?.failed ?? 0}`
+      );
+    }
+  } catch (error) {
+    console.error(
+      "[worker] Social publish poll request failed:",
+      toFetchErrorMessage(error, "social publish poll")
+    );
+  }
 }
 
 async function processTaskLocally(task) {
@@ -1927,7 +2002,7 @@ async function processSelectionAvailable(supabase) {
 
   const { data, error } = await supabase
     .from("tasks")
-    .select("id, local_folder_name, gallery_selection, status")
+    .select("id, local_folder_name, gallery_selection, status, photoshoot_type")
     .eq("status", SELECTION_AVAILABLE_STATUS)
     .order("id", { ascending: true })
     .limit(20);
@@ -1951,6 +2026,12 @@ async function processSelectionAvailable(supabase) {
       continue;
     }
 
+    const needsMerge = requiresMergePipeline(task.photoshoot_type);
+    // Non-Immobilien tasks stay on Selection Available after copy; skip once synced.
+    if (!needsMerge && selectionAlreadySynced(task.gallery_selection)) {
+      continue;
+    }
+
     const claimed = await claimTaskForStatus(
       supabase,
       taskId,
@@ -1966,28 +2047,50 @@ async function processSelectionAvailable(supabase) {
 
     try {
       const syncResult = await syncSelectedRawFilesToSelects(localFolderName, task.gallery_selection);
-      await withRetry(`set pending_processing after selection sync for task ${taskId}`, async () => {
-        const { error: updateError } = await supabase
-          .from("tasks")
-          .update({
-            status: CLAIM_STATUS,
-            gallery_selection: {
-              ...(task.gallery_selection && typeof task.gallery_selection === "object"
-                ? task.gallery_selection
-                : {}),
-              synced_at: new Date().toISOString(),
-              synced_selected_files: syncResult.copiedFiles,
-            },
-          })
-          .eq("id", taskId);
-        if (updateError) {
-          throw new Error(updateError.message);
-        }
-      });
+      const nextGallerySelection = {
+        ...getGallerySelectionObject(task.gallery_selection),
+        synced_at: new Date().toISOString(),
+        synced_selected_files: syncResult.copiedFiles,
+      };
 
-      console.info(
-        `[worker] Synced ${syncResult.copiedFiles.length} selected RAW file(s) into 2_Selects for task ${taskId}.`
-      );
+      if (needsMerge) {
+        await withRetry(`set pending_processing after selection sync for task ${taskId}`, async () => {
+          const { error: updateError } = await supabase
+            .from("tasks")
+            .update({
+              status: CLAIM_STATUS,
+              gallery_selection: nextGallerySelection,
+            })
+            .eq("id", taskId);
+          if (updateError) {
+            throw new Error(updateError.message);
+          }
+        });
+        console.info(
+          `[worker] Synced ${syncResult.copiedFiles.length} selected RAW file(s) into 2_Selects for task ${taskId}; queued merge (${task.photoshoot_type || "Immobilien"}).`
+        );
+      } else {
+        nextGallerySelection.merge_bypassed = true;
+        nextGallerySelection.merge_bypassed_reason = "non_immobilien_photoshoot_type";
+        await withRetry(
+          `restore Selection Available after selection copy (merge bypassed) for task ${taskId}`,
+          async () => {
+            const { error: updateError } = await supabase
+              .from("tasks")
+              .update({
+                status: SELECTION_AVAILABLE_STATUS,
+                gallery_selection: nextGallerySelection,
+              })
+              .eq("id", taskId);
+            if (updateError) {
+              throw new Error(updateError.message);
+            }
+          }
+        );
+        console.info(
+          `[worker] Copied ${syncResult.copiedFiles.length} selected file(s) into 2_Selects for task ${taskId}; merge bypassed for photoshoot_type="${task.photoshoot_type || ""}". Status left as ${SELECTION_AVAILABLE_STATUS}.`
+        );
+      }
     } catch (err) {
       console.error(`[worker] Selection sync failed for task ${taskId}:`, err instanceof Error ? err.message : err);
       try {
@@ -2087,6 +2190,24 @@ async function main() {
       console.error("[worker] Preview fallback sync failed:", err instanceof Error ? err.message : err);
     });
   }, PREVIEW_FALLBACK_SYNC_INTERVAL_MS);
+
+  console.info(
+    `[worker] Social publish poll enabled every ${SOCIAL_PUBLISH_POLL_INTERVAL_MS}ms via /api/worker/publish-due-social`
+  );
+  await publishDueSocialPostsLocally().catch((err) => {
+    console.error(
+      "[worker] Initial social publish poll failed:",
+      err instanceof Error ? err.message : err
+    );
+  });
+  setInterval(() => {
+    void publishDueSocialPostsLocally().catch((err) => {
+      console.error(
+        "[worker] Social publish poll failed:",
+        err instanceof Error ? err.message : err
+      );
+    });
+  }, SOCIAL_PUBLISH_POLL_INTERVAL_MS);
 }
 
 process.on("unhandledRejection", (reason) => {

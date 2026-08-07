@@ -1,4 +1,5 @@
 export const PAST_SCHEDULE_ERROR = "Cannot schedule posts in the past.";
+export const INVALID_SCHEDULE_ERROR = "Invalid scheduled date.";
 
 export function formatScheduledDateTime(date: Date): string {
   const hours = `${date.getHours()}`.padStart(2, "0");
@@ -22,7 +23,7 @@ export function assertFutureScheduledAt(scheduledAt: Date | null | undefined): s
     return null;
   }
   if (Number.isNaN(scheduledAt.getTime())) {
-    return "Invalid scheduled date.";
+    return INVALID_SCHEDULE_ERROR;
   }
   if (isScheduledInPast(scheduledAt)) {
     return PAST_SCHEDULE_ERROR;
@@ -54,14 +55,28 @@ export function dateToDateTimeLocalValue(date: Date): string {
   return minDateTimeLocalValue(date);
 }
 
+/**
+ * Parse `<input type="datetime-local">` values as local wall-clock time.
+ * Avoids `new Date("YYYY-MM-DDTHH:mm")` engine quirks (UTC vs local).
+ */
 export function dateTimeLocalValueToDate(value: string): Date | null {
   const trimmed = value.trim();
   if (!trimmed) {
     return null;
   }
-  const parsed = new Date(trimmed);
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
+  const match = trimmed.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?$/
+  );
+  if (!match) {
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
-  return parsed;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6] ?? "0");
+  const parsed = new Date(year, month - 1, day, hour, minute, second, 0);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }

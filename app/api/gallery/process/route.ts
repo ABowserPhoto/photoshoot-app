@@ -59,11 +59,27 @@ export async function POST(request: Request) {
       const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
       if (supabaseUrl && supabaseAnonKey) {
         const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+        let photoshootType = "";
+        const { data: taskRow } = await supabase
+          .from("tasks")
+          .select("photoshoot_type")
+          .eq("id", shootId)
+          .maybeSingle();
+        if (typeof taskRow?.photoshoot_type === "string") {
+          photoshootType = taskRow.photoshoot_type.trim();
+        }
+        const normalizedType = photoshootType.toLowerCase();
+        const requiresMerge =
+          normalizedType === "immobilien" || normalizedType === "real estate";
+
         const selectionPayload = {
           selected_chunk_indices: selectedIndices,
           selected_files: selectedFiles,
           bracket_size: bracketSize,
           local_folder_name: localFolderName,
+          photoshoot_type: photoshootType,
+          requires_merge: requiresMerge,
           submitted_at: new Date().toISOString(),
         };
 
@@ -101,7 +117,8 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      message: "Selection saved. Local worker will sync selected RAW files into 2_Selects.",
+      message:
+        "Selection saved. Local worker will copy selected files into 2_Selects (Immobilien continues to merge; other types stay on Selection Available).",
       bracketSize,
       selectedChunkIndices: selectedIndices,
       selectedFilesCount: selectedFiles.length,

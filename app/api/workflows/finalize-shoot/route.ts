@@ -54,9 +54,16 @@ type FinalizeShootBody = {
   taskId?: string;
   shootName?: string;
   invoiceName?: string;
+  billingEntityName?: string;
   clientName?: string;
   contactFirstName?: string;
+  /** Preferred: contact person email for gallery delivery. */
+  contactEmail?: string;
+  /** @deprecated Prefer contactEmail. */
   clientEmail?: string;
+  /** Preferred: gallery CC list. */
+  ccEmails?: string;
+  /** @deprecated Prefer ccEmails. */
   clientEmailCc?: string;
   photoshootType?: string;
   shootLocation?: string;
@@ -65,9 +72,13 @@ type FinalizeShootBody = {
   addressSupplement?: string;
   galleryLink?: string;
   hasSeparateInvoiceEmail?: boolean | string | number | null;
+  /** Preferred: billing entity email for separate invoice draft. */
+  billingEmail?: string;
+  /** @deprecated Prefer billingEmail. */
   invoiceEmailAddress?: string;
   lineItems?: FinalizeShootLineItemInput[];
   taxRate?: number;
+  taxType?: "net" | "gross" | string;
   lexofficeContactId?: string;
   skipInvoice?: boolean | string | number | null;
   localFolderName?: string;
@@ -173,12 +184,20 @@ function parseLineItems(
 function parseRequestBody(body: FinalizeShootBody) {
   const taskId = typeof body.taskId === "string" ? body.taskId.trim() : "";
   const shootName = typeof body.shootName === "string" ? body.shootName.trim() : "";
-  const invoiceName = typeof body.invoiceName === "string" ? body.invoiceName.trim() : "";
+  const billingEntityName =
+    (typeof body.billingEntityName === "string" ? body.billingEntityName.trim() : "") ||
+    (typeof body.invoiceName === "string" ? body.invoiceName.trim() : "");
+  const invoiceName = billingEntityName;
   const clientName = typeof body.clientName === "string" ? body.clientName.trim() : "";
   const contactFirstName =
     typeof body.contactFirstName === "string" ? body.contactFirstName.trim() : "";
-  const clientEmail = typeof body.clientEmail === "string" ? body.clientEmail.trim() : "";
-  const clientEmailCc = typeof body.clientEmailCc === "string" ? body.clientEmailCc.trim() : "";
+  // Gallery/deliverables always go to the contact person — never the billing inbox.
+  const contactEmail =
+    (typeof body.contactEmail === "string" ? body.contactEmail.trim() : "") ||
+    (typeof body.clientEmail === "string" ? body.clientEmail.trim() : "");
+  const ccEmails =
+    (typeof body.ccEmails === "string" ? body.ccEmails.trim() : "") ||
+    (typeof body.clientEmailCc === "string" ? body.clientEmailCc.trim() : "");
   const photoshootType = typeof body.photoshootType === "string" ? body.photoshootType.trim() : "";
   const shootLocation = typeof body.shootLocation === "string" ? body.shootLocation.trim() : "";
   const photoshootDate = typeof body.photoshootDate === "string" ? body.photoshootDate.trim() : "";
@@ -186,9 +205,15 @@ function parseRequestBody(body: FinalizeShootBody) {
     typeof body.addressSupplement === "string" ? body.addressSupplement.trim() : "";
   const galleryLink = typeof body.galleryLink === "string" ? body.galleryLink.trim() : "";
   const hasSeparateInvoiceEmail = parseTruthyFlag(body.hasSeparateInvoiceEmail);
-  const invoiceEmailAddress =
-    typeof body.invoiceEmailAddress === "string" ? body.invoiceEmailAddress.trim() : "";
+  // Separate invoice draft goes only to the billing entity address.
+  const billingEmail =
+    (typeof body.billingEmail === "string" ? body.billingEmail.trim() : "") ||
+    (typeof body.invoiceEmailAddress === "string" ? body.invoiceEmailAddress.trim() : "");
   const taxRate = Number.isFinite(Number(body.taxRate)) ? Number(body.taxRate) : DEFAULT_TAX_RATE;
+  const taxType =
+    typeof body.taxType === "string" && body.taxType.trim().toLowerCase() === "gross"
+      ? ("gross" as const)
+      : ("net" as const);
   const lexofficeContactId =
     typeof body.lexofficeContactId === "string" ? body.lexofficeContactId.trim() : "";
   const skipInvoice = parseSkipInvoice(body.skipInvoice);
@@ -205,23 +230,26 @@ function parseRequestBody(body: FinalizeShootBody) {
     throw new Error("localFolderName is required.");
   }
   if (!skipInvoice && !invoiceName) {
-    throw new Error("invoiceName is required.");
+    throw new Error("invoiceName / billingEntityName is required.");
   }
-  if (!clientEmail) {
-    throw new Error("clientEmail is required.");
+  if (!contactEmail) {
+    throw new Error("contactEmail is required for the gallery delivery draft.");
   }
-  if (hasSeparateInvoiceEmail && !skipInvoice && !invoiceEmailAddress) {
-    throw new Error("invoiceEmailAddress is required when hasSeparateInvoiceEmail is true.");
+  if (hasSeparateInvoiceEmail && !skipInvoice && !billingEmail) {
+    throw new Error("billingEmail is required when hasSeparateInvoiceEmail is true.");
   }
 
   return {
     taskId,
     shootName,
     invoiceName,
+    billingEntityName: billingEntityName || invoiceName,
     clientName,
     contactFirstName,
-    clientEmail,
-    clientEmailCc,
+    contactEmail,
+    clientEmail: contactEmail,
+    ccEmails,
+    clientEmailCc: ccEmails,
     photoshootType,
     shootLocation,
     photoshootDate,
@@ -229,9 +257,11 @@ function parseRequestBody(body: FinalizeShootBody) {
     addressSupplement,
     galleryLink,
     hasSeparateInvoiceEmail,
-    invoiceEmailAddress,
+    billingEmail,
+    invoiceEmailAddress: billingEmail,
     lineItems: parseLineItems(body.lineItems, taxRate, shootName),
     taxRate,
+    taxType,
     lexofficeContactId,
     skipInvoice,
     localFolderName,
@@ -327,14 +357,15 @@ export async function POST(request: Request) {
       console.info(`[finalize-shoot] Step 2: Creating Lexoffice invoice for task ${input.taskId}`);
       const galleryRemark = `Foto-Galerie / Photo gallery:\n${effectiveGalleryLink}`;
 
+      // Lexoffice contact email: billing inbox when split, otherwise contact person.
       const lexofficeEmail =
-        input.hasSeparateInvoiceEmail && input.invoiceEmailAddress
-          ? input.invoiceEmailAddress
-          : input.clientEmail;
+        input.hasSeparateInvoiceEmail && input.billingEmail
+          ? input.billingEmail
+          : input.contactEmail;
 
       invoice = await createLexofficeInvoice({
         client: {
-          invoiceName: input.invoiceName,
+          invoiceName: input.billingEntityName || input.invoiceName,
           email: lexofficeEmail,
           contactPersonName: input.clientName || undefined,
           addressSupplement: input.addressSupplement || undefined,
@@ -342,7 +373,7 @@ export async function POST(request: Request) {
           ...(input.lexofficeContactId ? { contactId: input.lexofficeContactId } : {}),
         },
         lineItems: input.lineItems,
-        taxType: "net",
+        taxType: input.taxType,
         finalize: true,
         introduction: `Rechnung für ${input.shootName}`,
         remark: galleryRemark,
@@ -362,18 +393,20 @@ export async function POST(request: Request) {
     const splitInvoiceEmail =
       !input.skipInvoice &&
       input.hasSeparateInvoiceEmail &&
-      Boolean(input.invoiceEmailAddress) &&
+      Boolean(input.billingEmail) &&
       Boolean(pdfBuffer);
 
     currentStep = "gmail-create-draft";
     console.info(
       `[finalize-shoot] Creating Gmail draft(s) for task ${input.taskId}${
-        splitInvoiceEmail ? " (gallery + separate invoice)" : ""
+        splitInvoiceEmail
+          ? ` (gallery→${input.contactEmail}; invoice→${input.billingEmail})`
+          : ` (gallery→${input.contactEmail})`
       }`
     );
     const subject = buildFinalizeShootEmailSubject({
       photoshootType: input.photoshootType,
-      companyName: input.invoiceName,
+      companyName: input.billingEntityName || input.invoiceName,
       shootLocation: input.shootLocation,
       shootName: input.shootName,
     });
@@ -381,13 +414,15 @@ export async function POST(request: Request) {
       googleDriveLink,
       // When invoice goes to a separate address, strip invoice wording/attachment from gallery mail.
       includeInvoiceNote: !input.skipInvoice && !splitInvoiceEmail,
+      photoshootType: input.photoshootType,
     });
     const plainTextFallback = buildFinalizeShootEmailPlainText({
       googleDriveLink,
       includeInvoiceNote: !input.skipInvoice && !splitInvoiceEmail,
     });
+    // Gallery / deliverables → contact person (+ CC). Never the billing inbox.
     const gmailDraft = await createGmailDraft(
-      input.clientEmail,
+      input.contactEmail,
       subject,
       htmlBody,
       splitInvoiceEmail ? undefined : pdfBuffer,
@@ -398,35 +433,39 @@ export async function POST(request: Request) {
           : undefined,
       {
         plainTextFallback,
-        ...(input.clientEmailCc ? { cc: input.clientEmailCc } : {}),
+        ...(input.ccEmails ? { cc: input.ccEmails } : {}),
       }
     );
 
     let invoiceGmailDraftId: string | null = null;
-    if (splitInvoiceEmail && pdfBuffer) {
+    if (splitInvoiceEmail && pdfBuffer && input.billingEmail) {
       currentStep = "gmail-create-invoice-draft";
       const invoiceNumber = invoice?.voucherNumber?.trim() || invoice?.id || "Rechnung";
+      const billingEntityName = input.billingEntityName || input.invoiceName || "Kunde";
+      const shootLocation = input.shootLocation?.trim() || "";
       const invoiceSubject = buildSeparateInvoiceEmailSubject({
-        clientName: input.invoiceName || input.clientName,
+        billingEntityName,
         invoiceNumber,
+        shootLocation,
         photoshootDate: input.photoshootDate,
       });
       const invoiceHtml = buildSeparateInvoiceEmailHtml({
-        contactFirstName: input.contactFirstName || input.clientName.split(/\s+/).filter(Boolean)[0],
-        contactName: input.clientName,
+        billingEntityName,
         invoiceNumber,
+        shootLocation,
         photoshootDate: input.photoshootDate,
         invoiceViewUrl: invoice?.invoiceViewUrl,
       });
       const invoicePlain = buildSeparateInvoiceEmailPlainText({
-        contactFirstName: input.contactFirstName || input.clientName.split(/\s+/).filter(Boolean)[0],
-        contactName: input.clientName,
+        billingEntityName,
         invoiceNumber,
+        shootLocation,
         photoshootDate: input.photoshootDate,
         invoiceViewUrl: invoice?.invoiceViewUrl,
       });
+      // Invoice → billing entity email; greeting uses billing entity name (not contact person).
       const invoiceDraft = await createGmailDraft(
-        input.invoiceEmailAddress,
+        input.billingEmail,
         invoiceSubject,
         invoiceHtml,
         pdfBuffer,

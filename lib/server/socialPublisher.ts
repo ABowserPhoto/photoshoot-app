@@ -4,13 +4,16 @@
  * Used by both:
  *  - The manual "Publish Now" button in app/scheduler/page.tsx
  *  - The cloud cron job at app/api/cron/publish-social/route.ts
+ *  - The local worker at app/api/worker/publish-due-social/route.ts
  *
- * Keeps all Meta Graph API interaction in one place so changes propagate everywhere.
+ * Posts with status `scheduled_with_meta` are owned by Instagram/Meta and are
+ * never picked up by the local/cron worker.
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import { publishToInstagram } from "@/app/actions/publish-instagram";
+import { normalizeInstagramPostType, type InstagramPostType } from "@/lib/instagramMedia";
 
 const GRAPH_VERSION = "v19.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
@@ -26,6 +29,7 @@ export type DuePost = {
   file_url: string;
   caption: string | null;
   scheduled_at: string;
+  post_type?: string | null;
 };
 
 export type PostPublishOutcome =
@@ -59,24 +63,43 @@ export function makeServiceSupabase(): SupabaseClient | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns all social_posts with status = 'scheduled' whose scheduled_at is
- * in the past or now, across all profiles.
+ * Returns social_posts with status = 'scheduled' whose scheduled_at is due.
+ * Intentionally excludes `scheduled_with_meta` (Meta owns those).
  */
 export async function fetchDuePosts(supabase: SupabaseClient): Promise<DuePost[]> {
   const now = new Date().toISOString();
 
   const { data, error } = await supabase
     .from("social_posts")
-    .select("id, profile_id, file_url, caption, scheduled_at")
+    .select("id, profile_id, file_url, caption, scheduled_at, post_type")
     .eq("status", "scheduled")
     .lte("scheduled_at", now)
     .order("scheduled_at", { ascending: true });
 
   if (error) {
+    // Older DBs without post_type: retry without that column.
+    if (/post_type|column|schema|Could not find/i.test(error.message ?? "")) {
+      const retry = await supabase
+        .from("social_posts")
+        .select("id, profile_id, file_url, caption, scheduled_at")
+        .eq("status", "scheduled")
+        .lte("scheduled_at", now)
+        .order("scheduled_at", { ascending: true });
+      if (retry.error) {
+        console.error("[socialPublisher] Failed to fetch due posts:", retry.error.message, { now });
+        throw new Error(`Failed to fetch due posts: ${retry.error.message}`);
+      }
+      const due = (retry.data ?? []) as DuePost[];
+      console.info(`[socialPublisher] Due posts at ${now}: ${due.length} (without post_type)`);
+      return due;
+    }
+    console.error("[socialPublisher] Failed to fetch due posts:", error.message, { now });
     throw new Error(`Failed to fetch due posts: ${error.message}`);
   }
 
-  return (data ?? []) as DuePost[];
+  const due = (data ?? []) as DuePost[];
+  console.info(`[socialPublisher] Due posts at ${now}: ${due.length}`);
+  return due;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +139,7 @@ type ProfileCredentials = {
   accessToken: string;
 };
 
-async function getProfileCredentials(
+export async function getProfileInstagramCredentials(
   supabase: SupabaseClient,
   profileId: string
 ): Promise<ProfileCredentials | null> {
@@ -152,24 +175,26 @@ async function publishSinglePost(
 ): Promise<PostPublishOutcome> {
   const fileUrl = post.file_url?.trim() ?? "";
   if (!fileUrl || fileUrl.startsWith("blob:")) {
-    const error = "Post has no public image URL.";
+    const error = "Post has no public media URL.";
     await markFailed(supabase, post.id, error);
     return { postId: post.id, status: "failed", error };
   }
 
-  const credentials = await getProfileCredentials(supabase, post.profile_id);
+  const credentials = await getProfileInstagramCredentials(supabase, post.profile_id);
   if (!credentials) {
     const error = "Profile has no Instagram credentials configured.";
     await markFailed(supabase, post.id, error);
     return { postId: post.id, status: "failed", error };
   }
 
-  const result = await publishToInstagram(
-    credentials.igAccountId,
-    credentials.accessToken,
-    fileUrl,
-    post.caption?.trim() ?? ""
-  );
+  const postType: InstagramPostType = normalizeInstagramPostType(post.post_type);
+  const result = await publishToInstagram({
+    igAccountId: credentials.igAccountId,
+    accessToken: credentials.accessToken,
+    mediaUrl: fileUrl,
+    caption: post.caption?.trim() ?? "",
+    postType,
+  });
 
   if (!result.ok) {
     await markFailed(supabase, post.id, result.error);
@@ -198,7 +223,7 @@ export async function publishDuePosts(
 
   for (const post of duePosts) {
     console.info(
-      `[socialPublisher] Publishing post ${post.id} (profile ${post.profile_id}) scheduled at ${post.scheduled_at}`
+      `[socialPublisher] Publishing post ${post.id} (profile ${post.profile_id}) type=${post.post_type ?? "FEED"} scheduled at ${post.scheduled_at}`
     );
     const outcome = await publishSinglePost(supabase, post);
     outcomes.push(outcome);
