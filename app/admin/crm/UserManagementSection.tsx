@@ -1,7 +1,9 @@
 "use client";
 
-import { Key, Link2, Loader2, Unlink } from "lucide-react";
+import { Archive, ArchiveRestore, Key, Link2, Loader2, Unlink } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+import { archiveUser, unarchiveUser } from "@/app/actions/users";
 
 export type CrmUser = {
   id: string;
@@ -12,6 +14,7 @@ export type CrmUser = {
   role: string;
   roleKey: "admin" | "staff";
   jibblePersonId: string | null;
+  isArchived: boolean;
 };
 
 type JibblePerson = {
@@ -68,6 +71,7 @@ export default function UserManagementSection({ active, onToast, onError }: User
   const [jibbleLinkingUserId, setJibbleLinkingUserId] = useState<string | null>(null);
   const [jibbleSaving, setJibbleSaving] = useState<string | null>(null); // userId being saved
   const [jibbleDropdownUserId, setJibbleDropdownUserId] = useState<string | null>(null);
+  const [archivingUserId, setArchivingUserId] = useState<string | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const loadUsers = useCallback(async () => {
@@ -81,7 +85,12 @@ export default function UserManagementSection({ active, onToast, onError }: User
       if (!response.ok) {
         throw new Error(json?.error ?? `Failed to load users (${response.status})`);
       }
-      setUsers(json?.users ?? []);
+      setUsers(
+        (json?.users ?? []).map((user) => ({
+          ...user,
+          isArchived: Boolean(user.isArchived),
+        }))
+      );
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to load users.");
       setUsers([]);
@@ -293,6 +302,47 @@ export default function UserManagementSection({ active, onToast, onError }: User
     }
   };
 
+  const handleToggleArchive = async (user: CrmUser) => {
+    const label = user.name || user.email || "this user";
+    if (user.isArchived) {
+      if (!window.confirm(`Unarchive ${label}? They will regain login access and appear in assignee lists again.`)) {
+        return;
+      }
+    } else if (
+      !window.confirm(
+        `Archive ${label}? Their history stays intact, but they will lose login access and disappear from active assignee lists.`
+      )
+    ) {
+      return;
+    }
+
+    setArchivingUserId(user.id);
+    onError(null);
+    try {
+      const result = user.isArchived
+        ? await unarchiveUser(user.id)
+        : await archiveUser(user.id);
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+      setUsers((prev) =>
+        prev
+          .map((u) => (u.id === user.id ? { ...u, isArchived: result.isArchived } : u))
+          .sort((a, b) => {
+            if (a.isArchived !== b.isArchived) {
+              return a.isArchived ? 1 : -1;
+            }
+            return a.email.localeCompare(b.email, "en");
+          })
+      );
+      onToast(result.isArchived ? `${label} archived.` : `${label} restored.`);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to update archive status.");
+    } finally {
+      setArchivingUserId(null);
+    }
+  };
+
   return (
     <>
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 sm:p-6">
@@ -300,7 +350,7 @@ export default function UserManagementSection({ active, onToast, onError }: User
           <div>
             <h2 className="text-lg font-semibold text-white">User management</h2>
             <p className="mt-1 text-sm text-zinc-400">
-              Create accounts, assign roles, and link employees to their Jibble time-tracking profile.
+              Create accounts, assign roles, link Jibble profiles, and archive former employees without deleting history.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -367,8 +417,20 @@ export default function UserManagementSection({ active, onToast, onError }: User
                   const isDropdownOpenFor = jibbleDropdownUserId === user.id;
 
                   return (
-                    <tr key={user.id} className="hover:bg-zinc-950/40">
-                      <td className="px-4 py-3 font-medium text-zinc-100">{user.name || "—"}</td>
+                    <tr
+                      key={user.id}
+                      className={`hover:bg-zinc-950/40 ${user.isArchived ? "opacity-70" : ""}`}
+                    >
+                      <td className="px-4 py-3 font-medium text-zinc-100">
+                        <span className="inline-flex flex-wrap items-center gap-2">
+                          {user.name || "—"}
+                          {user.isArchived ? (
+                            <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-300 ring-1 ring-zinc-600">
+                              Archived
+                            </span>
+                          ) : null}
+                        </span>
+                      </td>
                       <td className="px-4 py-3 text-zinc-300">{user.email || "—"}</td>
                       <td className="px-4 py-3 text-zinc-300">{user.role}</td>
                       <td className="px-4 py-3 text-zinc-300">{user.createdAtLabel}</td>
@@ -451,21 +513,45 @@ export default function UserManagementSection({ active, onToast, onError }: User
                       {/* Actions cell */}
                       <td className="px-4 py-3 text-right">
                         <div className="inline-flex items-center gap-2">
+                          {!user.isArchived ? (
+                            <button
+                              type="button"
+                              onClick={() => openResetPasswordModal(user)}
+                              title="Reset Password"
+                              className="inline-flex items-center rounded-lg border border-zinc-600 p-1.5 text-zinc-200 transition hover:bg-zinc-800"
+                            >
+                              <Key className="h-4 w-4" aria-hidden="true" />
+                              <span className="sr-only">Reset Password</span>
+                            </button>
+                          ) : null}
+                          {!user.isArchived ? (
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(user)}
+                              className="inline-flex items-center rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-800"
+                            >
+                              Edit
+                            </button>
+                          ) : null}
                           <button
                             type="button"
-                            onClick={() => openResetPasswordModal(user)}
-                            title="Reset Password"
-                            className="inline-flex items-center rounded-lg border border-zinc-600 p-1.5 text-zinc-200 transition hover:bg-zinc-800"
+                            disabled={archivingUserId === user.id}
+                            onClick={() => void handleToggleArchive(user)}
+                            title={user.isArchived ? "Unarchive user" : "Archive user"}
+                            className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition disabled:opacity-50 ${
+                              user.isArchived
+                                ? "border-emerald-700/60 bg-emerald-950/40 text-emerald-200 hover:bg-emerald-900/40"
+                                : "border-amber-700/60 bg-amber-950/30 text-amber-100 hover:bg-amber-900/40"
+                            }`}
                           >
-                            <Key className="h-4 w-4" aria-hidden="true" />
-                            <span className="sr-only">Reset Password</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => openEditModal(user)}
-                            className="inline-flex items-center rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-800"
-                          >
-                            Edit
+                            {archivingUserId === user.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                            ) : user.isArchived ? (
+                              <ArchiveRestore className="h-3.5 w-3.5" aria-hidden="true" />
+                            ) : (
+                              <Archive className="h-3.5 w-3.5" aria-hidden="true" />
+                            )}
+                            {user.isArchived ? "Unarchive" : "Archive"}
                           </button>
                         </div>
                       </td>

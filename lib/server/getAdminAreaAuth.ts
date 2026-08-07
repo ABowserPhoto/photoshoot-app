@@ -42,7 +42,11 @@ async function getGatekeeperAdminAuth(): Promise<{ authenticated: boolean; isAdm
  * Admin-area access: Supabase users must have user_metadata.role === "admin".
  * Gatekeeper cookie admins (no Supabase session) remain allowed for legacy access.
  */
-export async function getAdminAreaAuth(): Promise<{ authenticated: boolean; isAdmin: boolean }> {
+export async function getAdminAreaAuth(): Promise<{
+  authenticated: boolean;
+  isAdmin: boolean;
+  userId: string | null;
+}> {
   const cookieStore = await cookies();
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
@@ -70,14 +74,18 @@ export async function getAdminAreaAuth(): Promise<{ authenticated: boolean; isAd
     } = await supabase.auth.getUser();
 
     if (user) {
-      return { authenticated: true, isAdmin: isMetadataAdmin(user) };
+      return {
+        authenticated: true,
+        isAdmin: isMetadataAdmin(user),
+        userId: user.id,
+      };
     }
   }
 
   const gatekeeperAuth = await getGatekeeperAdminAuth();
   if (gatekeeperAuth) {
-    return gatekeeperAuth;
+    return { ...gatekeeperAuth, userId: null };
   }
 
-  return { authenticated: false, isAdmin: false };
+  return { authenticated: false, isAdmin: false, userId: null };
 }

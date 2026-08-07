@@ -27,10 +27,29 @@ export async function GET() {
     return NextResponse.json({ error: "Database is not configured." }, { status: 503 });
   }
 
-  const { data, error } = await sb.from("profiles").select("id, email, full_name").order("full_name");
+  // Active assignees only — archived profiles stay in DB for historical name resolution.
+  const { data, error } = await sb
+    .from("profiles")
+    .select("id, email, full_name, is_archived")
+    .or("is_archived.eq.false,is_archived.is.null")
+    .order("full_name");
+
   if (error) {
+    // Older DBs without is_archived: return all profiles.
+    if (/is_archived|column|schema|Could not find/i.test(error.message)) {
+      const retry = await sb.from("profiles").select("id, email, full_name").order("full_name");
+      if (retry.error) {
+        return NextResponse.json({ error: retry.error.message }, { status: 500 });
+      }
+      return NextResponse.json({ data: retry.data ?? [] });
+    }
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ data: data ?? [] });
+  const rows = (data ?? []).map((row) => {
+    const r = row as { id: string; email: string | null; full_name: string | null };
+    return { id: r.id, email: r.email, full_name: r.full_name };
+  });
+
+  return NextResponse.json({ data: rows });
 }

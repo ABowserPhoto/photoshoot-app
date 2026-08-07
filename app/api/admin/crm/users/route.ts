@@ -16,6 +16,7 @@ export type CrmUserRecord = {
   role: string;
   roleKey: "admin" | "staff";
   jibblePersonId: string | null;
+  isArchived: boolean;
 };
 
 function formatCreatedAtLabel(value: string | null): string {
@@ -45,7 +46,8 @@ function mapUserRecord(
     created_at?: string;
     user_metadata?: Record<string, unknown> | null;
   },
-  jibblePersonId: string | null = null
+  jibblePersonId: string | null = null,
+  isArchived = false
 ): CrmUserRecord {
   const metadata = user.user_metadata ?? {};
   const createdAt = user.created_at ?? null;
@@ -59,6 +61,7 @@ function mapUserRecord(
     role: formatCrmUserRole(metadata.role),
     roleKey: crmRoleFormValue(metadata.role),
     jibblePersonId,
+    isArchived,
   };
 }
 
@@ -112,21 +115,35 @@ async function listAllUsers() {
     page += 1;
   }
 
-  // Fetch jibble_employee_id from profiles for all users in one query.
+  // Fetch jibble + archive flags from profiles for all users in one query.
   const { data: profiles } = await supabaseAdmin
     .from("profiles")
-    .select("id, jibble_employee_id");
+    .select("id, jibble_employee_id, is_archived");
 
   const jibbleMap = new Map<string, string | null>();
+  const archivedMap = new Map<string, boolean>();
   for (const profile of profiles ?? []) {
-    const p = profile as { id: string; jibble_employee_id?: string | null };
+    const p = profile as {
+      id: string;
+      jibble_employee_id?: string | null;
+      is_archived?: boolean | null;
+    };
     jibbleMap.set(p.id, p.jibble_employee_id?.trim() || null);
+    archivedMap.set(p.id, p.is_archived === true);
   }
 
   return {
     users: authUsers
-      .map((u) => mapUserRecord(u, jibbleMap.get(u.id) ?? null))
-      .sort((a, b) => a.email.localeCompare(b.email, "en")),
+      .map((u) =>
+        mapUserRecord(u, jibbleMap.get(u.id) ?? null, archivedMap.get(u.id) ?? false)
+      )
+      .sort((a, b) => {
+        // Active users first, then archived; stable email order within each group.
+        if (a.isArchived !== b.isArchived) {
+          return a.isArchived ? 1 : -1;
+        }
+        return a.email.localeCompare(b.email, "en");
+      }),
   };
 }
 
@@ -223,7 +240,8 @@ export async function POST(request: Request) {
           created_at: createdUser.created_at,
           user_metadata: createdUser.user_metadata as Record<string, unknown>,
         },
-        null
+        null,
+        false
       ),
     },
     { status: 201 }
@@ -308,6 +326,12 @@ export async function PATCH(request: Request) {
     name,
   });
 
+  const { data: profileRow } = await supabaseAdmin
+    .from("profiles")
+    .select("jibble_employee_id, is_archived")
+    .eq("id", updatedUser.id)
+    .maybeSingle();
+
   return NextResponse.json({
     ok: true,
     user: mapUserRecord(
@@ -317,7 +341,10 @@ export async function PATCH(request: Request) {
         created_at: updatedUser.created_at,
         user_metadata: updatedUser.user_metadata as Record<string, unknown>,
       },
-      null
+      typeof profileRow?.jibble_employee_id === "string"
+        ? profileRow.jibble_employee_id.trim() || null
+        : null,
+      profileRow?.is_archived === true
     ),
   });
 }

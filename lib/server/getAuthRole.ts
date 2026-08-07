@@ -26,23 +26,45 @@ function createServiceSupabase() {
   return createClient(url, serviceKey, { auth: { persistSession: false } });
 }
 
-async function roleFromProfilesTable(userId: string, fallbackUser: User): Promise<UserRole> {
+async function profileAuthState(
+  userId: string,
+  fallbackUser: User
+): Promise<{ role: UserRole; isArchived: boolean }> {
   const sb = createServiceSupabase();
   if (!sb) {
-    return roleFromSupabaseUser(fallbackUser);
+    return { role: roleFromSupabaseUser(fallbackUser), isArchived: false };
   }
 
-  const { data, error } = await sb.from("profiles").select("role").eq("id", userId).maybeSingle();
+  const { data, error } = await sb
+    .from("profiles")
+    .select("role, is_archived")
+    .eq("id", userId)
+    .maybeSingle();
+
   if (error || !data || typeof data !== "object") {
-    return roleFromSupabaseUser(fallbackUser);
+    // Older DBs without is_archived: fall back to role-only select.
+    if (error && /is_archived|column|schema|Could not find/i.test(error.message)) {
+      const retry = await sb.from("profiles").select("role").eq("id", userId).maybeSingle();
+      if (retry.error || !retry.data) {
+        return { role: roleFromSupabaseUser(fallbackUser), isArchived: false };
+      }
+      const rawRole = (retry.data as { role?: unknown }).role;
+      if (rawRole === null || rawRole === undefined || String(rawRole).trim() === "") {
+        return { role: roleFromSupabaseUser(fallbackUser), isArchived: false };
+      }
+      return { role: normalizeRole(rawRole), isArchived: false };
+    }
+    return { role: roleFromSupabaseUser(fallbackUser), isArchived: false };
   }
 
-  const rawRole = (data as { role?: unknown }).role;
+  const row = data as { role?: unknown; is_archived?: unknown };
+  const isArchived = row.is_archived === true;
+  const rawRole = row.role;
   if (rawRole === null || rawRole === undefined || String(rawRole).trim() === "") {
-    return roleFromSupabaseUser(fallbackUser);
+    return { role: roleFromSupabaseUser(fallbackUser), isArchived };
   }
 
-  return normalizeRole(rawRole);
+  return { role: normalizeRole(rawRole), isArchived };
 }
 
 /**
@@ -83,7 +105,11 @@ export async function getAuthRole(): Promise<{
     } = await supabase.auth.getUser();
 
     if (user) {
-      const role = await roleFromProfilesTable(user.id, user);
+      const { role, isArchived } = await profileAuthState(user.id, user);
+      if (isArchived) {
+        // Soft-deleted employees must not retain app access even if a JWT is still present.
+        return { authenticated: false, role: "editor", isAdmin: false };
+      }
       return { authenticated: true, role, isAdmin: role === "admin" };
     }
   }
