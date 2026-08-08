@@ -56,9 +56,14 @@ export async function POST(request: Request) {
 
     if (shootId) {
       const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-      if (supabaseUrl && supabaseAnonKey) {
-        const supabase = createClient(supabaseUrl, supabaseAnonKey);
+      const supabaseKey =
+        process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+      if (supabaseUrl && supabaseKey) {
+        // Public gallery clients are not authenticated; use service_role under RLS.
+        const supabase = createClient(supabaseUrl, supabaseKey, {
+          auth: { persistSession: false },
+        });
 
         let photoshootType = "";
         const { data: taskRow } = await supabase

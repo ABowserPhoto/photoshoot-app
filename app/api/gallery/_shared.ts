@@ -86,9 +86,14 @@ export async function resolveLocalFolderName(params: {
   }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (supabaseUrl && supabaseAnonKey) {
-    const supabase = createClient(supabaseUrl, supabaseAnonKey);
+  const supabaseKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+  if (supabaseUrl && supabaseKey) {
+    // Gallery helpers run without an end-user JWT; service_role bypasses RLS.
+    const supabase = createClient(supabaseUrl, supabaseKey, {
+      auth: { persistSession: false },
+    });
     const { data } = await supabase
       .from("tasks")
       .select("local_folder_name, title, company_name, shoot_location, photoshoot_date")

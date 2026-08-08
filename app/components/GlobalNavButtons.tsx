@@ -31,6 +31,7 @@ export default function GlobalNavButtons({ className, secondaryMiddle, children 
   const aiStudioActive = pathname === "/ai-studio" || pathname.startsWith("/ai-studio/");
   const moodboardActive = pathname === "/moodboard" || pathname.startsWith("/moodboard/");
   const notesActive = pathname === "/notes" || pathname.startsWith("/notes/");
+  const scriptsActive = pathname === "/scripts" || pathname.startsWith("/scripts/");
   const plannerActive = pathname === "/planner" || pathname.startsWith("/planner/");
   const schedulerActive = pathname === "/scheduler" || pathname.startsWith("/scheduler/");
   const statisticsActive = pathname === "/admin/statistics" || pathname.startsWith("/admin/statistics/");
@@ -63,6 +64,9 @@ export default function GlobalNavButtons({ className, secondaryMiddle, children 
       </Link>
       <Link href="/notes" className={`${btnBase} ${notesActive ? active : idle}`} prefetch>
         Notes
+      </Link>
+      <Link href="/scripts" className={`${btnBase} ${scriptsActive ? active : idle}`} prefetch>
+        Scripts
       </Link>
       {isLoading ? (
         <span
