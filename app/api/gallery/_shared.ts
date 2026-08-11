@@ -85,10 +85,8 @@ export async function resolveLocalFolderName(params: {
     throw new Error("shootId or local_folder_name is required.");
   }
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
   if (supabaseUrl && supabaseKey) {
     // Gallery helpers run without an end-user JWT; service_role bypasses RLS.
     const supabase = createClient(supabaseUrl, supabaseKey, {

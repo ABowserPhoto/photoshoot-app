@@ -41,7 +41,10 @@ const isDev = !app.isPackaged;
 loadBundledProductionEnv();
 loadDevLocalEnv();
 const DEFAULT_PORT = Number(process.env.PORT) || 3000;
-const DEFAULT_COMFYUI_PATH = "C:/ComfyUI_windows_portable/ComfyUI";
+const DEFAULT_COMFYUI_LAUNCH_PATH =
+  "F:\\ComfyUI_windows_portable_nvidia\\ComfyUI_windows_portable\\run_nvidia_gpu.bat";
+const DEFAULT_COMFYUI_PATH =
+  "F:/ComfyUI_windows_portable_nvidia/ComfyUI_windows_portable/ComfyUI";
 const BRAND_ICON_RELATIVE_PATH = path.join("build", "icon.ico");
 
 // Windows taskbar / Start Menu / desktop shortcuts group under this id and
@@ -518,17 +521,22 @@ function resolvePhotoWorkerLaunchSpec() {
 }
 
 function resolveComfyUiLaunch() {
-  const launchScript = process.env.COMFYUI_LAUNCH_SCRIPT?.trim();
-  if (launchScript) {
-    if (!fs.existsSync(launchScript)) {
-      throw new Error(`COMFYUI_LAUNCH_SCRIPT not found: ${launchScript}`);
-    }
+  const launchScript =
+    process.env.COMFYUI_LAUNCH_PATH?.trim() ||
+    process.env.COMFYUI_LAUNCH_SCRIPT?.trim() ||
+    DEFAULT_COMFYUI_LAUNCH_PATH;
+  if (launchScript && fs.existsSync(launchScript)) {
     return {
       label: "comfyui",
       command: process.platform === "win32" ? "cmd.exe" : launchScript,
       args: process.platform === "win32" ? ["/c", launchScript] : [],
       cwd: path.dirname(launchScript),
     };
+  }
+  if (launchScript && !fs.existsSync(launchScript)) {
+    console.warn(
+      `[electron] COMFYUI launch path not found (${launchScript}); trying COMFYUI_PATH fallbacks.`
+    );
   }
 
   const comfyRoot = process.env.COMFYUI_PATH?.trim() || DEFAULT_COMFYUI_PATH;
@@ -540,6 +548,7 @@ function resolveComfyUiLaunch() {
     path.join(portableRoot, "run_nvidia_gpu.bat"),
     path.join(portableRoot, "run_nvidia_gpu_fast_fp16_accumulation.bat"),
     path.join(portableRoot, "run_cpu.bat"),
+    DEFAULT_COMFYUI_LAUNCH_PATH,
   ].filter(Boolean);
 
   for (const batPath of batCandidates) {
@@ -548,7 +557,7 @@ function resolveComfyUiLaunch() {
         label: "comfyui",
         command: "cmd.exe",
         args: ["/c", batPath],
-        cwd: portableRoot,
+        cwd: path.dirname(batPath),
       };
     }
   }
@@ -556,7 +565,7 @@ function resolveComfyUiLaunch() {
   const mainPy = path.join(comfyRootResolved, "main.py");
   if (!fs.existsSync(mainPy)) {
     throw new Error(
-      `ComfyUI launch script not found. Set COMFYUI_LAUNCH_SCRIPT or COMFYUI_PATH (looked under ${portableRoot}).`
+      `ComfyUI launch script not found. Set COMFYUI_LAUNCH_PATH (preferred) or COMFYUI_PATH (looked under ${portableRoot}).`
     );
   }
 

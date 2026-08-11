@@ -8,7 +8,6 @@ import {
 } from "@/lib/taskCompletionCelebration";
 import { countTodayCompletions } from "@/lib/kanbanDailyStreak";
 import DailyStreakBadge from "@/app/components/DailyStreakBadge";
-import { triggerPreviewEmail } from "@/app/actions/previewEmail";
 import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
@@ -1452,13 +1451,48 @@ export default function KanbanBoard({
       celebrateTaskCompletion();
       setCelebrationToast(buildRandomDailyCompletionMessage(todayCompletionCount));
     } else if (targetColumn === "preview-sent") {
-      const previewResult = await triggerPreviewEmail(String(dragged.task.id));
-      if (!previewResult.ok) {
-        setStatusMessage(
-          previewResult.error ?? "Preview-E-Mail-Entwurf konnte nicht in Gmail erstellt werden."
-        );
+      if (!dragged.task.email.trim()) {
+        setWorkflowToast({
+          message: "Preview draft skipped: client email is missing on this task.",
+          variant: "error",
+        });
+        setStatusMessage("Preview draft skipped: client email is missing on this task.");
       } else {
-        setStatusMessage(null);
+        setWorkflowToast({
+          message: "Creating preview Gmail draft...",
+          variant: "loading",
+        });
+        try {
+          const response = await fetch("/api/workflows/preview-email", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ taskId: String(dragged.task.id) }),
+          });
+          const payload = (await response.json().catch(() => null)) as {
+            success?: boolean;
+            error?: string;
+            gmailDraftId?: string;
+          } | null;
+
+          if (!response.ok || !payload?.success) {
+            throw new Error(
+              payload?.error ?? `Preview email draft failed (${response.status}).`
+            );
+          }
+
+          setWorkflowToast({
+            message: "Preview Gmail draft created.",
+            variant: "success",
+          });
+          setStatusMessage(null);
+        } catch (error) {
+          const message = toErrorString(
+            error,
+            "Preview-E-Mail-Entwurf konnte nicht in Gmail erstellt werden."
+          );
+          setWorkflowToast({ message, variant: "error" });
+          setStatusMessage(message);
+        }
       }
     } else {
       setStatusMessage(null);

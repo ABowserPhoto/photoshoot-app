@@ -315,10 +315,14 @@ export default function GalleryPage() {
         setErrorMessage(payload.message ?? "Die Auswahl konnte nicht vollständig verarbeitet werden.");
         return;
       }
-      if (shootId.trim() && payload?.taskStatusUpdated === false) {
+      if (
+        shootId.trim() &&
+        (payload?.taskStatusUpdated === false || payload?.gallerySelectionSaved === false)
+      ) {
         setErrorMessage(
           payload.dbWarning ??
-            "Die Auswahl wurde lokal verarbeitet, aber der Auftragsstatus konnte in der Datenbank nicht aktualisiert werden."
+            payload.error ??
+            "Die Auswahl konnte nicht in der Datenbank gespeichert werden. Bitte versuchen Sie es erneut."
         );
         return;
       }
@@ -471,7 +475,8 @@ export default function GalleryPage() {
             </div>
           ) : (
             <p className="mt-1 text-sm text-zinc-400">
-              Klicken Sie auf ein Bild, um die Szene für die Bearbeitung zu markieren.
+              Klicken Sie auf ein Bild, um die Szene zu markieren. Über das Vergrößern-Symbol öffnen
+              Sie die Vollansicht.
             </p>
           )}
         </header>
@@ -543,12 +548,17 @@ export default function GalleryPage() {
               return (
                 <article
                   key={item.chunkIndex}
-                  className="group relative overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/60"
+                  className={`group relative overflow-hidden rounded-lg border bg-zinc-900/60 ${
+                    selected ? "border-green-500/80 ring-1 ring-green-500/40" : "border-zinc-800"
+                  }`}
                 >
                   <button
                     type="button"
-                    onClick={() => openLightbox(item.chunkIndex)}
-                    className="relative block w-full text-left"
+                    disabled={isSuccess || isLockedByServer}
+                    onClick={() => toggleChunk(item.chunkIndex)}
+                    className="relative block w-full text-left disabled:cursor-not-allowed"
+                    aria-pressed={selected}
+                    aria-label={`Szene ${item.chunkIndex + 1} ${selected ? "abwählen" : "auswählen"}`}
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
@@ -561,12 +571,29 @@ export default function GalleryPage() {
                       }
                       loading="lazy"
                     />
+                    {selected ? (
+                      <span className="absolute left-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-green-500 text-xs font-bold text-white shadow">
+                        ✓
+                      </span>
+                    ) : null}
                   </button>
                   <div className="border-t border-zinc-800 px-2 py-2">
                     <div className="truncate text-[11px] text-zinc-400">{displayFilename(item.firstFilename)}</div>
                     <div className="mt-1 flex items-center justify-between gap-2">
                       <StarsRow chunkIndex={item.chunkIndex} disabled={isSuccess || isLockedByServer} />
                       <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openLightbox(item.chunkIndex);
+                          }}
+                          title="Vollansicht"
+                          aria-label={`Szene ${item.chunkIndex + 1} vergrößern`}
+                          className="inline-flex h-5 min-w-5 items-center justify-center rounded-sm border border-zinc-500 bg-zinc-900 px-1 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800"
+                        >
+                          ⤢
+                        </button>
                         <button
                           type="button"
                           disabled={isSuccess || isLockedByServer || isRotatingThisItem}

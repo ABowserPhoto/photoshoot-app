@@ -5,6 +5,10 @@ import path from "path";
 
 export type LaunchComfyUIResult = { ok: true } | { ok: false; error: string };
 
+/** Default Windows portable NVIDIA launch script. */
+export const DEFAULT_COMFYUI_LAUNCH_PATH =
+  "F:\\ComfyUI_windows_portable_nvidia\\ComfyUI_windows_portable\\run_nvidia_gpu.bat";
+
 function escapePathForShell(targetPath: string): string {
   return targetPath.replace(/"/g, '\\"');
 }
@@ -31,22 +35,72 @@ function buildLaunchCommand(batPath: string, platform: string): string {
 }
 
 /**
+ * Normalize paths from .env files. dotenv expands escape sequences inside
+ * double-quoted values, so Windows paths like `...\run_....bat` become
+ * corrupted (`\r` → carriage return). Prefer forward slashes in env files;
+ * still sanitize here so a bad env cannot block a valid UI path forever.
+ */
+function normalizeLaunchPath(raw: string): string {
+  let value = raw.trim();
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+  // Undo accidental dotenv escapes that commonly appear in Windows paths.
+  value = value.replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t");
+  return path.normalize(value);
+}
+
+function resolveLaunchPath(batPathFromCaller: string): string {
+  // Prefer COMFYUI_LAUNCH_PATH; keep COMFYUI_LAUNCH_SCRIPT as a backward-compatible alias.
+  const envRaw =
+    process.env.COMFYUI_LAUNCH_PATH?.trim() ||
+    process.env.COMFYUI_LAUNCH_SCRIPT?.trim() ||
+    "";
+  const envPath = envRaw ? normalizeLaunchPath(envRaw) : "";
+  const fromCaller = batPathFromCaller.trim()
+    ? normalizeLaunchPath(batPathFromCaller)
+    : "";
+
+  // If env is set but points at a missing file (e.g. dotenv-corrupted path),
+  // fall through to the UI path / default instead of failing hard.
+  if (envPath && fs.existsSync(envPath)) {
+    return envPath;
+  }
+
+  if (fromCaller && fs.existsSync(fromCaller)) {
+    return fromCaller;
+  }
+
+  if (envPath) {
+    return envPath;
+  }
+
+  return fromCaller || DEFAULT_COMFYUI_LAUNCH_PATH;
+}
+
+/**
  * Launches ComfyUI in a new visible terminal window on the local machine.
  * Only meaningful when the Next.js server runs on the same host (Electron / local dev).
  *
  * Path resolution order:
- *   1. `COMFYUI_LAUNCH_SCRIPT` environment variable (set in .env.local / .env.production)
- *   2. `batPath` argument supplied by the caller (value from the AI Studio UI input)
+ *   1. `COMFYUI_LAUNCH_PATH` (preferred)
+ *   2. `COMFYUI_LAUNCH_SCRIPT` (legacy alias)
+ *   3. `batPath` argument from the AI Studio UI
+ *   4. Built-in NVIDIA portable default on F:\
  */
 export function launchComfyUI(batPath: string): Promise<LaunchComfyUIResult> {
   return new Promise((resolve) => {
-    // Prefer the server-side env var so deployments can pin the correct path
-    // without relying on the browser's localStorage value.
-    const envPath = process.env.COMFYUI_LAUNCH_SCRIPT?.trim();
-    const trimmed = envPath || batPath.trim();
+    const trimmed = resolveLaunchPath(batPath);
 
     if (!trimmed) {
-      resolve({ ok: false, error: "No ComfyUI launch path specified. Set COMFYUI_LAUNCH_SCRIPT or enter the path in the UI." });
+      resolve({
+        ok: false,
+        error:
+          "No ComfyUI launch path specified. Set COMFYUI_LAUNCH_PATH or enter the path in the UI.",
+      });
       return;
     }
 

@@ -24,15 +24,10 @@ export async function POST(request: NextRequest) {
   }
 
   const { comfyPath } = body as Record<string, unknown>;
+  // UI path is optional when COMFYUI_LAUNCH_PATH / COMFYUI_LAUNCH_SCRIPT is set.
+  const pathFromBody = typeof comfyPath === "string" ? comfyPath.trim() : "";
 
-  if (typeof comfyPath !== "string" || !comfyPath.trim()) {
-    return NextResponse.json(
-      { error: "comfyPath is required and must be a non-empty string." },
-      { status: 400 }
-    );
-  }
-
-  const result = await launchComfyUI(comfyPath.trim());
+  const result = await launchComfyUI(pathFromBody);
 
   if (!result.ok) {
     return NextResponse.json({ error: result.error }, { status: 422 });
