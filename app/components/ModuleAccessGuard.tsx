@@ -48,11 +48,13 @@ export default function ModuleAccessGuard({ children }: { children: React.ReactN
     if (allowed) {
       return;
     }
+    // Prefer planner when granted; otherwise fall back to first allowed module.
+    const fallback = firstAccessibleHref({
+      isAdmin,
+      accessibleModules,
+    });
     router.replace(
-      firstAccessibleHref({
-        isAdmin,
-        accessibleModules,
-      })
+      !isAdmin && accessibleModules.includes("planner") ? "/planner" : fallback
     );
   }, [allowed, authenticated, accessibleModules, isAdmin, isLoading, router, skip]);
 

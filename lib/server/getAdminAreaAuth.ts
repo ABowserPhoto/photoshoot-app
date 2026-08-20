@@ -1,52 +1,27 @@
 import { createServerClient } from "@supabase/ssr";
-import type { User } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
-import { deriveGateToken, timingSafeEqualHex } from "@/lib/gateToken";
-
-const GATE_COOKIE = "workflow_gate";
-
-function isMetadataAdmin(user: User): boolean {
-  const meta = user.user_metadata as Record<string, unknown> | undefined;
-  const rawRole = meta?.role;
-  return String(rawRole ?? "")
-    .trim()
-    .toLowerCase() === "admin";
-}
-
-async function getGatekeeperAdminAuth(): Promise<{ authenticated: boolean; isAdmin: boolean } | null> {
-  const cookieStore = await cookies();
-  const secret = process.env.APP_AUTH_SECRET?.trim();
-  const adminPassword = process.env.APP_ADMIN_PASSWORD?.trim();
-  const editorPassword = process.env.APP_EDITOR_PASSWORD?.trim();
-  const cookieVal = cookieStore.get(GATE_COOKIE)?.value;
-
-  if (!secret || !adminPassword || !editorPassword || !cookieVal) {
-    return null;
-  }
-
-  const adminExpected = await deriveGateToken(secret, adminPassword);
-  if (timingSafeEqualHex(cookieVal, adminExpected)) {
-    return { authenticated: true, isAdmin: true };
-  }
-
-  const editorExpected = await deriveGateToken(secret, editorPassword);
-  if (timingSafeEqualHex(cookieVal, editorExpected)) {
-    return { authenticated: true, isAdmin: false };
-  }
-
-  return null;
-}
+import {
+  canAccessModule,
+  type AppModule,
+} from "@/lib/appModules";
+import { getAuthRole } from "@/lib/server/getAuthRole";
 
 /**
- * Admin-area access: Supabase users must have user_metadata.role === "admin".
- * Gatekeeper cookie admins (no Supabase session) remain allowed for legacy access.
+ * Admin-area auth for layouts/APIs.
+ * - `isAdmin` comes from `profiles.role` (via getAuthRole); admins always have full access.
+ * - Staff may enter `/admin/crm` or `/admin/statistics` when those modules are granted.
+ * - User-management endpoints must still require `isAdmin === true`.
  */
 export async function getAdminAreaAuth(): Promise<{
   authenticated: boolean;
   isAdmin: boolean;
   userId: string | null;
+  accessibleModules: AppModule[];
 }> {
+  const auth = await getAuthRole();
+
+  let userId: string | null = null;
   const cookieStore = await cookies();
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
@@ -72,20 +47,28 @@ export async function getAdminAreaAuth(): Promise<{
     const {
       data: { user },
     } = await supabase.auth.getUser();
-
-    if (user) {
-      return {
-        authenticated: true,
-        isAdmin: isMetadataAdmin(user),
-        userId: user.id,
-      };
-    }
+    userId = user?.id ?? null;
   }
 
-  const gatekeeperAuth = await getGatekeeperAdminAuth();
-  if (gatekeeperAuth) {
-    return { ...gatekeeperAuth, userId: null };
-  }
+  return {
+    authenticated: auth.authenticated,
+    isAdmin: auth.isAdmin,
+    userId,
+    accessibleModules: auth.accessibleModules,
+  };
+}
 
-  return { authenticated: false, isAdmin: false, userId: null };
+/** True if the caller may use a given admin-area module (crm / statistics). */
+export function canAccessAdminModule(
+  auth: {
+    isAdmin: boolean;
+    accessibleModules: readonly AppModule[] | null | undefined;
+  },
+  module: Extract<AppModule, "crm" | "statistics">
+): boolean {
+  return canAccessModule({
+    isAdmin: auth.isAdmin,
+    accessibleModules: auth.accessibleModules,
+    module,
+  });
 }

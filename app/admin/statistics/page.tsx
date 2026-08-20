@@ -171,7 +171,8 @@ const dateInputClassName =
   "h-10 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-violet-500 [color-scheme:dark]";
 
 export default function AdminStatisticsPage() {
-  const { authenticated, isAdmin, isLoading: authLoading } = useAuthRole();
+  const { authenticated, canAccess, isLoading: authLoading } = useAuthRole();
+  const canViewStatistics = canAccess("statistics");
   const [timeframe, setTimeframe] = useState<ProductivityTimeframe>("month");
   const [selectedUserId, setSelectedUserId] = useState("");
   const [teamUsers, setTeamUsers] = useState<{ id: string; name: string; email: string | null }[]>(
@@ -226,7 +227,7 @@ export default function AdminStatisticsPage() {
   );
 
   useEffect(() => {
-    if (!authenticated || !isAdmin) {
+    if (!authenticated || !canViewStatistics) {
       return;
     }
     void getProductivityTeamUsers().then((res) => {
@@ -234,7 +235,7 @@ export default function AdminStatisticsPage() {
         setTeamUsers(res.users);
       }
     });
-  }, [authenticated, isAdmin]);
+  }, [authenticated, canViewStatistics]);
 
   const loadStats = useCallback(async () => {
     setLoading(true);
@@ -292,11 +293,11 @@ export default function AdminStatisticsPage() {
   }, [reportingPeriod, selectedMonthValue, selectedUserId, timeframe]);
 
   useEffect(() => {
-    if (authLoading || !authenticated || !isAdmin) {
+    if (authLoading || !authenticated || !canViewStatistics) {
       return;
     }
     void loadStats();
-  }, [authLoading, authenticated, isAdmin, loadStats]);
+  }, [authLoading, authenticated, canViewStatistics, loadStats]);
 
   const sortedLogs = useMemo(() => {
     const rows = [...dailyLogs];

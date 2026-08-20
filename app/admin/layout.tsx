@@ -53,14 +53,16 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     }
     if (!allowed) {
       router.replace(
-        firstAccessibleHref({ isAdmin: false, accessibleModules }) === "/login"
-          ? permissionDeniedRedirectPath()
-          : firstAccessibleHref({ isAdmin: false, accessibleModules })
+        !isAdmin && accessibleModules.includes("planner")
+          ? "/planner"
+          : firstAccessibleHref({ isAdmin: false, accessibleModules }) === "/login"
+            ? permissionDeniedRedirectPath()
+            : firstAccessibleHref({ isAdmin: false, accessibleModules })
       );
       return;
     }
     setChecked(true);
-  }, [allowed, authenticated, accessibleModules, isLoading, router]);
+  }, [allowed, authenticated, accessibleModules, isAdmin, isLoading, router]);
 
   if (isLoading || !authenticated || !checked || !allowed) {
     return (

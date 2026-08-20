@@ -187,3 +187,78 @@ export async function updateTaskStatus(
     };
   }
 }
+
+/**
+ * Admin-only: set workflow task editing duration (`total_editing_seconds`).
+ * If editing timer is running, resets `editing_started_at` to now so the live
+ * display continues from the adjusted base.
+ */
+export async function adjustTaskEditingDuration(
+  taskId: string,
+  totalEditingSeconds: number
+): Promise<
+  | { ok: true; totalEditingSeconds: number; editingStartedAt: string | null }
+  | { ok: false; error: string }
+> {
+  const auth = await getAuthRole();
+  if (!auth.authenticated) {
+    return { ok: false, error: "Unauthorized" };
+  }
+  if (!auth.isAdmin) {
+    return { ok: false, error: "Only admins can adjust task timers." };
+  }
+
+  const sb = serviceSupabase();
+  if (!sb) {
+    return { ok: false, error: "Database is not configured." };
+  }
+
+  const id = taskId.trim();
+  if (!id) {
+    return { ok: false, error: "Missing task id." };
+  }
+
+  const nextTotal = Math.max(0, Math.floor(Number(totalEditingSeconds)));
+  if (!Number.isFinite(nextTotal)) {
+    return { ok: false, error: "Invalid duration." };
+  }
+
+  const { data: row, error: fetchError } = await sb
+    .from("tasks")
+    .select("id, editing_started_at, total_editing_seconds")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (fetchError) {
+    return { ok: false, error: fetchError.message };
+  }
+  if (!row) {
+    return { ok: false, error: "Task not found." };
+  }
+
+  const wasRunning = Boolean(
+    typeof (row as { editing_started_at?: unknown }).editing_started_at === "string" &&
+      String((row as { editing_started_at: string }).editing_started_at).trim()
+  );
+  const editingStartedAt = wasRunning ? new Date().toISOString() : null;
+
+  const { error } = await sb
+    .from("tasks")
+    .update({
+      total_editing_seconds: nextTotal,
+      editing_started_at: editingStartedAt,
+    })
+    .eq("id", id);
+
+  if (error) {
+    console.error("[adjustTaskEditingDuration]", error);
+    return { ok: false, error: error.message };
+  }
+
+  return {
+    ok: true,
+    totalEditingSeconds: nextTotal,
+    editingStartedAt,
+  };
+}
+

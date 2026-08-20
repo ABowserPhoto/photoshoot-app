@@ -1,15 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Camera, Gem, Home, User } from "lucide-react";
+import { Camera, Gem, Home, Pencil, User } from "lucide-react";
 import {
   celebrateTaskCompletion,
   buildRandomDailyCompletionMessage,
 } from "@/lib/taskCompletionCelebration";
 import { countTodayCompletions } from "@/lib/kanbanDailyStreak";
 import DailyStreakBadge from "@/app/components/DailyStreakBadge";
+import EditDurationModal from "@/app/components/EditDurationModal";
 import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
-import { updateTaskStatus } from "@/app/actions/tasks";
+import { adjustTaskEditingDuration, updateTaskStatus } from "@/app/actions/tasks";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { supabase } from "@/lib/supabaseClient";
 import {
@@ -751,6 +752,10 @@ export default function KanbanBoard({
     variant: "loading" | "success" | "error";
   } | null>(null);
   const { isAdmin, isLoading: authRoleLoading } = useAuthRole();
+  const [durationEditTaskId, setDurationEditTaskId] = useState<string | null>(null);
+  const [durationEditInitialSeconds, setDurationEditInitialSeconds] = useState(0);
+  const [isSavingDuration, setIsSavingDuration] = useState(false);
+  const [durationEditError, setDurationEditError] = useState<string | null>(null);
   const boardRef = useRef(board);
   const archivedTasksRef = useRef(archivedTasks);
   const mergePrevColumnRef = useRef<Map<string, ColumnKey>>(new Map());
@@ -1951,10 +1956,28 @@ export default function KanbanBoard({
                             );
                           })() : null}
                           {liveEditingSeconds(task, clockMs) > 0 || task.editingStartedAt ? (
-                            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
-                              {task.editingStartedAt ? "Editing: " : "Total Edit Time: "}
-                              {formatDuration(liveEditingSeconds(task, clockMs))}
-                            </p>
+                            <div className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-500">
+                              <p>
+                                {task.editingStartedAt ? "Editing: " : "Total Edit Time: "}
+                                {formatDuration(liveEditingSeconds(task, clockMs))}
+                              </p>
+                              {!authRoleLoading && isAdmin ? (
+                                <button
+                                  type="button"
+                                  title="Edit duration"
+                                  aria-label="Edit duration"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setDurationEditTaskId(task.id);
+                                    setDurationEditInitialSeconds(liveEditingSeconds(task, clockMs));
+                                    setDurationEditError(null);
+                                  }}
+                                  className="rounded p-0.5 text-zinc-400 opacity-0 transition hover:bg-zinc-200 hover:text-zinc-700 group-hover:opacity-100 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                                >
+                                  <Pencil className="h-3 w-3" strokeWidth={2} />
+                                </button>
+                              ) : null}
+                            </div>
                           ) : null}
                           {task.localFolderName?.trim() ? (
                             <button
@@ -2066,6 +2089,65 @@ export default function KanbanBoard({
         task={reviewMergedTask}
         isOpen={reviewMergedTask !== null}
         onClose={() => setReviewMergedTask(null)}
+      />
+      <EditDurationModal
+        isOpen={durationEditTaskId !== null}
+        title="Edit Duration"
+        initialSeconds={durationEditInitialSeconds}
+        isSaving={isSavingDuration}
+        error={durationEditError}
+        onCancel={() => {
+          if (!isSavingDuration) {
+            setDurationEditTaskId(null);
+            setDurationEditError(null);
+          }
+        }}
+        onSave={(seconds) => {
+          void (async () => {
+            if (!durationEditTaskId || isSavingDuration) return;
+            setIsSavingDuration(true);
+            setDurationEditError(null);
+            try {
+              const res = await adjustTaskEditingDuration(durationEditTaskId, seconds);
+              if (!res.ok) {
+                throw new Error(res.error);
+              }
+              setBoard((prev) => {
+                const next = { ...prev };
+                for (const column of COLUMN_CONFIG) {
+                  next[column.id] = next[column.id].map((t) =>
+                    t.id === durationEditTaskId
+                      ? {
+                          ...t,
+                          totalEditingSeconds: res.totalEditingSeconds,
+                          editingStartedAt: res.editingStartedAt,
+                        }
+                      : t
+                  );
+                }
+                return next;
+              });
+              setArchivedTasks((prev) =>
+                prev.map((t) =>
+                  t.id === durationEditTaskId
+                    ? {
+                        ...t,
+                        totalEditingSeconds: res.totalEditingSeconds,
+                        editingStartedAt: res.editingStartedAt,
+                      }
+                    : t
+                )
+              );
+              setDurationEditTaskId(null);
+            } catch (err) {
+              setDurationEditError(
+                err instanceof Error ? err.message : "Could not save duration."
+              );
+            } finally {
+              setIsSavingDuration(false);
+            }
+          })();
+        }}
       />
     </div>
   );

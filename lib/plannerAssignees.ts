@@ -46,3 +46,58 @@ export function appendCurrentUserIfMissing(
   }
   return [...assignedUsers, current];
 }
+
+/**
+ * True when there is no primary assignee and no collaborators.
+ */
+export function isStudioTaskUnassigned(params: {
+  assignedTo?: string | null;
+  assignedUsers?: PlannerAssignee[] | unknown;
+}): boolean {
+  const assignedTo =
+    typeof params.assignedTo === "string" && params.assignedTo.trim()
+      ? params.assignedTo.trim()
+      : "";
+  if (assignedTo) return false;
+
+  const users = Array.isArray(params.assignedUsers)
+    ? parseAssignedUsers(params.assignedUsers)
+    : [];
+  return users.length === 0;
+}
+
+/**
+ * True when the user is the primary assignee (`assigned_to`) or listed in `assigned_users`.
+ */
+export function isUserOnStudioTask(params: {
+  userId: string | null | undefined;
+  assignedTo?: string | null;
+  assignedUsers?: PlannerAssignee[] | unknown;
+}): boolean {
+  const userId = typeof params.userId === "string" ? params.userId.trim() : "";
+  if (!userId) return false;
+
+  const assignedTo =
+    typeof params.assignedTo === "string" && params.assignedTo.trim()
+      ? params.assignedTo.trim()
+      : "";
+  if (assignedTo === userId) return true;
+
+  const users = Array.isArray(params.assignedUsers)
+    ? parseAssignedUsers(params.assignedUsers)
+    : [];
+  return users.some((u) => u.id === userId);
+}
+
+/** Ensures the primary assignee is present in the collaborators list (for avatars / visibility). */
+export function ensurePrimaryInAssignedUsers(
+  assignedTo: string | null | undefined,
+  assignedUsers: PlannerAssignee[],
+  options: PlannerAssignee[]
+): PlannerAssignee[] {
+  const primaryId = typeof assignedTo === "string" ? assignedTo.trim() : "";
+  if (!primaryId) return assignedUsers;
+  if (assignedUsers.some((u) => u.id === primaryId)) return assignedUsers;
+  const fromOptions = options.find((u) => u.id === primaryId);
+  return [...assignedUsers, fromOptions ?? { id: primaryId, name: "Assignee" }];
+}

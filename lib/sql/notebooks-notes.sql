@@ -4,6 +4,11 @@
 CREATE TABLE IF NOT EXISTS public.notebooks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
+  creator_id uuid NULL REFERENCES public.profiles(id) ON DELETE SET NULL,
+  access_level text NOT NULL DEFAULT 'all'
+    CHECK (access_level IN ('all', 'admin_only', 'specific')),
+  assigned_user_ids uuid[] NOT NULL DEFAULT '{}'::uuid[],
+  is_system boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -36,13 +41,8 @@ COMMENT ON COLUMN public.notes.content IS 'Rich text HTML from Tiptap editor';
 ALTER TABLE public.notebooks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notes ENABLE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS notebooks_authenticated_all ON public.notebooks;
-CREATE POLICY notebooks_authenticated_all
-  ON public.notebooks
-  FOR ALL
-  TO authenticated
-  USING (true)
-  WITH CHECK (true);
+-- Notebook ACL policies live in notebooks-access-studio-chats.sql
+-- (select/insert/update/delete with access_level + system notebook protection).
 
 DROP POLICY IF EXISTS notes_authenticated_all ON public.notes;
 CREATE POLICY notes_authenticated_all

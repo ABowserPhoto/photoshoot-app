@@ -100,10 +100,14 @@ export default function AdminCrmPage() {
     if (authLoading) {
       return;
     }
+    if (!isAdmin && activeTab === "users") {
+      setActiveTab("billing");
+      return;
+    }
     if (activeTab === "billing") {
       void loadUnpaid();
     }
-  }, [activeTab, authLoading, loadUnpaid]);
+  }, [activeTab, authLoading, isAdmin, loadUnpaid]);
 
   useEffect(() => {
     if (!toast) {

@@ -76,7 +76,10 @@ function mapRowToTask(row: StudioTaskRow): WidgetTask {
     status,
     startedAtSec,
     elapsedSeconds,
-    isPaused: status === "processing" && startedAtSec === null && elapsedSeconds > 0,
+    isPaused:
+      startedAtSec === null &&
+      elapsedSeconds > 0 &&
+      (status === "planning" || status === "processing"),
   };
 }
 
@@ -260,7 +263,12 @@ export default function DesktopWidgetPage() {
 
     const currentNowSec = nowSec;
     if (activeTask.isPaused) {
-      const optimistic = { ...activeTask, isPaused: false, startedAtSec: currentNowSec };
+      const optimistic = {
+        ...activeTask,
+        status: "processing" as const,
+        isPaused: false,
+        startedAtSec: currentNowSec,
+      };
       setActiveTask(optimistic);
       const res = await updateWidgetTaskStatus(activeTask.id, "processing", {
         started_at: new Date(currentNowSec * 1000).toISOString(),
@@ -273,11 +281,18 @@ export default function DesktopWidgetPage() {
       }
     } else {
       const elapsed = getPlannerElapsedSeconds(activeTask.elapsedSeconds, activeTask.startedAtSec, currentNowSec);
-      const optimistic = { ...activeTask, isPaused: true, startedAtSec: null, elapsedSeconds: elapsed };
+      const optimistic = {
+        ...activeTask,
+        status: "planning" as const,
+        isPaused: true,
+        startedAtSec: null,
+        elapsedSeconds: elapsed,
+      };
       setActiveTask(optimistic);
-      const res = await updateWidgetTaskStatus(activeTask.id, "processing", {
+      const res = await updateWidgetTaskStatus(activeTask.id, "planning", {
         started_at: null,
         elapsed_seconds: elapsed,
+        pause_reason: "Paused from timer widget",
       });
       if (!res.ok) {
         setActiveTask(previous);

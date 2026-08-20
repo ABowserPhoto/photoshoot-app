@@ -9,7 +9,10 @@ import {
   ChevronRight,
   FileText,
   Loader2,
+  Lock,
   Plus,
+  Send,
+  Settings2,
   Shield,
   Trash2,
 } from "lucide-react";
@@ -19,10 +22,23 @@ import { useSearchParams } from "next/navigation";
 import { getAllMoodboards, type MoodboardSummary } from "@/app/actions/moodboard";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import type {
+  NotebookAccessLevel,
   NotebookWithNotes,
   NoteSummary,
   NoteVisibility,
 } from "@/lib/server/notesSupabase";
+
+type RecipientOption = {
+  id: string;
+  email: string | null;
+  full_name: string | null;
+};
+
+type NotebookFormState = {
+  name: string;
+  accessLevel: NotebookAccessLevel;
+  assignedUserIds: string[];
+};
 
 const RichTextEditor = dynamic(() => import("@/app/components/RichTextEditor"), {
   ssr: false,
@@ -68,8 +84,17 @@ function NotesPageContent() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isCreateNotebookModalOpen, setIsCreateNotebookModalOpen] = useState(false);
-  const [newNotebookName, setNewNotebookName] = useState("");
-  const [creatingNotebook, setCreatingNotebook] = useState(false);
+  const [editingNotebookId, setEditingNotebookId] = useState<string | null>(null);
+  const [notebookForm, setNotebookForm] = useState<NotebookFormState>({
+    name: "",
+    accessLevel: "all",
+    assignedUserIds: [],
+  });
+  const [savingNotebook, setSavingNotebook] = useState(false);
+  const [recipients, setRecipients] = useState<RecipientOption[]>([]);
+  const [sendRecipientId, setSendRecipientId] = useState("");
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [sendFeedback, setSendFeedback] = useState<string | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeNoteIdRef = useRef<string | null>(null);
   const openedNoteParamRef = useRef<string | null>(null);
@@ -108,6 +133,75 @@ function NotesPageContent() {
       if (res.ok) setMoodboards(res.moodboards);
     });
   }, [loadNotebooks]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch("/api/planner/assignees");
+        const payload = (await response.json().catch(() => null)) as
+          | { data?: RecipientOption[]; error?: string }
+          | null;
+        if (!response.ok || cancelled) return;
+        setRecipients(payload?.data ?? []);
+      } catch {
+        if (!cancelled) setRecipients([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const sendNoteAsMessage = useCallback(async () => {
+    if (!activeNote || !sendRecipientId || sendingMessage) return;
+    const activeNotebook = notebooks.find((nb) => nb.id === activeNote.notebookId);
+    if (activeNotebook?.isSystem !== true) {
+      setSendFeedback("Messages can only be sent from Studio Chats.");
+      return;
+    }
+    const bodyParts = [titleDraft.trim(), contentDraft].filter(Boolean);
+    const content = bodyParts.join("\n\n");
+    if (!content.trim()) {
+      setSendFeedback("Note is empty — add a title or content first.");
+      return;
+    }
+
+    setSendingMessage(true);
+    setSendFeedback(null);
+    try {
+      const response = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipientId: sendRecipientId,
+          content,
+          sourceNoteId: activeNote.id,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error || `Failed to send (${response.status}).`);
+      }
+      const recipient = recipients.find((r) => r.id === sendRecipientId);
+      const label =
+        recipient?.full_name?.trim() || recipient?.email?.trim() || "employee";
+      setSendFeedback(`Sent to ${label}.`);
+      setSendRecipientId("");
+    } catch (err) {
+      setSendFeedback(toErrorMessage(err, "Failed to send message."));
+    } finally {
+      setSendingMessage(false);
+    }
+  }, [
+    activeNote,
+    contentDraft,
+    notebooks,
+    recipients,
+    sendRecipientId,
+    sendingMessage,
+    titleDraft,
+  ]);
 
   const selectNote = useCallback(async (noteId: string) => {
     setSelectedNoteId(noteId);
@@ -226,34 +320,99 @@ function NotesPageContent() {
 
   const closeCreateNotebookModal = useCallback(() => {
     setIsCreateNotebookModalOpen(false);
-    setNewNotebookName("");
+    setEditingNotebookId(null);
+    setNotebookForm({ name: "", accessLevel: "all", assignedUserIds: [] });
   }, []);
 
-  const createNotebook = useCallback(async () => {
-    const name = newNotebookName.trim();
-    if (!name || creatingNotebook) return;
-    setCreatingNotebook(true);
-    try {
-      const response = await fetch("/api/notes/notebooks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      const payload = (await response.json().catch(() => null)) as
-        | { notebook?: NotebookWithNotes; error?: string }
-        | null;
-      if (!response.ok || !payload?.notebook) {
-        throw new Error(payload?.error || "Failed to create notebook.");
-      }
-      setNotebooks((prev) => [payload.notebook!, ...prev]);
-      setExpanded((prev) => ({ ...prev, [payload.notebook!.id]: true }));
-      closeCreateNotebookModal();
-    } catch (err) {
-      setError(toErrorMessage(err, "Failed to create notebook."));
-    } finally {
-      setCreatingNotebook(false);
+  const openCreateNotebookModal = useCallback(() => {
+    setNotebookForm({ name: "New Notebook", accessLevel: "all", assignedUserIds: [] });
+    setEditingNotebookId(null);
+    setIsCreateNotebookModalOpen(true);
+  }, []);
+
+  const openEditNotebookModal = useCallback((nb: NotebookWithNotes) => {
+    if (nb.isSystem || !nb.canEdit) return;
+    setEditingNotebookId(nb.id);
+    setNotebookForm({
+      name: nb.name,
+      accessLevel: nb.accessLevel,
+      assignedUserIds: [...nb.assignedUserIds],
+    });
+    setIsCreateNotebookModalOpen(true);
+  }, []);
+
+  const toggleAssignedUser = useCallback((userId: string) => {
+    setNotebookForm((prev) => {
+      const has = prev.assignedUserIds.includes(userId);
+      return {
+        ...prev,
+        assignedUserIds: has
+          ? prev.assignedUserIds.filter((id) => id !== userId)
+          : [...prev.assignedUserIds, userId],
+      };
+    });
+  }, []);
+
+  const saveNotebook = useCallback(async () => {
+    const name = notebookForm.name.trim();
+    if (!name || savingNotebook) return;
+    if (
+      notebookForm.accessLevel === "specific" &&
+      notebookForm.assignedUserIds.length === 0
+    ) {
+      setError("Select at least one user for Specific Users access.");
+      return;
     }
-  }, [closeCreateNotebookModal, creatingNotebook, newNotebookName]);
+
+    setSavingNotebook(true);
+    try {
+      const body = {
+        name,
+        accessLevel: notebookForm.accessLevel,
+        assignedUserIds:
+          notebookForm.accessLevel === "specific" ? notebookForm.assignedUserIds : [],
+      };
+
+      if (editingNotebookId) {
+        const response = await fetch(`/api/notes/notebooks/${editingNotebookId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | { notebook?: Omit<NotebookWithNotes, "notes">; error?: string }
+          | null;
+        if (!response.ok || !payload?.notebook) {
+          throw new Error(payload?.error || "Failed to update notebook.");
+        }
+        setNotebooks((prev) =>
+          prev.map((nb) =>
+            nb.id === editingNotebookId ? { ...nb, ...payload.notebook!, notes: nb.notes } : nb
+          )
+        );
+      } else {
+        const response = await fetch("/api/notes/notebooks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | { notebook?: NotebookWithNotes; error?: string }
+          | null;
+        if (!response.ok || !payload?.notebook) {
+          throw new Error(payload?.error || "Failed to create notebook.");
+        }
+        setNotebooks((prev) => [payload.notebook!, ...prev]);
+        setExpanded((prev) => ({ ...prev, [payload.notebook!.id]: true }));
+      }
+      closeCreateNotebookModal();
+      setEditingNotebookId(null);
+    } catch (err) {
+      setError(toErrorMessage(err, "Failed to save notebook."));
+    } finally {
+      setSavingNotebook(false);
+    }
+  }, [closeCreateNotebookModal, editingNotebookId, notebookForm, savingNotebook]);
 
   const createNote = useCallback(
     async (notebookId: string) => {
@@ -349,10 +508,13 @@ function NotesPageContent() {
     [notebooks, selectedNoteId]
   );
 
-  const selectedNotebookName = useMemo(() => {
+  const selectedNotebook = useMemo(() => {
     if (!activeNote) return null;
-    return notebooks.find((nb) => nb.id === activeNote.notebookId)?.name ?? null;
+    return notebooks.find((nb) => nb.id === activeNote.notebookId) ?? null;
   }, [activeNote, notebooks]);
+
+  const selectedNotebookName = selectedNotebook?.name ?? null;
+  const canSendStickyMessage = selectedNotebook?.isSystem === true;
 
   const visibilityOptions = useMemo(() => {
     const base: Array<{ value: NoteVisibility; label: string }> = [
@@ -375,10 +537,7 @@ function NotesPageContent() {
           </div>
           <button
             type="button"
-            onClick={() => {
-              setNewNotebookName("New Notebook");
-              setIsCreateNotebookModalOpen(true);
-            }}
+            onClick={openCreateNotebookModal}
             className="inline-flex h-8 items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-xs font-medium text-zinc-100 hover:bg-zinc-800"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -424,7 +583,12 @@ function NotesPageContent() {
                         }
                         className="min-w-0 flex-1 truncate text-left text-sm font-medium text-zinc-100"
                       >
-                        {nb.name}
+                        <span className="inline-flex items-center gap-1.5">
+                          {nb.isSystem ? (
+                            <Lock className="h-3 w-3 shrink-0 text-amber-400/80" aria-hidden />
+                          ) : null}
+                          <span className="truncate">{nb.name}</span>
+                        </span>
                       </button>
                       <button
                         type="button"
@@ -434,14 +598,26 @@ function NotesPageContent() {
                       >
                         <Plus className="h-3.5 w-3.5" />
                       </button>
-                      <button
-                        type="button"
-                        title="Delete notebook"
-                        onClick={() => void deleteNotebook(nb.id)}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-500 opacity-0 hover:bg-red-950/50 hover:text-red-300 group-hover:opacity-100"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      {nb.canEdit ? (
+                        <button
+                          type="button"
+                          title="Notebook settings"
+                          onClick={() => openEditNotebookModal(nb)}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-400 opacity-0 hover:bg-zinc-800 hover:text-zinc-100 group-hover:opacity-100"
+                        >
+                          <Settings2 className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
+                      {nb.canDelete ? (
+                        <button
+                          type="button"
+                          title="Delete notebook"
+                          onClick={() => void deleteNotebook(nb.id)}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-500 opacity-0 hover:bg-red-950/50 hover:text-red-300 group-hover:opacity-100"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
                     </div>
                     {open ? (
                       <ul className="mb-1 ml-4 space-y-0.5 border-l border-zinc-800 pl-2">
@@ -578,6 +754,50 @@ function NotesPageContent() {
                       ))}
                     </select>
                   </label>
+                  {canSendStickyMessage ? (
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-zinc-500">
+                      <span>Send to</span>
+                      <select
+                        value={sendRecipientId}
+                        onChange={(event) => {
+                          setSendRecipientId(event.target.value);
+                          setSendFeedback(null);
+                        }}
+                        className="max-w-[180px] rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200 outline-none"
+                      >
+                        <option value="">Choose employee…</option>
+                        {recipients.map((user) => (
+                          <option key={user.id} value={user.id}>
+                            {user.full_name?.trim() || user.email?.trim() || user.id}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => void sendNoteAsMessage()}
+                        disabled={!sendRecipientId || sendingMessage}
+                        className="inline-flex items-center gap-1 rounded border border-amber-600/50 bg-amber-500/15 px-2 py-1 text-[11px] font-medium text-amber-100 hover:bg-amber-500/25 disabled:opacity-40"
+                      >
+                        {sendingMessage ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Send className="h-3 w-3" />
+                        )}
+                        Send
+                      </button>
+                      {sendFeedback ? (
+                        <span
+                          className={
+                            sendFeedback.startsWith("Sent")
+                              ? "text-emerald-400"
+                              : "text-red-300"
+                          }
+                        >
+                          {sendFeedback}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               </div>
               <div className="shrink-0 pt-1 text-[11px] text-zinc-500">
@@ -613,23 +833,25 @@ function NotesPageContent() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="create-notebook-title"
-            className="w-full max-w-sm rounded-xl border border-zinc-700 bg-zinc-950 p-4 shadow-xl"
+            className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-950 p-4 shadow-xl"
             onClick={(event) => event.stopPropagation()}
           >
             <h2 id="create-notebook-title" className="text-sm font-semibold text-zinc-100">
-              New notebook
+              {editingNotebookId ? "Edit notebook" : "New notebook"}
             </h2>
             <label className="mt-3 block text-xs text-zinc-400">
               Name
               <input
                 type="text"
                 autoFocus
-                value={newNotebookName}
-                onChange={(event) => setNewNotebookName(event.target.value)}
+                value={notebookForm.name}
+                onChange={(event) =>
+                  setNotebookForm((prev) => ({ ...prev, name: event.target.value }))
+                }
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     event.preventDefault();
-                    void createNotebook();
+                    void saveNotebook();
                   }
                   if (event.key === "Escape") {
                     event.preventDefault();
@@ -640,22 +862,83 @@ function NotesPageContent() {
                 className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
               />
             </label>
+
+            <label className="mt-3 block text-xs text-zinc-400">
+              Access
+              <select
+                value={notebookForm.accessLevel}
+                onChange={(event) =>
+                  setNotebookForm((prev) => ({
+                    ...prev,
+                    accessLevel: event.target.value as NotebookAccessLevel,
+                  }))
+                }
+                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none"
+              >
+                <option value="all">All Team</option>
+                {isAdmin ? <option value="admin_only">Admin Only</option> : null}
+                <option value="specific">Specific Users</option>
+              </select>
+            </label>
+
+            {notebookForm.accessLevel === "specific" ? (
+              <div className="mt-3 max-h-40 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                  Grant access to
+                </p>
+                {recipients.length === 0 ? (
+                  <p className="px-1 py-2 text-xs text-zinc-500">No active users found.</p>
+                ) : (
+                  <ul className="space-y-1">
+                    {recipients.map((user) => {
+                      const checked = notebookForm.assignedUserIds.includes(user.id);
+                      const label = user.full_name?.trim() || user.email?.trim() || user.id;
+                      return (
+                        <li key={user.id}>
+                          <label className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-sm text-zinc-200 hover:bg-zinc-800">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleAssignedUser(user.id)}
+                              className="rounded border-zinc-600"
+                            />
+                            <span className="truncate">{label}</span>
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            ) : null}
+
             <div className="mt-4 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={closeCreateNotebookModal}
-                disabled={creatingNotebook}
+                disabled={savingNotebook}
                 className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                onClick={() => void createNotebook()}
-                disabled={!newNotebookName.trim() || creatingNotebook}
+                onClick={() => void saveNotebook()}
+                disabled={
+                  !notebookForm.name.trim() ||
+                  savingNotebook ||
+                  (notebookForm.accessLevel === "specific" &&
+                    notebookForm.assignedUserIds.length === 0)
+                }
                 className="rounded-lg border border-amber-600/50 bg-amber-500/15 px-3 py-1.5 text-sm font-medium text-amber-100 hover:bg-amber-500/25 disabled:opacity-50"
               >
-                {creatingNotebook ? "Creating…" : "Create"}
+                {savingNotebook
+                  ? editingNotebookId
+                    ? "Saving…"
+                    : "Creating…"
+                  : editingNotebookId
+                    ? "Save"
+                    : "Create"}
               </button>
             </div>
           </div>

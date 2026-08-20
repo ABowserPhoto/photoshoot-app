@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { createServerClient } from "@supabase/ssr";
+import { cookies } from "next/headers";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
+import { isStudioTaskUnassigned, isUserOnStudioTask } from "@/lib/plannerAssignees";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +19,30 @@ function serviceSupabase() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-export async function GET() {
+async function getSessionUserId(): Promise<string | null> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return null;
+  }
+  const cookieStore = await cookies();
+  const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      getAll() {
+        return cookieStore.getAll();
+      },
+      setAll() {
+        // No-op on route reads.
+      },
+    },
+  });
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  return user?.id ?? null;
+}
+
+export async function GET(request: Request) {
   const auth = await getAuthRole();
   if (!auth.authenticated) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -27,12 +53,75 @@ export async function GET() {
     return NextResponse.json({ error: "Database is not configured." }, { status: 503 });
   }
 
+  const userId = await getSessionUserId();
+  const url = new URL(request.url);
+  const assigneeFilter = url.searchParams.get("assignee")?.trim() || null;
+
   const { data, error } = await sb.from("studio_tasks").select("*").order("order_index", { ascending: true });
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ data: data ?? [] });
+  let rows = (data ?? []) as Array<Record<string, unknown>>;
+
+  // Non-admins see: their assigned tasks + fully unassigned tasks (+ templates).
+  // Admins see all, optionally filtered by ?assignee=<profileId> (unassigned always included).
+  if (!auth.isAdmin) {
+    if (!userId) {
+      rows = rows.filter((row) => {
+        if (String(row.status ?? "").toLowerCase() === "template") return true;
+        return isStudioTaskUnassigned({
+          assignedTo: typeof row.assigned_to === "string" ? row.assigned_to : null,
+          assignedUsers: row.assigned_users,
+        });
+      });
+    } else {
+      rows = rows.filter((row) => {
+        if (String(row.status ?? "").toLowerCase() === "template") return true;
+        if (
+          isStudioTaskUnassigned({
+            assignedTo: typeof row.assigned_to === "string" ? row.assigned_to : null,
+            assignedUsers: row.assigned_users,
+          })
+        ) {
+          return true;
+        }
+        return isUserOnStudioTask({
+          userId,
+          assignedTo: typeof row.assigned_to === "string" ? row.assigned_to : null,
+          assignedUsers: row.assigned_users,
+        });
+      });
+    }
+  } else if (assigneeFilter && assigneeFilter !== "all") {
+    rows = rows.filter((row) => {
+      if (String(row.status ?? "").toLowerCase() === "template") return true;
+      if (
+        isStudioTaskUnassigned({
+          assignedTo: typeof row.assigned_to === "string" ? row.assigned_to : null,
+          assignedUsers: row.assigned_users,
+        })
+      ) {
+        return true;
+      }
+      const matchesFilter = isUserOnStudioTask({
+        userId: assigneeFilter,
+        assignedTo: typeof row.assigned_to === "string" ? row.assigned_to : null,
+        assignedUsers: row.assigned_users,
+      });
+      // Keep the admin's own tasks visible so their timer widget stays correct.
+      const matchesSelf =
+        Boolean(userId) &&
+        isUserOnStudioTask({
+          userId,
+          assignedTo: typeof row.assigned_to === "string" ? row.assigned_to : null,
+          assignedUsers: row.assigned_users,
+        });
+      return matchesFilter || matchesSelf;
+    });
+  }
+
+  return NextResponse.json({ data: rows, userId, isAdmin: auth.isAdmin });
 }
 
 type CreatePlannerTaskBody = {

@@ -172,3 +172,86 @@ export async function updateStudioTaskStatus(
 
   return { ok: true };
 }
+
+/**
+ * Admin-only: set studio_tasks elapsed duration.
+ * If the timer is running (`started_at` set), resets `started_at` to now so the
+ * live display continues from the adjusted base without a jump.
+ */
+export async function adjustStudioTaskDuration(
+  taskId: string,
+  elapsedSeconds: number
+): Promise<
+  | { ok: true; elapsedSeconds: number; startedAt: string | null; totalTimeLabel: string | null }
+  | { ok: false; error: string }
+> {
+  const auth = await getAuthRole();
+  if (!auth.authenticated) {
+    return { ok: false, error: "Unauthorized" };
+  }
+  if (!auth.isAdmin) {
+    return { ok: false, error: "Only admins can adjust task timers." };
+  }
+
+  const sb = serviceSupabase();
+  if (!sb) {
+    return { ok: false, error: "Database is not configured." };
+  }
+
+  const id = taskId.trim();
+  if (!id) {
+    return { ok: false, error: "Missing task id." };
+  }
+
+  const nextElapsed = Math.max(0, Math.floor(Number(elapsedSeconds)));
+  if (!Number.isFinite(nextElapsed)) {
+    return { ok: false, error: "Invalid duration." };
+  }
+
+  const { data: row, error: fetchError } = await sb
+    .from("studio_tasks")
+    .select("id, status, started_at, elapsed_seconds")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (fetchError) {
+    return { ok: false, error: fetchError.message };
+  }
+  if (!row) {
+    return { ok: false, error: "Task not found." };
+  }
+
+  const status = String((row as { status?: string }).status ?? "").toLowerCase();
+  const wasRunning = Boolean((row as { started_at?: string | null }).started_at);
+  const startedAt = wasRunning ? new Date().toISOString() : null;
+
+  const hours = Math.floor(nextElapsed / 3600);
+  const minutes = Math.floor((nextElapsed % 3600) / 60);
+  const seconds = nextElapsed % 60;
+  const totalTimeLabel =
+    status === "completed"
+      ? `${hours}h ${minutes}m ${seconds}s`
+      : null;
+
+  const payload: Record<string, unknown> = {
+    elapsed_seconds: nextElapsed,
+    started_at: startedAt,
+  };
+  if (status === "completed") {
+    payload.total_time_label = totalTimeLabel;
+  }
+
+  const { error } = await sb.from("studio_tasks").update(payload).eq("id", id);
+  if (error) {
+    console.error("[adjustStudioTaskDuration]", error);
+    return { ok: false, error: error.message };
+  }
+
+  return {
+    ok: true,
+    elapsedSeconds: nextElapsed,
+    startedAt,
+    totalTimeLabel,
+  };
+}
+

@@ -4,6 +4,7 @@ import { Coffee, Loader2, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState, useTransition } from "react";
 
 import { syncUserJibbleStatus } from "@/app/actions/jibble-sync";
+import { usePlannerGlobalSafe } from "@/app/contexts/PlannerGlobalContext";
 
 type ClockMode = "out" | "working" | "break";
 
@@ -17,9 +18,11 @@ type ClockApiResponse = {
   mode?: ClockMode;
   timeEntryId?: string | number | null;
   error?: unknown;
+  pausedTasks?: Array<{ id?: string; elapsed_seconds?: number }>;
 };
 
 const STORAGE_KEY = "jibble-clock-state-v2";
+export const JIBBLE_BREAK_PAUSED_EVENT = "jibble:break-paused-studio-tasks";
 
 function readInitialClockState(): ClockState {
   if (typeof window === "undefined") {
@@ -93,7 +96,29 @@ function timeEntryIdFromResponse(json: ClockApiResponse | null): string | null {
     : null;
 }
 
+function notifyStudioTasksPausedFromJibbleBreak(
+  pausedTasks: Array<{ id?: string; elapsed_seconds?: number }> | undefined
+) {
+  if (typeof window === "undefined") return;
+  const ids = (pausedTasks ?? [])
+    .map((t) => (typeof t.id === "string" ? t.id.trim() : ""))
+    .filter(Boolean);
+  const elapsedById: Record<string, number> = {};
+  for (const t of pausedTasks ?? []) {
+    if (typeof t.id === "string" && t.id.trim() && typeof t.elapsed_seconds === "number") {
+      elapsedById[t.id.trim()] = Math.max(0, t.elapsed_seconds);
+    }
+  }
+  window.dispatchEvent(
+    new CustomEvent(JIBBLE_BREAK_PAUSED_EVENT, {
+      detail: { taskIds: ids, elapsedById },
+    })
+  );
+  window.dispatchEvent(new Event("desktop-widget:refresh"));
+}
+
 export default function JibbleClockToggle() {
+  const plannerGlobal = usePlannerGlobalSafe();
   const [clockState, setClockState] = useState<ClockState>(() => readInitialClockState());
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -204,6 +229,10 @@ export default function JibbleClockToggle() {
         );
       }
       applyMode("break", timeEntryIdFromResponse(json));
+
+      // Clear floating widget immediately; planner board refreshes via event.
+      plannerGlobal?.setActiveTimerSession(null);
+      notifyStudioTasksPausedFromJibbleBreak(json.pausedTasks);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Break failed.");
     } finally {

@@ -7,6 +7,7 @@ import { Suspense, type ReactNode } from "react";
 import AutoLogout from "@/app/components/AutoLogout";
 import ClientPlannerShell from "@/app/ClientPlannerShell";
 import GlobalAppHeader from "@/app/components/GlobalAppHeader";
+import GlobalMessagePopup from "@/app/components/GlobalMessagePopup";
 import ModuleAccessGuard from "@/app/components/ModuleAccessGuard";
 
 function isDesktopWidgetPath(pathname: string | null) {
@@ -27,6 +28,7 @@ export default function RootAppChrome({ children }: { children: ReactNode }) {
         <Suspense fallback={null}>
           <GlobalAppHeader />
         </Suspense>
+        <GlobalMessagePopup />
         <div className="flex min-h-0 flex-1 flex-col">
           <Suspense
             fallback={

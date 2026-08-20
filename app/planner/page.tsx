@@ -1,21 +1,25 @@
 "use client";
 
 import Image from "next/image";
-import { Pause, Play, Trash2 } from "lucide-react";
+import { Pause, Pencil, Play, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, Suspense, useCallback } from "react";
 import PlannerStats from "@/app/components/PlannerStats";
 import GlobalNavButtons from "@/app/components/GlobalNavButtons";
 import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
-import JibbleClockToggle from "@/app/components/JibbleClockToggle";
+import JibbleClockToggle, { JIBBLE_BREAK_PAUSED_EVENT } from "@/app/components/JibbleClockToggle";
 import TaskAssigneeAvatars from "@/app/components/TaskAssigneeAvatars";
+import EditDurationModal from "@/app/components/EditDurationModal";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { usePlannerGlobalSafe } from "@/app/contexts/PlannerGlobalContext";
 import { supabase } from "@/lib/supabaseClient";
 import { syncPlannerAutoTaskToKanban } from "@/app/actions/agency-sync";
 import { deletePlannerPost } from "@/app/actions/planner";
-import { updateStudioTaskStatus } from "@/app/actions/studio-tasks";
+import { adjustStudioTaskDuration, updateStudioTaskStatus } from "@/app/actions/studio-tasks";
 import {
   appendCurrentUserIfMissing,
+  ensurePrimaryInAssignedUsers,
+  isStudioTaskUnassigned,
+  isUserOnStudioTask,
   parseAssignedUsers,
   serializeAssignedUsers,
   type PlannerAssignee,
@@ -43,7 +47,10 @@ type MoveTaskOptions = {
   startNowFromMaster?: boolean;
   subtasks?: PlannerSubTask[];
   assignedUsers?: PlannerAssignee[];
+  assignedTo?: string | null;
   fileLocations?: string[];
+  /** When pausing into Planning, optional pause notes persisted to pause_reason. */
+  pauseReason?: string | null;
 };
 
 type PlannerStatusKey = "master" | "planning" | "processing" | "completed";
@@ -172,14 +179,6 @@ function normalizePlannerStatus(value: string | null | undefined): PlannerStatus
   return "master";
 }
 
-function normalizeNullableId(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
 function normalizeClientNameInput(value: unknown): string {
   if (typeof value !== "string") {
     return "";
@@ -201,13 +200,6 @@ function normalizeTotalFeeInput(value: unknown): number | null {
   }
   return null;
 }
-
-const SHARED_OWNER_IDS = [
-  ...(process.env.NEXT_PUBLIC_PLANNER_SHARED_OWNER_IDS ?? "").split(","),
-  process.env.NEXT_PUBLIC_MASTER_USER_ID ?? "",
-]
-  .map((value) => value.trim())
-  .filter(Boolean);
 
 function normalizeRecurringType(value: string | null | undefined): RecurringType {
   const normalized = (value ?? "").trim().toLowerCase();
@@ -407,6 +399,16 @@ function isPlannerTimerRunning(task: PlannerTask): boolean {
   return task.status === "processing" && !task.isPaused && task.startedAtSec !== null;
 }
 
+/** Paused = timer stopped with elapsed time (lives in Planning after pause sync). */
+function derivePlannerIsPaused(
+  status: PlannerStatusKey,
+  startedAtSec: number | null,
+  elapsedSeconds: number
+): boolean {
+  if (startedAtSec !== null || elapsedSeconds <= 0) return false;
+  return status === "planning" || status === "processing";
+}
+
 function profileRowToAssignee(row: ProfileRow): PlannerAssignee {
   const name = row.full_name?.trim() || row.email?.trim() || row.id;
   return { id: row.id, name };
@@ -417,7 +419,7 @@ function mapRowToTask(row: StudioTaskRow): PlannerTask {
   const startedAtSec = Number.isFinite(startedAtMs) ? Math.floor(startedAtMs / 1000) : null;
   const status = normalizePlannerStatus(row.status);
   const elapsedSeconds = Math.max(0, row.elapsed_seconds ?? 0);
-  const isPaused = status === "processing" && startedAtSec === null && elapsedSeconds > 0;
+  const isPaused = derivePlannerIsPaused(status, startedAtSec, elapsedSeconds);
   const fileLocations = normalizeFileLocationsValue(row.file_locations, row.file_path);
 
   const baseTask: PlannerTask = {
@@ -449,7 +451,8 @@ function mapRowToTask(row: StudioTaskRow): PlannerTask {
 }
 
 export default function PlannerPage() {
-  const { authenticated, isLoading: authLoading } = useAuthRole();
+  const { authenticated, isLoading: authLoading, isAdmin } = useAuthRole();
+  const plannerGlobalSafe = usePlannerGlobalSafe();
   const [board, setBoard] = useState<PlannerBoardState>(EMPTY_BOARD);
   const [collapsedColumns, setCollapsedColumns] = useState<Partial<Record<PlannerColumnKey, boolean>>>({
     completed: true,
@@ -476,6 +479,11 @@ export default function PlannerPage() {
   const [pauseNotes, setPauseNotes] = useState("");
   const [pauseFilePath, setPauseFilePath] = useState("");
   const [isSavingPause, setIsSavingPause] = useState(false);
+  const [durationEditTaskId, setDurationEditTaskId] = useState<string | null>(null);
+  const [durationEditInitialSeconds, setDurationEditInitialSeconds] = useState(0);
+  const [isSavingDuration, setIsSavingDuration] = useState(false);
+  const [durationEditError, setDurationEditError] = useState<string | null>(null);
+  const [adminAssigneeFilter, setAdminAssigneeFilter] = useState<string>("all");
   const [plannerUserId, setPlannerUserId] = useState<string | null>(null);
   const [profileAssignees, setProfileAssignees] = useState<PlannerAssignee[]>([]);
   const [masterListSubtaskDraft, setMasterListSubtaskDraft] = useState<Record<string, string>>({});
@@ -524,13 +532,17 @@ export default function PlannerPage() {
       const { data: authData } = await supabase.auth.getUser();
       const uid = authData.user?.id ?? null;
       const sessionUserLabel = authData.user?.user_metadata?.full_name ?? authData.user?.email ?? "You";
-      const gatekeeperMode = authenticated && !uid;
       if (isMounted) {
         setPlannerUserId(uid);
       }
 
       const [tasksResult, profilesResult] = await Promise.all([
-        fetch("/api/planner/tasks", { cache: "no-store", credentials: "include" })
+        fetch(
+          isAdmin && adminAssigneeFilter !== "all"
+            ? `/api/planner/tasks?assignee=${encodeURIComponent(adminAssigneeFilter)}`
+            : "/api/planner/tasks",
+          { cache: "no-store", credentials: "include" }
+        )
           .then(async (res) => {
             const json = (await res.json().catch(() => null)) as {
               data?: StudioTaskRow[];
@@ -596,27 +608,38 @@ export default function PlannerPage() {
         if (normalizeDbStatus(row.status) === "template") {
           return true;
         }
-        const assignedTo = normalizeNullableId(row.assigned_to);
-        const ownerOrCreator = normalizeNullableId(row.created_by) ?? normalizeNullableId(row.user_id);
-        const sharedOwnerSet = new Set(SHARED_OWNER_IDS);
+        const unassigned = isStudioTaskUnassigned({
+          assignedTo: row.assigned_to,
+          assignedUsers: row.assigned_users,
+        });
+        // Unassigned tasks are visible to everyone.
+        if (unassigned) return true;
 
-        if (!assignedTo) {
-          return true;
+        // API already filters non-admins; keep a client-side assignee guard.
+        if (isAdmin) {
+          if (adminAssigneeFilter === "all") return true;
+          const matchesFilter = isUserOnStudioTask({
+            userId: adminAssigneeFilter,
+            assignedTo: row.assigned_to,
+            assignedUsers: row.assigned_users,
+          });
+          const matchesSelf =
+            Boolean(uid) &&
+            isUserOnStudioTask({
+              userId: uid,
+              assignedTo: row.assigned_to,
+              assignedUsers: row.assigned_users,
+            });
+          return matchesFilter || matchesSelf;
         }
-        if (!uid && !gatekeeperMode) {
+        if (!uid) {
           return false;
         }
-        if (gatekeeperMode) {
-          return true;
-        }
-
-        const isAssignedToCurrentUser = assignedTo === uid;
-        const isOwnedByCurrentUser = ownerOrCreator === uid;
-        const isSharedOwnerTask =
-          (ownerOrCreator != null && sharedOwnerSet.has(ownerOrCreator)) || sharedOwnerSet.has(assignedTo);
-        const isSystemTask = ownerOrCreator == null;
-
-        return isAssignedToCurrentUser || isOwnedByCurrentUser || isSharedOwnerTask || isSystemTask;
+        return isUserOnStudioTask({
+          userId: uid,
+          assignedTo: row.assigned_to,
+          assignedUsers: row.assigned_users,
+        });
       });
 
       const nextBoard: PlannerBoardState = { master: [], planning: [], processing: [], completed: [] };
@@ -652,7 +675,7 @@ export default function PlannerPage() {
       isMounted = false;
       loadTasksRef.current = null;
     };
-  }, [authLoading, authenticated]);
+  }, [authLoading, authenticated, isAdmin, adminAssigneeFilter]);
 
   useEffect(() => {
     const handleWidgetRefresh = () => {
@@ -666,6 +689,125 @@ export default function PlannerPage() {
       window.removeEventListener("desktop-widget:refresh", handleWidgetRefresh);
     };
   }, []);
+
+  // Jibble break → immediately move this user's paused tasks into Planning on the board.
+  useEffect(() => {
+    const handleJibbleBreakPause = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        taskIds?: string[];
+        elapsedById?: Record<string, number>;
+      }>).detail;
+      const taskIds = new Set((detail?.taskIds ?? []).filter(Boolean));
+      const elapsedById = detail?.elapsedById ?? {};
+      if (taskIds.size === 0) {
+        const refresh = loadTasksRef.current;
+        if (refresh) void refresh();
+        return;
+      }
+
+      setBoard((prev) => {
+        const moved: PlannerTask[] = [];
+        const nextProcessing = prev.processing.filter((task) => {
+          if (!taskIds.has(task.id)) return true;
+          moved.push({
+            ...task,
+            status: "planning",
+            startedAtSec: null,
+            isPaused: true,
+            elapsedSeconds:
+              typeof elapsedById[task.id] === "number"
+                ? elapsedById[task.id]
+                : task.elapsedSeconds,
+            pauseNotes: task.pauseNotes || "Paused automatically — Jibble break started",
+          });
+          return false;
+        });
+        if (moved.length === 0) {
+          return prev;
+        }
+        return applyOrderIndexes({
+          ...prev,
+          processing: nextProcessing,
+          planning: [...moved, ...prev.planning.filter((t) => !taskIds.has(t.id))],
+        });
+      });
+
+      plannerGlobalSafe?.setActiveTimerSession(null);
+      const refresh = loadTasksRef.current;
+      if (refresh) void refresh();
+    };
+
+    window.addEventListener(JIBBLE_BREAK_PAUSED_EVENT, handleJibbleBreakPause);
+    return () => {
+      window.removeEventListener(JIBBLE_BREAK_PAUSED_EVENT, handleJibbleBreakPause);
+    };
+  }, [plannerGlobalSafe]);
+
+  // Realtime: reload board when studio_tasks change for the current viewer.
+  useEffect(() => {
+    if (!supabase || authLoading || !authenticated) {
+      return;
+    }
+
+    const refresh = () => {
+      const load = loadTasksRef.current;
+      if (load) void load();
+    };
+
+    const channel = supabase
+      .channel(`studio-planner-tasks:${plannerUserId ?? "anon"}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "studio_tasks" },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as {
+            assigned_to?: string | null;
+            assigned_users?: unknown;
+            status?: string | null;
+          } | null;
+          if (!row) {
+            refresh();
+            return;
+          }
+          if (String(row.status ?? "").toLowerCase() === "template") {
+            refresh();
+            return;
+          }
+          if (
+            isStudioTaskUnassigned({
+              assignedTo: row.assigned_to,
+              assignedUsers: row.assigned_users,
+            })
+          ) {
+            refresh();
+            return;
+          }
+          if (isAdmin && adminAssigneeFilter === "all") {
+            refresh();
+            return;
+          }
+          const scopeUserId =
+            isAdmin && adminAssigneeFilter !== "all" ? adminAssigneeFilter : plannerUserId;
+          if (!scopeUserId) {
+            return;
+          }
+          if (
+            isUserOnStudioTask({
+              userId: scopeUserId,
+              assignedTo: row.assigned_to,
+              assignedUsers: row.assigned_users,
+            })
+          ) {
+            refresh();
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [authLoading, authenticated, isAdmin, adminAssigneeFilter, plannerUserId]);
 
   const taskLookup = useMemo(() => {
     const map = new Map<string, { task: PlannerTask; column: PlannerStatusKey }>();
@@ -867,7 +1009,7 @@ export default function PlannerPage() {
     destinationStatus: PlannerStatusKey,
     options?: MoveTaskOptions
   ): Promise<void> => {
-    const nowSec = clockSec;
+    const nowSec = Math.floor(Date.now() / 1000);
     const location = taskLookup.get(taskId);
     if (!location) {
       return Promise.resolve();
@@ -882,11 +1024,29 @@ export default function PlannerPage() {
     if (options?.assignedUsers !== undefined) {
       nextTask = { ...nextTask, assignedUsers: options.assignedUsers };
     }
+    if (options?.assignedTo !== undefined) {
+      nextTask = { ...nextTask, assignedTo: options.assignedTo };
+    }
+
+    // Claim unassigned tasks when entering Processing (drag or start/resume).
+    if (destinationStatus === "processing" && plannerUserId && currentPlannerMember) {
+      const wasUnassigned = isStudioTaskUnassigned({
+        assignedTo: location.task.assignedTo,
+        assignedUsers: location.task.assignedUsers,
+      });
+      const nextUsers = appendCurrentUserIfMissing(nextTask.assignedUsers, currentPlannerMember);
+      nextTask = {
+        ...nextTask,
+        assignedUsers: nextUsers,
+        assignedTo: wasUnassigned ? plannerUserId : nextTask.assignedTo,
+      };
+    }
 
     if (options?.subtasks) {
       nextTask = { ...nextTask, subtasks: sortSubtasksForDisplay(options.subtasks) };
     }
 
+    // Freeze a running timer whenever leaving Processing.
     if (sourceStatus === "processing" && nextTask.startedAtSec && destinationStatus !== "processing") {
       nextTask = {
         ...nextTask,
@@ -895,22 +1055,43 @@ export default function PlannerPage() {
       };
     }
 
-    if (destinationStatus === "processing") {
-      const shouldStartNow =
-        options?.startNowFromMaster || (!nextTask.startedAtSec && !nextTask.isPaused && sourceStatus !== "completed");
+    // Drag/move into Planning → pause timer (card belongs in Planning).
+    if (destinationStatus === "planning") {
+      if (nextTask.startedAtSec) {
+        nextTask = {
+          ...nextTask,
+          elapsedSeconds: getElapsedAt(nextTask, nowSec),
+          startedAtSec: null,
+        };
+      }
       nextTask = {
         ...nextTask,
-        startedAtSec: shouldStartNow ? nowSec : nextTask.startedAtSec,
+        isPaused: nextTask.elapsedSeconds > 0,
+        pauseNotes:
+          options?.pauseReason !== undefined
+            ? (options.pauseReason ?? "").trim()
+            : nextTask.pauseNotes,
+      };
+    }
+
+    // Drag/move into Processing → start/resume timer.
+    if (destinationStatus === "processing") {
+      nextTask = {
+        ...nextTask,
+        startedAtSec: nowSec,
+        isPaused: false,
         totalTimeLabel: "",
         completedAt: null,
       };
     }
 
     if (destinationStatus === "planning" && options?.startNowFromMaster) {
+      // Legacy path: master play used to start timer while leaving status as planning.
+      // Prefer Processing; keep no-op here if somehow still used.
       nextTask = {
         ...nextTask,
-        startedAtSec: nowSec,
-        isPaused: false,
+        startedAtSec: null,
+        isPaused: nextTask.elapsedSeconds > 0,
       };
     }
 
@@ -938,6 +1119,15 @@ export default function PlannerPage() {
       };
     }
 
+    if (options?.fileLocations && destinationStatus !== "completed") {
+      const resolvedLocations = normalizeFileLocationsInput(options.fileLocations);
+      nextTask = {
+        ...nextTask,
+        fileLocations: resolvedLocations,
+        filePath: primaryFilePathFromLocations(resolvedLocations) || nextTask.filePath,
+      };
+    }
+
     if (location.task.isAutoGenerated && destinationStatus === "processing") {
       nextTask = {
         ...nextTask,
@@ -953,11 +1143,51 @@ export default function PlannerPage() {
       };
     }
 
+    // Per-user timer concurrency: pause only this user's other running timers.
+    const siblingsToPause: PlannerTask[] = [];
+    if (destinationStatus === "processing" && plannerUserId) {
+      for (const running of boardRef.current.processing) {
+        if (running.id === taskId || !isPlannerTimerRunning(running)) continue;
+        if (
+          !isUserOnStudioTask({
+            userId: plannerUserId,
+            assignedTo: running.assignedTo,
+            assignedUsers: running.assignedUsers,
+          })
+        ) {
+          continue;
+        }
+        siblingsToPause.push({
+          ...running,
+          status: "planning",
+          elapsedSeconds: getElapsedAt(running, nowSec),
+          startedAtSec: null,
+          isPaused: true,
+        });
+      }
+    }
+
+    let boardBase = boardRef.current;
+    if (siblingsToPause.length > 0) {
+      const siblingIds = new Set(siblingsToPause.map((s) => s.id));
+      boardBase = {
+        ...boardBase,
+        processing: boardBase.processing.filter((t) => !siblingIds.has(t.id)),
+        planning: [
+          ...siblingsToPause,
+          ...boardBase.planning.filter((t) => !siblingIds.has(t.id)),
+        ],
+      };
+    }
+
     let previousBoard: PlannerBoardState | null = null;
     const nextBoard = applyOrderIndexes({
-      ...boardRef.current,
-      [sourceStatus]: boardRef.current[sourceStatus].filter((task) => task.id !== taskId),
-      [destinationStatus]: [nextTask, ...boardRef.current[destinationStatus]],
+      ...boardBase,
+      [sourceStatus]: boardBase[sourceStatus].filter((task) => task.id !== taskId),
+      [destinationStatus]: [
+        nextTask,
+        ...boardBase[destinationStatus].filter((task) => task.id !== taskId),
+      ],
     });
 
     setBoard((prev) => {
@@ -967,6 +1197,15 @@ export default function PlannerPage() {
 
     return (async () => {
       try {
+        // Persist sibling pauses first so only this user's other timers stop.
+        for (const sibling of siblingsToPause) {
+          await updateTaskInDb(sibling.id, {
+            status: "planning",
+            started_at: null,
+            elapsed_seconds: sibling.elapsedSeconds,
+          });
+        }
+
         const statusPayload: Parameters<typeof updateTaskInDb>[1] = {
           status: nextTask.status,
           started_at: toDbTimestamp(nextTask.startedAtSec),
@@ -978,7 +1217,11 @@ export default function PlannerPage() {
           recurring_type: nextTask.recurringType,
           subtasks: nextTask.subtasks,
           assigned_users: serializeAssignedUsers(nextTask.assignedUsers),
+          assigned_to: nextTask.assignedTo,
         };
+        if (options?.pauseReason !== undefined) {
+          statusPayload.pause_reason = options.pauseReason?.trim() || null;
+        }
         await updateTaskInDb(taskId, statusPayload);
         const kanbanSync = await syncPlannerAutoTaskToKanban({
           isAutoGenerated: location.task.isAutoGenerated,
@@ -1004,6 +1247,7 @@ export default function PlannerPage() {
               recurringType: nextTask.recurringType,
               label: nextTask.label,
               assignedTo: nextTask.assignedTo,
+              assignedUsers: nextTask.assignedUsers,
               clientName: nextTask.clientName,
               totalFee: nextTask.totalFee,
             },
@@ -1145,7 +1389,11 @@ export default function PlannerPage() {
       description: payload.description.trim(),
       status: targetStatus,
       subtasks: normalizedSubtasks,
-      assignedUsers: [],
+      assignedUsers: ensurePrimaryInAssignedUsers(
+        payload.assignedTo ?? null,
+        payload.assignedUsers ?? [],
+        profileAssignees
+      ),
       assignedTo: payload.assignedTo ?? null,
       label: payload.label,
       isAutoGenerated: false,
@@ -1199,7 +1447,7 @@ export default function PlannerPage() {
             due_date: payload.dueDate,
             recurring_type: payload.recurringType,
             subtasks: normalizedSubtasks,
-            assigned_users: serializeAssignedUsers([]),
+            assigned_users: serializeAssignedUsers(nextTask.assignedUsers),
             label: payload.label,
             assigned_to: payload.assignedTo ?? null,
             client_name: normalizedClientName || null,
@@ -1226,7 +1474,7 @@ export default function PlannerPage() {
               due_date: payload.dueDate,
               recurring_type: payload.recurringType,
               subtasks: normalizedSubtasks,
-              assigned_users: serializeAssignedUsers([]),
+              assigned_users: serializeAssignedUsers(nextTask.assignedUsers),
               label: payload.label,
               assigned_to: payload.assignedTo ?? null,
               client_name: normalizedClientName || null,
@@ -1513,6 +1761,11 @@ export default function PlannerPage() {
         : updates;
     const normalizedClientName = normalizeClientNameInput(effective.clientName);
     const normalizedTotalFee = normalizeTotalFeeInput(effective.totalFee);
+    const nextAssignedUsers = ensurePrimaryInAssignedUsers(
+      effective.assignedTo,
+      effective.assignedUsers ?? [],
+      profileAssignees
+    );
     let previousBoard: PlannerBoardState | null = null;
     setBoard((prev) => {
       previousBoard = prev;
@@ -1531,6 +1784,7 @@ export default function PlannerPage() {
                 recurringType: effective.recurringType,
                 label: effective.label,
                 assignedTo: effective.assignedTo,
+                assignedUsers: nextAssignedUsers,
                 clientName: normalizedClientName,
                 totalFee: normalizedTotalFee,
               }
@@ -1552,6 +1806,7 @@ export default function PlannerPage() {
           recurring_type: effective.recurringType,
           label: effective.label,
           assigned_to: effective.assignedTo,
+          assigned_users: serializeAssignedUsers(nextAssignedUsers),
           client_name: normalizedClientName || null,
           total_fee: normalizedTotalFee,
         });
@@ -1765,14 +2020,15 @@ export default function PlannerPage() {
   };
 
   const handleMasterListPlayClick = (task: PlannerTask) => {
-    if (task.status === "processing" && task.isPaused) {
+    if (task.isPaused || (task.status === "planning" && task.elapsedSeconds > 0 && !task.startedAtSec)) {
       resumeTask(task.id);
       return;
     }
-    if (task.status === "processing" && isPlannerTimerRunning(task)) {
+    if (isPlannerTimerRunning(task)) {
       return;
     }
     if (task.status === "processing") {
+      // Already in Processing but timer not running — start it (and pause any siblings).
       const nowSec = Math.floor(Date.now() / 1000);
       const prepareDone = task.subtasks.some(
         (s) => s.id === STD_PREPARE_ID && s.isCompleted
@@ -1784,34 +2040,127 @@ export default function PlannerPage() {
           );
       const ordered = sortSubtasksForDisplay(withPrepare);
       const nextAssignees = appendCurrentUserIfMissing(task.assignedUsers, currentPlannerMember);
-      updateSingleTask(task.id, (t) => ({
-        ...t,
-        assignedUsers: nextAssignees,
+      void startTimerWhileInProcessing(task.id, {
+        nowSec,
         subtasks: ordered,
-        startedAtSec: nowSec,
-        isPaused: false,
-      }));
-      void (async () => {
-        try {
-          await updateTaskInDb(task.id, {
-            started_at: toDbTimestamp(nowSec),
-            subtasks: ordered,
-            assigned_users: serializeAssignedUsers(nextAssignees),
-          });
-          setPersistenceError(null);
-        } catch (error) {
-          setPersistenceError(error instanceof Error ? error.message : "Could not start timer.");
-        }
-      })();
+        assignedUsers: nextAssignees,
+      });
       return;
     }
     beginProcessingWithPrepareChecked(task.id);
   };
 
+  const startTimerWhileInProcessing = async (
+    taskId: string,
+    opts: {
+      nowSec: number;
+      subtasks?: PlannerSubTask[];
+      assignedUsers?: PlannerAssignee[];
+      assignedTo?: string | null;
+    }
+  ) => {
+    const nowSec = opts.nowSec;
+    const priorBoard = boardRef.current;
+    const priorTask =
+      priorBoard.processing.find((t) => t.id === taskId) ??
+      priorBoard.planning.find((t) => t.id === taskId) ??
+      priorBoard.master.find((t) => t.id === taskId) ??
+      null;
+
+    let claimedAssignedTo = opts.assignedTo;
+    let claimedAssignedUsers = opts.assignedUsers;
+    if (priorTask && plannerUserId && currentPlannerMember) {
+      const wasUnassigned = isStudioTaskUnassigned({
+        assignedTo: priorTask.assignedTo,
+        assignedUsers: priorTask.assignedUsers,
+      });
+      claimedAssignedUsers = appendCurrentUserIfMissing(
+        opts.assignedUsers ?? priorTask.assignedUsers,
+        currentPlannerMember
+      );
+      if (wasUnassigned) {
+        claimedAssignedTo = plannerUserId;
+      }
+    }
+
+    const siblingsToPause: PlannerTask[] = [];
+    if (plannerUserId) {
+      for (const running of priorBoard.processing) {
+        if (running.id === taskId || !isPlannerTimerRunning(running)) continue;
+        if (
+          !isUserOnStudioTask({
+            userId: plannerUserId,
+            assignedTo: running.assignedTo,
+            assignedUsers: running.assignedUsers,
+          })
+        ) {
+          continue;
+        }
+        siblingsToPause.push({
+          ...running,
+          status: "planning",
+          elapsedSeconds: getElapsedAt(running, nowSec),
+          startedAtSec: null,
+          isPaused: true,
+        });
+      }
+    }
+
+    setBoard((prev) => {
+      let next = { ...prev };
+      if (siblingsToPause.length > 0) {
+        const siblingIds = new Set(siblingsToPause.map((s) => s.id));
+        next = {
+          ...next,
+          processing: next.processing.filter((t) => !siblingIds.has(t.id)),
+          planning: [...siblingsToPause, ...next.planning.filter((t) => !siblingIds.has(t.id))],
+        };
+      }
+      next = {
+        ...next,
+        processing: next.processing.map((t) =>
+          t.id === taskId
+            ? {
+                ...t,
+                assignedUsers: claimedAssignedUsers ?? t.assignedUsers,
+                assignedTo: claimedAssignedTo !== undefined ? claimedAssignedTo : t.assignedTo,
+                subtasks: opts.subtasks ?? t.subtasks,
+                startedAtSec: nowSec,
+                isPaused: false,
+              }
+            : t
+        ),
+      };
+      return applyOrderIndexes(next);
+    });
+
+    try {
+      for (const sibling of siblingsToPause) {
+        await updateTaskInDb(sibling.id, {
+          status: "planning",
+          started_at: null,
+          elapsed_seconds: sibling.elapsedSeconds,
+        });
+      }
+      await updateTaskInDb(taskId, {
+        started_at: toDbTimestamp(nowSec),
+        ...(opts.subtasks ? { subtasks: opts.subtasks } : {}),
+        ...(claimedAssignedUsers
+          ? { assigned_users: serializeAssignedUsers(claimedAssignedUsers) }
+          : {}),
+        ...(claimedAssignedTo !== undefined ? { assigned_to: claimedAssignedTo } : {}),
+      });
+      setPersistenceError(null);
+    } catch (error) {
+      setBoard(priorBoard);
+      setPersistenceError(error instanceof Error ? error.message : "Could not start timer.");
+    }
+  };
+
   const requestPauseTask = useCallback(
     (taskId: string) => {
       const latestTask = taskLookup.get(taskId)?.task;
-      if (!latestTask || latestTask.status !== "processing" || latestTask.isPaused) {
+      if (!latestTask || !isPlannerTimerRunning(latestTask)) {
         return;
       }
       setPausingTaskId(taskId);
@@ -1834,89 +2183,110 @@ export default function PlannerPage() {
     }
 
     const taskId = pausingTaskId;
-    const nowSec = Math.floor(Date.now() / 1000);
-    const priorBoard = board;
     const latestTask = taskLookup.get(taskId)?.task;
-    if (!latestTask || latestTask.status !== "processing" || latestTask.isPaused) {
+    if (!latestTask || !isPlannerTimerRunning(latestTask)) {
       closePauseModal();
       return;
     }
 
     const trimmedNotes = pauseNotes.trim();
     const trimmedFilePath = pauseFilePath.trim();
-    const elapsed = getElapsedAt(latestTask, nowSec);
-
-    updateSingleTask(taskId, (task) => ({
-      ...task,
-      elapsedSeconds: elapsed,
-      startedAtSec: null,
-      isPaused: true,
-      pauseNotes: trimmedNotes,
-      fileLocations: normalizeFileLocationsInput(
-        trimmedFilePath ? [...task.fileLocations, trimmedFilePath] : task.fileLocations
-      ),
-      filePath: primaryFilePathFromLocations(
-        normalizeFileLocationsInput(trimmedFilePath ? [...task.fileLocations, trimmedFilePath] : task.fileLocations)
-      ),
-    }));
+    const nextLocations = normalizeFileLocationsInput(
+      trimmedFilePath ? [...latestTask.fileLocations, trimmedFilePath] : latestTask.fileLocations
+    );
 
     setIsSavingPause(true);
     try {
-      await updateTaskInDb(taskId, {
-        started_at: null,
-        elapsed_seconds: elapsed,
-        pause_reason: trimmedNotes || null,
-        file_locations: normalizeFileLocationsInput(
-          trimmedFilePath ? [...latestTask.fileLocations, trimmedFilePath] : latestTask.fileLocations
-        ),
-        file_path: trimmedFilePath || latestTask.filePath || null,
+      // Pause timer → move card to Planning (bi-directional sync).
+      await moveTaskToStatus(taskId, "planning", {
+        fileLocations: nextLocations,
+        pauseReason: trimmedNotes || null,
       });
       setPersistenceError(null);
       closePauseModal();
     } catch (error) {
-      setBoard(priorBoard);
       setPersistenceError(error instanceof Error ? error.message : "Could not pause planner task.");
       setIsSavingPause(false);
     }
   };
 
   const resumeTask = (taskId: string) => {
-    const nowSec = Math.floor(Date.now() / 1000);
-    const priorBoard = board;
-    updateSingleTask(taskId, (task) => {
-      if (task.status !== "processing" || !task.isPaused) {
-        return task;
-      }
-      return {
-        ...task,
-        assignedUsers: appendCurrentUserIfMissing(task.assignedUsers, currentPlannerMember),
-        startedAtSec: nowSec,
-        isPaused: false,
-      };
-    });
-
     const latestTask = taskLookup.get(taskId)?.task;
-    if (!latestTask || latestTask.status !== "processing" || !latestTask.isPaused) {
+    if (!latestTask || latestTask.status === "completed") {
       return;
     }
 
-    const mergedAssign = appendCurrentUserIfMissing(latestTask.assignedUsers, currentPlannerMember);
+    const nextAssignees = appendCurrentUserIfMissing(
+      latestTask.assignedUsers,
+      currentPlannerMember
+    );
 
-    void (async () => {
-      try {
-        await updateTaskInDb(taskId, {
-          started_at: toDbTimestamp(nowSec),
-          assigned_users: serializeAssignedUsers(mergedAssign),
-        });
-        setPersistenceError(null);
-      } catch (error) {
-        setBoard(priorBoard);
-        setPersistenceError(error instanceof Error ? error.message : "Could not resume planner task.");
-      }
-    })();
+    // Resume → Processing column + start timer (also pauses any other running timer).
+    if (latestTask.status !== "processing") {
+      void moveTaskToStatus(taskId, "processing", { assignedUsers: nextAssignees });
+      return;
+    }
+
+    // Legacy: paused while still in Processing — start timer in place.
+    void startTimerWhileInProcessing(taskId, {
+      nowSec: Math.floor(Date.now() / 1000),
+      assignedUsers: nextAssignees,
+    });
   };
 
-  const plannerGlobalSafe = usePlannerGlobalSafe();
+  const openDurationEdit = useCallback(
+    (taskId: string) => {
+      if (!isAdmin) return;
+      const loc = taskLookup.get(taskId);
+      if (!loc) return;
+      const nowSec = Math.floor(Date.now() / 1000);
+      setDurationEditTaskId(taskId);
+      setDurationEditInitialSeconds(getElapsedAt(loc.task, nowSec));
+      setDurationEditError(null);
+    },
+    [isAdmin, taskLookup]
+  );
+
+  const closeDurationEdit = useCallback(() => {
+    if (isSavingDuration) return;
+    setDurationEditTaskId(null);
+    setDurationEditError(null);
+  }, [isSavingDuration]);
+
+  const handleSaveDurationAdjustment = useCallback(
+    async (totalSeconds: number) => {
+      if (!durationEditTaskId || isSavingDuration) return;
+      setIsSavingDuration(true);
+      setDurationEditError(null);
+      try {
+        const res = await adjustStudioTaskDuration(durationEditTaskId, totalSeconds);
+        if (!res.ok) {
+          throw new Error(res.error);
+        }
+        const startedAtSec = res.startedAt
+          ? Math.floor(new Date(res.startedAt).getTime() / 1000)
+          : null;
+        updateSingleTask(durationEditTaskId, (task) => ({
+          ...task,
+          elapsedSeconds: res.elapsedSeconds,
+          startedAtSec,
+          isPaused: derivePlannerIsPaused(task.status, startedAtSec, res.elapsedSeconds),
+          totalTimeLabel:
+            task.status === "completed"
+              ? res.totalTimeLabel ?? formatDuration(res.elapsedSeconds)
+              : task.totalTimeLabel,
+        }));
+        setDurationEditTaskId(null);
+        setPersistenceError(null);
+      } catch (err) {
+        setDurationEditError(err instanceof Error ? err.message : "Could not save duration.");
+      } finally {
+        setIsSavingDuration(false);
+      }
+    },
+    [durationEditTaskId, isSavingDuration]
+  );
+
   const setGlobalActiveTimer = plannerGlobalSafe?.setActiveTimerSession;
   const globalPauseHandlerRef = plannerGlobalSafe?.pauseHandlerRef;
 
@@ -1934,9 +2304,19 @@ export default function PlannerPage() {
     if (!setGlobalActiveTimer) {
       return;
     }
+    const isMine = (t: PlannerTask) =>
+      Boolean(plannerUserId) &&
+      isUserOnStudioTask({
+        userId: plannerUserId,
+        assignedTo: t.assignedTo,
+        assignedUsers: t.assignedUsers,
+      });
+
     const running =
-      board.processing.find((t) => isPlannerTimerRunning(t)) ??
-      [...board.master, ...board.planning, ...board.processing].find((t) => isPlannerTimerRunning(t));
+      board.processing.find((t) => isPlannerTimerRunning(t) && isMine(t)) ??
+      [...board.master, ...board.planning, ...board.processing].find(
+        (t) => isPlannerTimerRunning(t) && isMine(t)
+      );
 
     if (!running) {
       setGlobalActiveTimer(null);
@@ -1952,7 +2332,7 @@ export default function PlannerPage() {
       isPaused: running.isPaused,
       remainingSubtasks: remaining,
     });
-  }, [board, clockSec, setGlobalActiveTimer]);
+  }, [board, clockSec, setGlobalActiveTimer, plannerUserId]);
 
   return (
     <div className="relative min-h-screen bg-zinc-50 px-4 py-8 font-sans dark:bg-black sm:px-6 lg:px-8">
@@ -1989,6 +2369,23 @@ export default function PlannerPage() {
               ) : null}
               {persistenceError ? (
                 <p className="mt-1 text-xs text-red-600 dark:text-red-400">{persistenceError}</p>
+              ) : null}
+              {isAdmin ? (
+                <label className="mt-3 flex max-w-xs flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+                  <span className="font-medium text-zinc-700 dark:text-zinc-300">Show tasks for</span>
+                  <select
+                    value={adminAssigneeFilter}
+                    onChange={(e) => setAdminAssigneeFilter(e.target.value)}
+                    className="h-9 rounded-md border border-zinc-300 bg-white px-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                  >
+                    <option value="all">All employees</option>
+                    {profileAssignees.map((assignee) => (
+                      <option key={assignee.id} value={assignee.id}>
+                        {assignee.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               ) : null}
             </div>
           </div>
@@ -2277,13 +2674,11 @@ export default function PlannerPage() {
                         }}
                         className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-emerald-300 px-3 text-xs font-semibold text-emerald-700 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-200 dark:hover:bg-emerald-900/30"
                         aria-label={
-                          task.status === "processing" && task.isPaused
-                            ? "Resume time tracking"
-                            : "Start time tracking"
+                          task.isPaused ? "Resume time tracking" : "Start time tracking"
                         }
                       >
                         <Play className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
-                        {task.status === "processing" && task.isPaused ? "Resume" : "Start"}
+                        {task.isPaused ? "Resume" : "Start"}
                       </button>
                     )}
                   </article>
@@ -2393,7 +2788,7 @@ export default function PlannerPage() {
                                 </div>
                               </div>
                               <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{task.description}</p>
-                              {column.id === "processing" && task.isPaused ? (
+                              {task.isPaused && (column.id === "planning" || column.id === "processing") ? (
                                 <div className="mt-2 space-y-1">
                                   <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-200">
                                     Paused
@@ -2409,12 +2804,47 @@ export default function PlannerPage() {
                                   ) : null}
                                 </div>
                               ) : null}
+                              {column.id === "planning" && task.isPaused ? (
+                                <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-zinc-600 dark:text-zinc-300">
+                                  <span>Elapsed: {formatDuration(task.elapsedSeconds)}</span>
+                                  {isAdmin ? (
+                                    <button
+                                      type="button"
+                                      title="Edit duration"
+                                      aria-label="Edit duration"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        openDurationEdit(task.id);
+                                      }}
+                                      className="rounded p-0.5 text-zinc-400 opacity-0 transition hover:bg-zinc-200 hover:text-zinc-700 group-hover:opacity-100 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                                    >
+                                      <Pencil className="h-3 w-3" strokeWidth={2} />
+                                    </button>
+                                  ) : null}
+                                </div>
+                              ) : null}
                               {column.id === "processing" || column.id === "completed" ? (
-                                <p className="mt-2 text-[11px] font-medium text-zinc-600 dark:text-zinc-300">
-                                  {column.id === "completed"
-                                    ? `Total: ${task.totalTimeLabel || formatDuration(task.elapsedSeconds)}`
-                                    : `Elapsed: ${formatDuration(elapsedNow)}`}
-                                </p>
+                                <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-zinc-600 dark:text-zinc-300">
+                                  <span>
+                                    {column.id === "completed"
+                                      ? `Total: ${task.totalTimeLabel || formatDuration(task.elapsedSeconds)}`
+                                      : `Elapsed: ${formatDuration(elapsedNow)}`}
+                                  </span>
+                                  {isAdmin ? (
+                                    <button
+                                      type="button"
+                                      title="Edit duration"
+                                      aria-label="Edit duration"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        openDurationEdit(task.id);
+                                      }}
+                                      className="rounded p-0.5 text-zinc-400 opacity-0 transition hover:bg-zinc-200 hover:text-zinc-700 group-hover:opacity-100 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                                    >
+                                      <Pencil className="h-3 w-3" strokeWidth={2} />
+                                    </button>
+                                  ) : null}
+                                </div>
                               ) : null}
                               {column.id === "completed" && task.fileLocations.length > 0 ? (
                                 <p className="mt-1 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
@@ -2467,6 +2897,15 @@ export default function PlannerPage() {
         onConfirmPause={() => void handleConfirmPause()}
         onCancel={closePauseModal}
       />
+      <EditDurationModal
+        isOpen={durationEditTaskId !== null}
+        title="Edit Duration"
+        initialSeconds={durationEditInitialSeconds}
+        isSaving={isSavingDuration}
+        error={durationEditError}
+        onCancel={closeDurationEdit}
+        onSave={(seconds) => void handleSaveDurationAdjustment(seconds)}
+      />
       <PlannerCompletionPathModal
         isOpen={pathModalTaskId !== null}
         fileLocations={completionFileLocationsInputValue}
@@ -2482,6 +2921,7 @@ export default function PlannerPage() {
         templates={templates}
         assigneeOptions={profileAssignees}
         isOpen={modalOpen}
+        isAdmin={isAdmin}
         onClose={closeTaskModal}
         onSave={updateTask}
         onCreate={handleCreateTask}
@@ -2489,6 +2929,7 @@ export default function PlannerPage() {
         onDelete={deleteTask}
         onPauseTask={requestPauseTask}
         onResumeTask={resumeTask}
+        onEditDuration={openDurationEdit}
       />
     </div>
   );

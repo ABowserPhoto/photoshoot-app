@@ -5,7 +5,7 @@ import {
   type ReportingTimeframe,
   resolveReportingRange,
 } from "@/lib/reportingPeriod";
-import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
+import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 import { isTestTaskRow } from "@/lib/testTaskFilter";
 
 export const dynamic = "force-dynamic";
@@ -142,9 +142,9 @@ function buildMetrics(rows: TaskRow[]): Metrics {
 }
 
 export async function GET(request: Request) {
-  const auth = await getAdminAreaAuth();
-  if (!auth.authenticated || !auth.isAdmin) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const access = await assertModuleAccess("statistics");
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
   const { searchParams } = new URL(request.url);

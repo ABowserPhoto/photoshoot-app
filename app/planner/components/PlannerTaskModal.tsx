@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState, type DragEvent } from "react";
 import { useRouter } from "next/navigation";
+import { Pencil } from "lucide-react";
 
 import { getOrCreateTaskMoodboard } from "@/app/actions/moodboard";
 import {
@@ -61,6 +62,7 @@ export type PlannerModalSaveInput = {
   recurringType: "none" | "daily" | "weekly" | "monthly";
   label: PlannerTaskLabel;
   assignedTo: string | null;
+  assignedUsers: PlannerAssignee[];
   clientName: string;
   totalFee: number | null;
 };
@@ -79,6 +81,7 @@ type PlannerTaskModalProps = {
   mode: "create" | "edit";
   templates: PlannerTemplateOption[];
   assigneeOptions: PlannerAssignee[];
+  isAdmin?: boolean;
   onClose: () => void;
   onSave: (taskId: string, updates: PlannerModalSaveInput) => void;
   onCreate: (updates: PlannerModalSaveInput) => void;
@@ -86,6 +89,7 @@ type PlannerTaskModalProps = {
   onDelete: (taskId: string) => void;
   onPauseTask: (taskId: string) => void;
   onResumeTask: (taskId: string) => void;
+  onEditDuration?: (taskId: string) => void;
 };
 
 function toDateTimeLocalInput(value: string | null): string {
@@ -106,6 +110,7 @@ export default function PlannerTaskModal({
   mode,
   templates,
   assigneeOptions,
+  isAdmin = false,
   onClose,
   onSave,
   onCreate,
@@ -113,6 +118,7 @@ export default function PlannerTaskModal({
   onDelete,
   onPauseTask,
   onResumeTask,
+  onEditDuration,
 }: PlannerTaskModalProps) {
   const router = useRouter();
   const isCreateMode = mode === "create";
@@ -130,6 +136,7 @@ export default function PlannerTaskModal({
   const [label, setLabel] = useState<PlannerTaskLabel>(task?.label ?? null);
   const [openingReviewBoard, setOpeningReviewBoard] = useState(false);
   const [assignedTo, setAssignedTo] = useState<string | null>(task?.assignedTo ?? null);
+  const [assignedUsers, setAssignedUsers] = useState<PlannerAssignee[]>(task?.assignedUsers ?? []);
   const [clientName, setClientName] = useState(task?.clientName ?? "");
   const [totalFeeInput, setTotalFeeInput] = useState(
     task?.totalFee != null && Number.isFinite(task.totalFee) ? String(task.totalFee) : ""
@@ -140,20 +147,39 @@ export default function PlannerTaskModal({
 
   // Keep archived assignees visible when editing historical tasks.
   const effectiveAssigneeOptions = useMemo(() => {
-    if (!assignedTo || assigneeOptions.some((u) => u.id === assignedTo)) {
-      return assigneeOptions;
+    const byId = new Map<string, PlannerAssignee>();
+    for (const u of assigneeOptions) {
+      byId.set(u.id, u);
     }
-    const fromHistory = (task?.assignedUsers ?? []).find((u) => u.id === assignedTo);
-    return [
-      ...assigneeOptions,
-      {
+    if (assignedTo && !byId.has(assignedTo)) {
+      const fromHistory = (task?.assignedUsers ?? []).find((u) => u.id === assignedTo);
+      byId.set(assignedTo, {
         id: assignedTo,
         name: fromHistory?.name
           ? `${fromHistory.name} (archived)`
           : `Archived user (${assignedTo.slice(0, 8)}…)`,
-      },
-    ];
-  }, [assigneeOptions, assignedTo, task?.assignedUsers]);
+      });
+    }
+    for (const u of assignedUsers) {
+      if (!byId.has(u.id)) {
+        byId.set(u.id, {
+          id: u.id,
+          name: `${u.name} (archived)`,
+          ...(u.avatar ? { avatar: u.avatar } : {}),
+        });
+      }
+    }
+    return Array.from(byId.values());
+  }, [assigneeOptions, assignedTo, assignedUsers, task?.assignedUsers]);
+
+  const toggleCollaborator = (user: PlannerAssignee) => {
+    setAssignedUsers((prev) => {
+      if (prev.some((u) => u.id === user.id)) {
+        return prev.filter((u) => u.id !== user.id);
+      }
+      return [...prev, { id: user.id, name: user.name, ...(user.avatar ? { avatar: user.avatar } : {}) }];
+    });
+  };
 
   useEffect(() => {
     if (!isOpen) {
@@ -168,6 +194,7 @@ export default function PlannerTaskModal({
       setRecurringType(task.recurringType ?? "none");
       setLabel(task.label ?? null);
       setAssignedTo(task.assignedTo ?? null);
+      setAssignedUsers(task.assignedUsers ?? []);
       setClientName(task.clientName ?? "");
       setTotalFeeInput(
         task.totalFee != null && Number.isFinite(task.totalFee) ? String(task.totalFee) : ""
@@ -181,6 +208,7 @@ export default function PlannerTaskModal({
       setRecurringType("none");
       setLabel(null);
       setAssignedTo(null);
+      setAssignedUsers([]);
       setClientName("");
       setTotalFeeInput("");
     }
@@ -320,6 +348,18 @@ export default function PlannerTaskModal({
 
   const handleSave = () => {
     const normalizedFileLocations = normalizeLocations(fileLocations);
+    const collaboratorIds = new Set(assignedUsers.map((u) => u.id));
+    // Keep primary assignee in the collaborators list for board avatars / visibility.
+    let nextCollaborators = assignedUsers;
+    if (assignedTo && !collaboratorIds.has(assignedTo)) {
+      const primary = effectiveAssigneeOptions.find((u) => u.id === assignedTo);
+      if (primary) {
+        nextCollaborators = [
+          ...assignedUsers,
+          { id: primary.id, name: primary.name, ...(primary.avatar ? { avatar: primary.avatar } : {}) },
+        ];
+      }
+    }
     const payload: PlannerModalSaveInput = {
       title: title.trim() || "Untitled Task",
       description: description.trim(),
@@ -329,6 +369,7 @@ export default function PlannerTaskModal({
       recurringType,
       label,
       assignedTo,
+      assignedUsers: nextCollaborators,
       clientName: clientName.trim(),
       totalFee: parseTotalFee(totalFeeInput),
     };
@@ -369,6 +410,7 @@ export default function PlannerTaskModal({
       recurringType,
       label,
       assignedTo,
+      assignedUsers,
       clientName: clientName.trim(),
       totalFee: parseTotalFee(totalFeeInput),
     });
@@ -444,12 +486,30 @@ export default function PlannerTaskModal({
             </select>
           </label>
           <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Assigned to
+            Primary assignee
             <select
               value={assignedTo ?? ""}
               onChange={(event) => {
                 const v = event.target.value;
-                setAssignedTo(v === "" ? null : v);
+                const nextId = v === "" ? null : v;
+                setAssignedTo(nextId);
+                if (nextId) {
+                  const user = effectiveAssigneeOptions.find((u) => u.id === nextId);
+                  if (user) {
+                    setAssignedUsers((prev) =>
+                      prev.some((u) => u.id === nextId)
+                        ? prev
+                        : [
+                            ...prev,
+                            {
+                              id: user.id,
+                              name: user.name,
+                              ...(user.avatar ? { avatar: user.avatar } : {}),
+                            },
+                          ]
+                    );
+                  }
+                }
               }}
               className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
             >
@@ -483,6 +543,44 @@ export default function PlannerTaskModal({
             />
           </label>
         </div>
+
+        <fieldset className="mt-4">
+          <legend className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            Collaborators
+          </legend>
+          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            Additional people who can see and work on this task.
+          </p>
+          <div className="mt-2 max-h-40 space-y-1 overflow-y-auto rounded-lg border border-zinc-300 p-2 dark:border-zinc-700">
+            {effectiveAssigneeOptions.length === 0 ? (
+              <p className="px-1 py-2 text-sm text-zinc-500 dark:text-zinc-400">No staff profiles available.</p>
+            ) : (
+              effectiveAssigneeOptions.map((user) => {
+                const checked = assignedUsers.some((u) => u.id === user.id);
+                const isPrimary = assignedTo === user.id;
+                return (
+                  <label
+                    key={user.id}
+                    className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm text-zinc-800 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleCollaborator(user)}
+                      className="h-4 w-4 rounded border-zinc-400 text-zinc-900 focus:ring-zinc-500"
+                    />
+                    <span className="min-w-0 flex-1 truncate">{user.name}</span>
+                    {isPrimary ? (
+                      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                        Primary
+                      </span>
+                    ) : null}
+                  </label>
+                );
+              })
+            )}
+          </div>
+        </fieldset>
 
         <div className="mt-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Sub-tasks</p>
@@ -627,9 +725,22 @@ export default function PlannerTaskModal({
         <div className="mt-4 rounded-lg border border-zinc-300 bg-zinc-50 px-3 py-2 text-xs text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-300">
           {!isCreateMode && task?.status === "completed" ? (
             <div className="space-y-1">
-              <p>
-                Total time: <span className="font-semibold">{task.totalTimeLabel || "N/A"}</span>
-              </p>
+              <div className="flex items-center gap-1.5">
+                <p>
+                  Total time: <span className="font-semibold">{task.totalTimeLabel || "N/A"}</span>
+                </p>
+                {isAdmin && onEditDuration ? (
+                  <button
+                    type="button"
+                    title="Edit duration"
+                    aria-label="Edit duration"
+                    onClick={() => onEditDuration(task.id)}
+                    className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                  >
+                    <Pencil className="h-3 w-3" strokeWidth={2} />
+                  </button>
+                ) : null}
+              </div>
               <p className="truncate">
                 Finished files:{" "}
                 <span className="font-semibold">
@@ -638,12 +749,26 @@ export default function PlannerTaskModal({
               </p>
             </div>
           ) : (
-            <p>
-              Current elapsed:{" "}
-              <span className="font-semibold">
-                {Math.floor((task?.elapsedSeconds ?? 0) / 3600)}h {Math.floor(((task?.elapsedSeconds ?? 0) % 3600) / 60)}m
-              </span>
-            </p>
+            <div className="flex items-center gap-1.5">
+              <p>
+                Current elapsed:{" "}
+                <span className="font-semibold">
+                  {Math.floor((task?.elapsedSeconds ?? 0) / 3600)}h{" "}
+                  {Math.floor(((task?.elapsedSeconds ?? 0) % 3600) / 60)}m
+                </span>
+              </p>
+              {!isCreateMode && task && isAdmin && onEditDuration ? (
+                <button
+                  type="button"
+                  title="Edit duration"
+                  aria-label="Edit duration"
+                  onClick={() => onEditDuration(task.id)}
+                  className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                >
+                  <Pencil className="h-3 w-3" strokeWidth={2} />
+                </button>
+              ) : null}
+            </div>
           )}
         </div>
 
@@ -669,7 +794,7 @@ export default function PlannerTaskModal({
           >
             Save as Template
           </button>
-          {!isCreateMode && task?.status === "processing" && !task.isPaused ? (
+          {!isCreateMode && task?.status === "processing" && !task.isPaused && task.startedAtSec !== null ? (
             <button
               type="button"
               onClick={() => onPauseTask(task.id)}
@@ -678,7 +803,7 @@ export default function PlannerTaskModal({
               Pause Task
             </button>
           ) : null}
-          {!isCreateMode && task?.status === "processing" && task.isPaused ? (
+          {!isCreateMode && task?.isPaused ? (
             <button
               type="button"
               onClick={() => onResumeTask(task.id)}

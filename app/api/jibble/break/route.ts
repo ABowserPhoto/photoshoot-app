@@ -6,6 +6,7 @@ import {
   postJibbleBreakEntry,
   resolveJibbleEmployeeId,
 } from "@/lib/server/jibbleTimeEntries";
+import { pauseUserActiveStudioTasks } from "@/lib/server/pauseUserActiveStudioTasks";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,9 @@ export const dynamic = "force-dynamic";
  * Optional body: `{ "breakId": "<uuid>" }` for custom schedule breaks;
  * otherwise uses `JIBBLE_BREAK_ID` or the first available GetBreaks policy
  * (free-form orgs can omit breakId entirely).
+ *
+ * After a successful break, auto-pauses the signed-in user's running
+ * Studio Planner timer(s) only (other users are unaffected).
  */
 export async function POST(request: Request) {
   const auth = await getAuthRole();
@@ -58,12 +62,19 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: result.error }, { status: result.status });
     }
 
+    // One-way sync: Jibble break → pause this user's active studio timer(s).
+    const pauseResult = await pauseUserActiveStudioTasks(userId);
+    if (!pauseResult.ok) {
+      console.warn("[jibble break] studio timer pause failed", pauseResult.error);
+    }
+
     return NextResponse.json({
       ok: true,
       employeeId: result.employeeId,
       type: "StartBreak",
       breakId: result.breakId,
       mode: "break",
+      pausedTasks: pauseResult.pausedTasks,
       raw: result.raw,
     });
   } catch (error) {
@@ -76,3 +87,4 @@ export async function POST(request: Request) {
     );
   }
 }
+
