@@ -14,6 +14,8 @@ export type TaskClientLinkInput = {
   street?: string | null;
   zip_code?: string | null;
   city?: string | null;
+  country?: string | null;
+  address_supplement?: string | null;
   lexoffice_contact_id?: string | null;
 };
 
@@ -40,21 +42,35 @@ function composeContactName(input: TaskClientLinkInput): string | null {
 function composeBillingAddress(input: TaskClientLinkInput): string | null {
   const parts = [
     trimString(input.street),
+    trimString(input.address_supplement),
     [trimString(input.zip_code), trimString(input.city)].filter(Boolean).join(" "),
+    trimString(input.country),
   ].filter(Boolean);
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
-function buildClientInsertPayload(companyName: string, input: TaskClientLinkInput) {
+function buildClientWritePayload(companyName: string, input: TaskClientLinkInput) {
   const lexofficeId = trimString(input.lexoffice_contact_id) || null;
+  const street = trimString(input.street) || null;
+  const zipCode = trimString(input.zip_code) || null;
+  const city = trimString(input.city) || null;
+  const country = trimString(input.country) || null;
+  const addressSupplement = trimString(input.address_supplement) || null;
+
   return {
     company_name: companyName,
     contact_name: composeContactName(input),
     email: trimString(input.email) || null,
     phone: trimString(input.phone) || null,
-    street: trimString(input.street) || null,
-    zip_code: trimString(input.zip_code) || null,
-    city: trimString(input.city) || null,
+    street,
+    zip_code: zipCode,
+    city,
+    country,
+    address_supplement: addressSupplement,
+    billing_street: street,
+    billing_postal_code: zipCode,
+    billing_city: city,
+    billing_country: country,
     billing_address: composeBillingAddress(input),
     lexoffice_contact_id: lexofficeId,
     lexoffice_id: lexofficeId,
@@ -83,6 +99,8 @@ async function findClientByCompanyName(
 
 /**
  * Finds an existing CRM client by company/client name (case-insensitive) or creates one.
+ * When an existing client is found, address/contact fields from the booking are written back
+ * onto the `clients` row so Addresszusatz and moves persist for the next booking.
  * Returns null when no company/client label is available on the task.
  */
 export async function resolveOrCreateClientIdForTask(
@@ -99,16 +117,41 @@ export async function resolveOrCreateClientIdForTask(
     throw new Error("Supabase admin client is not configured. Set SUPABASE_SERVICE_ROLE_KEY.");
   }
 
+  const writePayload = buildClientWritePayload(companyName, input);
   const existing = await findClientByCompanyName(supabase, companyName);
   if (existing) {
+    const { error: updateError } = await supabase
+      .from("clients")
+      .update({
+        street: writePayload.street,
+        zip_code: writePayload.zip_code,
+        city: writePayload.city,
+        country: writePayload.country,
+        address_supplement: writePayload.address_supplement,
+        billing_street: writePayload.billing_street,
+        billing_postal_code: writePayload.billing_postal_code,
+        billing_city: writePayload.billing_city,
+        billing_country: writePayload.billing_country,
+        billing_address: writePayload.billing_address,
+        contact_name: writePayload.contact_name,
+        // Prefer booking values when provided; leave existing CRM email/phone if blank on form.
+        ...(writePayload.email ? { email: writePayload.email } : {}),
+        ...(writePayload.phone ? { phone: writePayload.phone } : {}),
+        ...(writePayload.lexoffice_contact_id
+          ? {
+              lexoffice_contact_id: writePayload.lexoffice_contact_id,
+              lexoffice_id: writePayload.lexoffice_id,
+            }
+          : {}),
+      })
+      .eq("id", existing.id);
+    if (updateError) {
+      throw new Error(updateError.message);
+    }
     return existing.id;
   }
 
-  const { data, error } = await supabase
-    .from("clients")
-    .insert(buildClientInsertPayload(companyName, input))
-    .select("id")
-    .single();
+  const { data, error } = await supabase.from("clients").insert(writePayload).select("id").single();
 
   if (error) {
     throw new Error(error.message);
@@ -135,6 +178,8 @@ export async function attachClientIdToTaskPayload(
     street: trimString(payload.street) || null,
     zip_code: trimString(payload.zip_code) || null,
     city: trimString(payload.city) || null,
+    country: trimString(payload.country) || null,
+    address_supplement: trimString(payload.address_supplement) || null,
     lexoffice_contact_id: trimString(payload.lexoffice_contact_id) || null,
   };
 

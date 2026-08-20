@@ -80,15 +80,24 @@ export default function GalleryPage() {
   const [isLockedByServer, setIsLockedByServer] = useState(false);
   const [lockedSelectedGallery, setLockedSelectedGallery] = useState<GalleryItem[]>([]);
   const [selectionLockedAt, setSelectionLockedAt] = useState<string | null>(null);
+  /** False until /api/gallery/generate finishes so localStorage cannot wipe server selection. */
+  const [selectionHydrated, setSelectionHydrated] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [rotatingByChunk, setRotatingByChunk] = useState<Record<number, RotateDirection | undefined>>({});
 
   const selectedCount = selectedChunks.size;
+  /** Immobilien / Food / Real Estate keep landscape tiles; all other types use portrait tiles. */
   const isLandscape = useMemo(() => {
     const type = photoshootType.trim().toLowerCase();
-    return ["immobilien", "food", "real estate"].includes(type);
+    return type === "immobilien" || type === "food" || type === "real estate";
   }, [photoshootType]);
+  // object-contain (not cover) so we never crop/stretch RAW orientation into the wrong frame.
+  const thumbImageClass =
+    "h-full w-full bg-zinc-950 object-contain transition duration-200 group-hover:opacity-95";
+  const thumbFrameClass = isLandscape
+    ? "relative aspect-[3/2] w-full overflow-hidden bg-zinc-950"
+    : "relative aspect-[2/3] w-full overflow-hidden bg-zinc-950";
   const selectedIndices = useMemo(
     () => Array.from(selectedChunks).sort((a, b) => a - b),
     [selectedChunks]
@@ -154,43 +163,36 @@ export default function GalleryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shootId, bracketSizeFromUrl]);
 
+  // Persist in-progress drafts only after server hydrate; never overwrite a locked selection.
   useEffect(() => {
-    if (!selectionStorageKey) {
-      setSelectedChunks(new Set());
+    if (!selectionStorageKey || !selectionHydrated) {
       return;
     }
-    if (isLockedByServer) {
-      return;
-    }
-    try {
-      const raw = window.localStorage.getItem(selectionStorageKey);
-      if (!raw) {
-        setSelectedChunks(new Set());
-        return;
-      }
-      const parsed = JSON.parse(raw) as unknown;
-      const selected = Array.isArray(parsed)
-        ? parsed.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 0)
-        : [];
-      setSelectedChunks(new Set(selected));
-    } catch {
-      setSelectedChunks(new Set());
-    }
-  }, [isLockedByServer, selectionStorageKey]);
-
-  useEffect(() => {
-    if (!selectionStorageKey) {
-      return;
-    }
-    if (isLockedByServer) {
+    if (isLockedByServer || isSuccess) {
       window.localStorage.removeItem(selectionStorageKey);
       return;
     }
     window.localStorage.setItem(selectionStorageKey, JSON.stringify(selectedIndices));
-  }, [isLockedByServer, selectionStorageKey, selectedIndices]);
+  }, [isLockedByServer, isSuccess, selectionHydrated, selectionStorageKey, selectedIndices]);
+
+  function readDraftSelection(storageKey: string): number[] {
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) {
+        return [];
+      }
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed)
+        ? parsed.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 0)
+        : [];
+    } catch {
+      return [];
+    }
+  }
 
   async function loadGallery(targetShootId: string) {
     setIsLoading(true);
+    setSelectionHydrated(false);
     setErrorMessage(null);
     setSuccessMessage(null);
     setIsSuccess(false);
@@ -212,13 +214,14 @@ export default function GalleryPage() {
       if (!response.ok) {
         setTaskStatus(null);
         setGallery([]);
+        setSelectedChunks(new Set());
         setErrorMessage(payload?.error ?? `Galerie konnte nicht geladen werden (${response.status}).`);
         return;
       }
       setLocalFolderName(payload?.localFolderName ?? "");
       setTaskStatus(typeof payload?.status === "string" ? payload.status : "");
       setPhotoshootType(typeof payload?.photoshootType === "string" ? payload.photoshootType : "");
-      setGallery(payload?.gallery ?? []);
+
       const serverSelectedIndices = Array.from(
         new Set(
           (Array.isArray(payload?.selection?.selectedChunkIndices) ? payload.selection.selectedChunkIndices : [])
@@ -226,23 +229,45 @@ export default function GalleryPage() {
             .filter((value) => Number.isInteger(value) && value >= 0)
         )
       ).sort((a, b) => a - b);
+
+      // When a selection exists, generate returns selected tiles separately and omits them from `gallery`.
+      const allGalleryItems = [
+        ...(payload?.gallery ?? []),
+        ...(payload?.selectedGallery ?? []),
+      ].sort((a, b) => a.chunkIndex - b.chunkIndex);
+      setGallery(allGalleryItems);
+
       if (serverSelectedIndices.length > 0) {
         setSelectedChunks(new Set(serverSelectedIndices));
         setIsSuccess(true);
         setIsLockedByServer(true);
-        setLockedSelectedGallery(payload?.selectedGallery ?? []);
+        setLockedSelectedGallery(
+          (payload?.selectedGallery ?? []).length > 0
+            ? (payload?.selectedGallery ?? [])
+            : allGalleryItems.filter((item) => serverSelectedIndices.includes(item.chunkIndex))
+        );
         const submittedAt =
           typeof payload?.selection?.submittedAt === "string" ? payload.selection.submittedAt.trim() : "";
         setSelectionLockedAt(submittedAt || null);
         setSuccessMessage("Auswahl bereits eingereicht. Galerie ist im Nur-Lesen-Modus.");
+        if (selectionStorageKey) {
+          window.localStorage.removeItem(selectionStorageKey);
+        }
         return;
       }
+
+      // No DB selection yet — restore any in-progress draft from localStorage.
+      const draftKey = selectionStorageKey || `gallery_selection_${targetShootId.trim()}`;
+      const draft = readDraftSelection(draftKey);
+      setSelectedChunks(new Set(draft));
     } catch {
       setTaskStatus(null);
       setGallery([]);
+      setSelectedChunks(new Set());
       setErrorMessage("Netzwerkfehler beim Laden der Galerie.");
     } finally {
       setIsLoading(false);
+      setSelectionHydrated(true);
     }
   }
 
@@ -292,6 +317,10 @@ export default function GalleryPage() {
       setErrorMessage("Bitte wählen Sie mindestens eine Szene aus.");
       return;
     }
+    if (!shootId.trim()) {
+      setErrorMessage("Galerie-Link ist ungültig (fehlende shootId).");
+      return;
+    }
     setIsSubmitting(true);
     setErrorMessage(null);
     setSuccessMessage(null);
@@ -300,7 +329,7 @@ export default function GalleryPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          shootId,
+          shootId: shootId.trim(),
           local_folder_name: localFolderName.trim(),
           bracketSize: Number(bracketSizeFromUrl) || 3,
           selectedChunkIndices: selectedIndices,
@@ -315,10 +344,7 @@ export default function GalleryPage() {
         setErrorMessage(payload.message ?? "Die Auswahl konnte nicht vollständig verarbeitet werden.");
         return;
       }
-      if (
-        shootId.trim() &&
-        (payload?.taskStatusUpdated === false || payload?.gallerySelectionSaved === false)
-      ) {
+      if (payload?.taskStatusUpdated === false || payload?.gallerySelectionSaved === false) {
         setErrorMessage(
           payload.dbWarning ??
             payload.error ??
@@ -329,8 +355,8 @@ export default function GalleryPage() {
       if (selectionStorageKey) {
         window.localStorage.removeItem(selectionStorageKey);
       }
-      setIsSuccess(true);
-      setSelectionLockedAt(new Date().toISOString());
+      // Re-fetch so UI matches gallery_selection in the database (survives refresh).
+      await loadGallery(shootId.trim());
       setSuccessMessage("Auswahl erfolgreich gesendet. Vielen Dank!");
     } catch {
       setErrorMessage("Netzwerkfehler beim Absenden der Auswahl.");
@@ -560,17 +586,15 @@ export default function GalleryPage() {
                     aria-pressed={selected}
                     aria-label={`Szene ${item.chunkIndex + 1} ${selected ? "abwählen" : "auswählen"}`}
                   >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={item.previewUrl}
-                      alt={`Scene ${item.chunkIndex + 1}`}
-                      className={
-                        isLandscape
-                          ? "h-32 w-full bg-black object-contain transition duration-200 group-hover:opacity-95"
-                          : "aspect-[3/4] h-auto w-full bg-black object-contain transition duration-200 group-hover:opacity-95"
-                      }
-                      loading="lazy"
-                    />
+                    <div className={thumbFrameClass}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={item.previewUrl}
+                        alt={`Scene ${item.chunkIndex + 1}`}
+                        className={`absolute inset-0 ${thumbImageClass}`}
+                        loading="lazy"
+                      />
+                    </div>
                     {selected ? (
                       <span className="absolute left-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-green-500 text-xs font-bold text-white shadow">
                         ✓

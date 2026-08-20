@@ -242,6 +242,66 @@ async function extractEmbeddedRawPreviewBuffer(sourcePath) {
   );
 }
 
+/**
+ * Nikon/Canon RAW embedded JPEGs are often stored with landscape pixel dimensions and
+ * Orientation only on the parent RAW. Extracting `-PreviewImage` alone drops that tag,
+ * so -auto-orient does nothing and portrait shots render sideways.
+ */
+async function readSourceOrientation(sourcePath) {
+  try {
+    const exiftoolPath = await getExiftoolPath();
+    const { stdout } = await execFileAsync(
+      exiftoolPath,
+      ["-n", "-s3", "-Orientation", sourcePath],
+      { windowsHide: true, maxBuffer: 1024 * 1024 }
+    );
+    const value = Number(String(stdout ?? "").trim());
+    return Number.isFinite(value) && value >= 1 && value <= 8 ? value : 1;
+  } catch {
+    return 1;
+  }
+}
+
+/** Map EXIF Orientation (1–8) to clockwise degrees for sharp.rotate(). */
+function orientationToRotationDegrees(orientation) {
+  switch (orientation) {
+    case 3:
+      return 180;
+    case 6:
+      return 90;
+    case 8:
+      return 270;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Bake parent-RAW Orientation into an extracted JPEG buffer (and honor any JPEG EXIF).
+ * Prefer the embedded JPEG's own Orientation when present; otherwise apply the parent RAW tag.
+ */
+async function bakeOrientationIntoJpegBuffer(jpegBuffer, sourcePath) {
+  const meta = await sharp(jpegBuffer, { failOn: "none" }).metadata();
+  const jpegOrientation = Number(meta.orientation) || 1;
+
+  if (jpegOrientation !== 1) {
+    return sharp(jpegBuffer, { failOn: "none" })
+      .rotate()
+      .jpeg({ quality: 92, mozjpeg: true })
+      .toBuffer();
+  }
+
+  const orientation = await readSourceOrientation(sourcePath);
+  const degrees = orientationToRotationDegrees(orientation);
+  const pipeline = sharp(jpegBuffer, { failOn: "none" });
+  if (degrees !== 0) {
+    pipeline.rotate(degrees);
+  } else {
+    pipeline.rotate();
+  }
+  return pipeline.jpeg({ quality: 92, mozjpeg: true }).toBuffer();
+}
+
 async function resolvePreviewSourcePath(sourcePath, contextLabel) {
   const cleanupPaths = [];
   if (!isRawPreviewFile(sourcePath)) {
@@ -250,36 +310,17 @@ async function resolvePreviewSourcePath(sourcePath, contextLabel) {
 
   try {
     const extractedPreview = await extractEmbeddedRawPreviewBuffer(sourcePath);
+    const orientedPreview = await bakeOrientationIntoJpegBuffer(extractedPreview, sourcePath);
     const tempRawPreview = path.join(
       os.tmpdir(),
       `raw-preview-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`
     );
-    await fs.promises.writeFile(tempRawPreview, extractedPreview);
+    await fs.promises.writeFile(tempRawPreview, orientedPreview);
     cleanupPaths.push(tempRawPreview);
     console.info(
-      `[worker] Extracted embedded RAW preview for ${path.basename(sourcePath)} (${contextLabel}) via exiftool-vendored.`
+      `[worker] Extracted + oriented RAW preview for ${path.basename(sourcePath)} (${contextLabel}) via exiftool-vendored.`
     );
     return { inputPath: tempRawPreview, cleanupPaths };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(
-      `[worker] RAW preview extraction failed for ${path.basename(sourcePath)} (${contextLabel}); skipping file.`,
-      message
-    );
-    throw new Error(message);
-  }
-}
-
-async function getPreviewSharpInput(sourcePath, contextLabel) {
-  if (!isRawPreviewFile(sourcePath)) {
-    return sourcePath;
-  }
-  try {
-    const extractedPreview = await extractEmbeddedRawPreviewBuffer(sourcePath);
-    console.info(
-      `[worker] Extracted embedded RAW preview for ${path.basename(sourcePath)} (${contextLabel}) via exiftool-vendored.`
-    );
-    return extractedPreview;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(
@@ -588,41 +629,41 @@ function galleryPreviewsNeedsDbSync(raw) {
 }
 
 /**
- * Clean Kanban cover: resize only, then same ImageMagick exposure pass as watermarked previews (no watermark).
+ * Clean Kanban cover: same RAW extract + Orientation bake as gallery previews,
+ * then ImageMagick -auto-orient + resize (no watermark).
  */
 async function buildCoverThumbnailBuffer(sourcePath) {
-  const sourceInput = await getPreviewSharpInput(sourcePath, "cover-thumbnail");
-  const resizedBuffer = await sharp(sourceInput)
-    .resize({ width: COVER_THUMB_WIDTH, fit: "inside", withoutEnlargement: true })
-    .jpeg({ quality: 82, mozjpeg: true, chromaSubsampling: "4:2:0" })
-    .toBuffer();
-
+  const { inputPath, cleanupPaths } = await resolvePreviewSourcePath(sourcePath, "cover-thumbnail");
   const tmpBase = path.join(os.tmpdir(), `cover-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  const tempInput = `${tmpBase}-in.jpg`;
   const tempOutput = `${tmpBase}-out.jpg`;
+  cleanupPaths.push(tempOutput);
+
   try {
-    await fs.promises.writeFile(tempInput, resizedBuffer);
     await execFileAsync(
       "magick",
       [
-        tempInput,
+        inputPath,
+        "-auto-orient",
+        "-resize",
+        `${COVER_THUMB_WIDTH}x${COVER_THUMB_WIDTH}>`,
         "-auto-level",
         "-modulate",
         "102,112,100",
         "-contrast-stretch",
         "0.3%x0.3%",
+        "-quality",
+        "82",
         tempOutput,
       ],
-      { windowsHide: true }
+      { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }
     );
     return await fs.promises.readFile(tempOutput);
   } finally {
-    await fs.promises.unlink(tempInput).catch(() => {});
-    await fs.promises.unlink(tempOutput).catch(() => {});
+    await Promise.all(cleanupPaths.map((filePath) => fs.promises.unlink(filePath).catch(() => {})));
   }
 }
 
-async function buildPreviewBuffer(sourcePath) {
+async function buildPreviewBuffer(sourcePath, photoshootType = "") {
   await assertReadableWatermark(WATERMARK_PATH);
 
   const { inputPath, cleanupPaths } = await resolvePreviewSourcePath(sourcePath, "gallery-preview");
@@ -637,6 +678,7 @@ async function buildPreviewBuffer(sourcePath) {
       sourceFilePath: inputPath,
       watermarkPath: WATERMARK_PATH,
       previewOutputPath: tempOutput,
+      photoshootType,
     });
     return await fs.promises.readFile(tempOutput);
   } finally {
@@ -725,9 +767,11 @@ async function ensureCoverImageOnce(supabase, taskRow, rawDir, chunks) {
       if (!publicUrl) {
         throw new Error(`Missing public URL for cover ${storagePath}`);
       }
+      // Bust CDN/browser cache so regenerated upright covers replace sideways ones.
+      const cacheBustedUrl = `${publicUrl}${publicUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
 
       await withPreviewRetry(`set cover_image_url for task ${taskId}`, async () => {
-        const { error } = await supabase.from("tasks").update({ cover_image_url: publicUrl }).eq("id", taskId);
+        const { error } = await supabase.from("tasks").update({ cover_image_url: cacheBustedUrl }).eq("id", taskId);
         if (error) {
           throw new Error(error.message);
         }
@@ -750,6 +794,9 @@ async function syncTaskPreviews(supabase, taskRow) {
   if (!localFolderName) {
     return;
   }
+
+  const photoshootType =
+    typeof taskRow.photoshoot_type === "string" ? taskRow.photoshoot_type.trim() : "";
 
   const base = path.join(getShootFoldersRoot(), localFolderName);
   const rawDir = path.join(base, "1_Raw");
@@ -835,7 +882,7 @@ async function syncTaskPreviews(supabase, taskRow) {
 
       const sourcePath = path.join(rawDir, firstFilename);
       const previewBuffer = await withPreviewRetry(`render preview ${localFolderName}/${firstFilename}`, async () =>
-        buildPreviewBuffer(sourcePath)
+        buildPreviewBuffer(sourcePath, photoshootType)
       );
       const uploaded = await uploadPreviewBuffer(supabase, {
         localFolderName,
@@ -893,7 +940,7 @@ async function syncPreviewsForLocalFolder(localFolderName) {
       const supabase = getSupabaseClient();
       const { data, error } = await supabase
         .from("tasks")
-        .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference")
+        .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference, photoshoot_type")
         .eq("local_folder_name", localFolderName)
         .order("id", { ascending: false })
         .limit(1)

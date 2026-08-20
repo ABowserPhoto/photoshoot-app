@@ -59,6 +59,7 @@ type Client = {
   zip_code: string | null;
   city: string | null;
   country?: string | null;
+  address_supplement?: string | null;
   billing_street?: string | null;
   billing_city?: string | null;
   billing_postal_code?: string | null;
@@ -88,6 +89,7 @@ type ClientDirectoryEntry = {
   zip_code: string;
   city: string;
   country: string;
+  address_supplement: string;
   email: string;
   phone: string;
   lexoffice_contact_id: string;
@@ -305,6 +307,7 @@ function HomeContent() {
   const [softwareToast, setSoftwareToast] = useState<{ message: string; isError: boolean } | null>(null);
 
   const [companyName, setCompanyName] = useState("");
+  const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [contactPerson, setContactPerson] = useState("");
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [street, setStreet] = useState("");
@@ -413,21 +416,49 @@ function HomeContent() {
     return existingOption ?? { value: trimmedName, label: trimmedName, client: null };
   }, [clientNameOptions, companyName]);
 
-  const contactPersonOptions: ContactPersonOption[] = useMemo(
-    () =>
-      crmContacts.map((contact) => ({
-        value: contact.id,
-        label: contact.companyName
-          ? `${contact.fullName} — ${contact.companyName}`
-          : contact.fullName,
-        contact,
-      })),
-    [crmContacts]
-  );
+  const contactPersonOptions: ContactPersonOption[] = useMemo(() => {
+    const companyFilterId = selectedClientId;
+    const companyFilterName = companyName.trim().toLowerCase();
+    const filtered = crmContacts.filter((contact) => {
+      if (!companyFilterId && !companyFilterName) {
+        return true;
+      }
+      if (companyFilterId && contact.companyId === companyFilterId) {
+        return true;
+      }
+      if (
+        companyFilterName &&
+        contact.companyName.trim().toLowerCase() === companyFilterName
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    return filtered.map((contact) => ({
+      value: contact.id,
+      label:
+        companyFilterId || companyFilterName
+          ? contact.fullName
+          : contact.companyName
+            ? `${contact.fullName} — ${contact.companyName}`
+            : contact.fullName,
+      contact,
+    }));
+  }, [crmContacts, selectedClientId, companyName]);
   const selectedContactOption = useMemo<ContactPersonOption | null>(() => {
     if (selectedContactId) {
       const byId = contactPersonOptions.find((option) => option.value === selectedContactId);
       if (byId) return byId;
+      // Selected contact may be filtered out when another business is chosen.
+      const fromDirectory = crmContacts.find((contact) => contact.id === selectedContactId);
+      if (fromDirectory) {
+        return {
+          value: fromDirectory.id,
+          label: fromDirectory.fullName,
+          contact: fromDirectory,
+        };
+      }
     }
     const trimmed = contactPerson.trim();
     if (!trimmed) return null;
@@ -439,7 +470,21 @@ function HomeContent() {
           option.contact.companyName.toLowerCase() === companyName.trim().toLowerCase())
     );
     return byName ?? { value: trimmed, label: trimmed, contact: null };
-  }, [contactPersonOptions, selectedContactId, contactPerson, companyName]);
+  }, [contactPersonOptions, selectedContactId, contactPerson, companyName, crmContacts]);
+
+  // Resolve client id once directory loads (e.g. opening an edit booking).
+  useEffect(() => {
+    const trimmed = companyName.trim();
+    if (!trimmed) {
+      return;
+    }
+    const match = clientDirectory.find(
+      (client) => normalizeClientName(client.company_name) === normalizeClientName(trimmed)
+    );
+    if (match?.id && match.id !== selectedClientId) {
+      setSelectedClientId(match.id);
+    }
+  }, [clientDirectory, companyName, selectedClientId]);
   const serviceOptions: CatalogOption[] = serviceCatalog.map((item) => ({
     value: item.id,
     label: item.name,
@@ -486,7 +531,7 @@ function HomeContent() {
       supabase
         .from("clients")
         .select(
-          "id, company_name, street, zip_code, city, country, billing_street, billing_city, billing_postal_code, billing_country, email, phone, lexoffice_contact_id, lexoffice_id, contact_persons"
+          "id, company_name, street, zip_code, city, country, address_supplement, billing_street, billing_city, billing_postal_code, billing_country, email, phone, lexoffice_contact_id, lexoffice_id, contact_persons"
         )
         .order("company_name", { ascending: true }),
       supabase
@@ -678,6 +723,7 @@ function HomeContent() {
       zip_code?: string | null;
       city?: string | null;
       country?: string | null;
+      address_supplement?: string | null;
       billing_street?: string | null;
       billing_city?: string | null;
       billing_postal_code?: string | null;
@@ -700,6 +746,7 @@ function HomeContent() {
         zip_code: existing?.zip_code || record.billing_postal_code || record.zip_code || "",
         city: existing?.city || record.billing_city || record.city || "",
         country: existing?.country || record.billing_country || record.country || "",
+        address_supplement: existing?.address_supplement || record.address_supplement || "",
         email: existing?.email || record.email || "",
         phone: existing?.phone || record.phone || "",
         lexoffice_contact_id: existing?.lexoffice_contact_id || record.lexoffice_contact_id || "",
@@ -792,6 +839,7 @@ function HomeContent() {
     setSaveAsNewClient(false);
     setSaveToClientAddressBook(false);
     setCompanyName("");
+    setSelectedClientId(null);
     setContactPerson("");
     setSelectedContactId(null);
     setStreet("");
@@ -865,6 +913,11 @@ function HomeContent() {
     setFormError(null);
     setSaveAsNewClient(false);
     setCompanyName(task.companyName);
+    const matchedClient = clientDirectory.find(
+      (client) =>
+        normalizeClientName(client.company_name) === normalizeClientName(task.companyName)
+    );
+    setSelectedClientId(matchedClient?.id ?? null);
     setContactPerson(
       [task.contactFirstName, task.contactLastName].filter(Boolean).join(" ").trim()
     );
@@ -955,27 +1008,58 @@ function HomeContent() {
   ) => {
     if (!option) {
       setCompanyName("");
+      setSelectedClientId(null);
       return;
     }
 
     setCompanyName(option.label);
 
     if (option.client) {
-      if (!email.trim()) {
-        setEmail(option.client.email ?? "");
+      const nextClientId = option.client.id;
+      setSelectedClientId(nextClientId);
+
+      // Autofill invoice/address fields from the saved business record.
+      setStreet(option.client.street ?? "");
+      setAddressSupplement(option.client.address_supplement ?? "");
+      setZipCode(option.client.zip_code ?? "");
+      setCity(option.client.city ?? "");
+      setCountry(option.client.country ?? "");
+      setLexofficeContactId(option.client.lexoffice_contact_id ?? "");
+
+      // Clear a contact that belongs to a different business so the filtered
+      // Contact Person list stays coherent with this company.
+      if (
+        selectedContactId &&
+        crmContacts.some(
+          (contact) =>
+            contact.id === selectedContactId &&
+            nextClientId &&
+            contact.companyId &&
+            contact.companyId !== nextClientId
+        )
+      ) {
+        setSelectedContactId(null);
+        setContactPerson("");
+        setEmail("");
+        setEmailCc("");
+        setPhone(option.client.phone ?? "");
+      } else if (!email.trim() && option.client.email) {
+        setEmail(option.client.email);
       }
-      setPhone(option.client.phone ?? "");
-      setStreet(option.client.street);
-      setZipCode(option.client.zip_code);
-      setCity(option.client.city);
-      setCountry(option.client.country);
-      setLexofficeContactId(option.client.lexoffice_contact_id);
+
+      if (!phone.trim() && option.client.phone) {
+        setPhone(option.client.phone);
+      }
       return;
     }
 
+    // Typed / newly created business name — no CRM id yet.
+    setSelectedClientId(null);
+
     if (actionMeta.action === "create-option") {
-      // Keep email/phone the user already typed for the contact person.
+      // Keep email/phone/contact the user already typed; clear stale address only.
       setStreet("");
+      setAddressSupplement("");
       setZipCode("");
       setCity("");
       setCountry("");
@@ -991,7 +1075,7 @@ function HomeContent() {
     }
 
     if (!option.contact) {
-      // Free-text / create path — keep typed name only.
+      // Free-text / create path — keep typed name only; link to selected business on save.
       setSelectedContactId(null);
       setContactPerson(option.label);
       return;
@@ -1006,6 +1090,7 @@ function HomeContent() {
     setSelectedContactId(isPersistedContact ? contact.id : null);
     setContactPerson(contact.fullName);
     setCompanyName(contact.companyName);
+    setSelectedClientId(contact.companyId || null);
     setEmail(contact.primaryEmail);
     setEmailCc(contact.ccEmails.join(", "));
     setPhone(contact.phone);
@@ -1014,6 +1099,27 @@ function HomeContent() {
     setCity(contact.billingCity);
     setCountry(contact.billingCountry);
     setLexofficeContactId(contact.lexofficeContactId);
+
+    const matchedClient = clientDirectory.find(
+      (client) =>
+        (contact.companyId && client.id === contact.companyId) ||
+        normalizeClientName(client.company_name) === normalizeClientName(contact.companyName)
+    );
+    if (matchedClient) {
+      setAddressSupplement(matchedClient.address_supplement ?? "");
+      if (!contact.billingStreet && matchedClient.street) {
+        setStreet(matchedClient.street);
+      }
+      if (!contact.billingPostalCode && matchedClient.zip_code) {
+        setZipCode(matchedClient.zip_code);
+      }
+      if (!contact.billingCity && matchedClient.city) {
+        setCity(matchedClient.city);
+      }
+      if (!contact.billingCountry && matchedClient.country) {
+        setCountry(matchedClient.country);
+      }
+    }
   };
 
   const openCatalogModal = (type: ItemType) => {
@@ -1553,7 +1659,11 @@ function HomeContent() {
                           options={contactPersonOptions}
                           value={selectedContactOption}
                           onChange={handleContactPersonChange}
-                          placeholder="Search contact name or company…"
+                          placeholder={
+                            companyName.trim()
+                              ? `Search contacts at ${companyName.trim()}…`
+                              : "Search contact name or company…"
+                          }
                           formatCreateLabel={(inputValue) => `Use "${inputValue}"`}
                           classNames={
                             clientNameSelectClassNames as unknown as ClassNamesConfig<ContactPersonOption, false>

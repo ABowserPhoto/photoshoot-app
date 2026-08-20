@@ -70,6 +70,7 @@ export async function POST(request: Request) {
       shootId?: string;
       bracketSize?: number;
       selectedChunkIndices?: number[];
+      selected_chunk_indices?: number[];
     };
 
     const localFolderName = await resolveLocalFolderName({
@@ -78,7 +79,13 @@ export async function POST(request: Request) {
     });
     const bracketSize = parseBracketSize(body.bracketSize ?? DEFAULT_BRACKET_SIZE);
 
-    if (!Array.isArray(body.selectedChunkIndices)) {
+    const rawSelectedIndices = Array.isArray(body.selectedChunkIndices)
+      ? body.selectedChunkIndices
+      : Array.isArray(body.selected_chunk_indices)
+        ? body.selected_chunk_indices
+        : null;
+
+    if (!Array.isArray(rawSelectedIndices)) {
       return NextResponse.json(
         { error: "selectedChunkIndices must be an array of numbers." },
         { status: 400 }
@@ -87,7 +94,7 @@ export async function POST(request: Request) {
 
     const selectedIndices = Array.from(
       new Set(
-        body.selectedChunkIndices
+        rawSelectedIndices
           .map((value) => Number(value))
           .filter((value) => Number.isInteger(value) && value >= 0)
       )

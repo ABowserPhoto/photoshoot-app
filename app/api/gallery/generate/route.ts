@@ -21,9 +21,14 @@ type GallerySelectionPayload = {
 
 function parseSelectionPayload(raw: unknown): { selectedChunkIndices: number[] } {
   const payload = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const rawIndices = Array.isArray(payload.selected_chunk_indices)
+    ? payload.selected_chunk_indices
+    : Array.isArray(payload.selectedChunkIndices)
+      ? payload.selectedChunkIndices
+      : [];
   const selectedChunkIndices = Array.from(
     new Set(
-      (Array.isArray(payload.selected_chunk_indices) ? payload.selected_chunk_indices : [])
+      rawIndices
         .map((value) => Number(value))
         .filter((value) => Number.isInteger(value) && value >= 0)
     )
@@ -34,14 +39,24 @@ function parseSelectionPayload(raw: unknown): { selectedChunkIndices: number[] }
 function parseSelectionDetails(raw: unknown): GallerySelectionPayload {
   const payload = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const { selectedChunkIndices } = parseSelectionPayload(payload);
+  const rawFiles = Array.isArray(payload.selected_files)
+    ? payload.selected_files
+    : Array.isArray(payload.selectedFiles)
+      ? payload.selectedFiles
+      : [];
   const selectedFiles = Array.from(
     new Set(
-      (Array.isArray(payload.selected_files) ? payload.selected_files : [])
+      rawFiles
         .map((value) => (typeof value === "string" ? value.trim() : ""))
         .filter((value) => value.length > 0)
     )
   );
-  const submittedAt = typeof payload.submitted_at === "string" ? payload.submitted_at : null;
+  const submittedAt =
+    typeof payload.submitted_at === "string"
+      ? payload.submitted_at
+      : typeof payload.submittedAt === "string"
+        ? payload.submittedAt
+        : null;
   return { selectedChunkIndices, selectedFiles, submittedAt };
 }
 

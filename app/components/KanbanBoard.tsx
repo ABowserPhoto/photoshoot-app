@@ -497,7 +497,7 @@ function KanbanTaskCover({
         <img
           src={rawUrl}
           alt=""
-          className="pointer-events-none h-full w-full object-cover"
+          className="pointer-events-none absolute inset-0 h-full w-full object-cover"
           onError={() => setImgFailed(true)}
         />
       ) : (
