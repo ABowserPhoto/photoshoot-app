@@ -160,6 +160,7 @@ type TaskSupabasePayload = {
   title: string;
   client: string;
   skip_invoice: boolean;
+  generate_gallery: boolean;
   is_credit_note: boolean;
   expected_revenue: number;
   is_paid: boolean;
@@ -327,6 +328,7 @@ function HomeContent() {
   const [taxPercentage, setTaxPercentage] = useState(19);
   const [amountType, setAmountType] = useState<AmountType>("Net");
   const [photoshootType, setPhotoshootType] = useState<PhotoshootType>("Immobilien");
+  const [generateGallery, setGenerateGallery] = useState(true);
   const [shootLocation, setShootLocation] = useState("");
   const [photoshootDate, setPhotoshootDate] = useState("");
   const [previewPreference, setPreviewPreference] = useState<PreviewPreference>("first");
@@ -859,6 +861,7 @@ function HomeContent() {
     setTaxPercentage(19);
     setAmountType("Net");
     setPhotoshootType("Immobilien");
+    setGenerateGallery(true);
     setShootLocation("");
     setPhotoshootDate("");
     setPreviewPreference("first");
@@ -947,6 +950,7 @@ function HomeContent() {
     setTaxPercentage(task.taxPercentage);
     setAmountType(task.amountType);
     setPhotoshootType(task.photoshootType);
+    setGenerateGallery(task.generateGallery ?? true);
     setShootLocation(task.shootLocation);
     setPhotoshootDate(task.photoshootDate);
     setPreviewPreference(task.previewPreference ?? "first");
@@ -1350,6 +1354,7 @@ function HomeContent() {
       amount_type: amountType,
       discount,
       photoshoot_type: photoshootType,
+      generate_gallery: generateGallery,
       shoot_location: shootLocation,
       photoshoot_date: photoshootDate,
       preview_preference: previewPreference,
@@ -2196,6 +2201,20 @@ function HomeContent() {
                         <option value="Hochzeit">Hochzeit</option>
                         <option value="Mini Session">Mini Session</option>
                       </select>
+                    </label>
+                    <label className="sm:col-span-2 inline-flex items-start gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={generateGallery}
+                        onChange={(event) => setGenerateGallery(event.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        Generate Client Gallery
+                        <span className="mt-0.5 block text-[11px] font-normal text-zinc-500">
+                          When unchecked, the worker skips watermarked preview generation and storage uploads for this booking.
+                        </span>
+                      </span>
                     </label>
                     <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
                       Date

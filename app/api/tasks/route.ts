@@ -61,7 +61,7 @@ export async function GET() {
     const { data, error } = await supabase
       .from("tasks")
       .select(
-        "id, title, company_name, lexoffice_contact_id, contact_first_name, contact_last_name, email, email_cc, phone, street, zip_code, city, country, address_supplement, services, products, tax_percentage, amount_type, discount, photoshoot_type, shoot_location, photoshoot_date, preview_preference, due_date, editing_started_at, total_editing_seconds, status, is_archived, local_folder_name, bracket_size, cover_image_url, completed_at, updated_at, skip_invoice, is_credit_note, expected_revenue, is_paid, credit_note_paid, credit_note_file_url, has_separate_invoice_email, invoice_email_address, linked_item_id, local_open_path, gallery_link, contact_id"
+        "id, title, company_name, lexoffice_contact_id, contact_first_name, contact_last_name, email, email_cc, phone, street, zip_code, city, country, address_supplement, services, products, tax_percentage, amount_type, discount, photoshoot_type, shoot_location, photoshoot_date, preview_preference, due_date, editing_started_at, total_editing_seconds, status, is_archived, local_folder_name, bracket_size, cover_image_url, completed_at, updated_at, skip_invoice, generate_gallery, is_credit_note, expected_revenue, is_paid, credit_note_paid, credit_note_file_url, has_separate_invoice_email, invoice_email_address, linked_item_id, local_open_path, gallery_link, contact_id"
       )
       .order("id", { ascending: true });
 

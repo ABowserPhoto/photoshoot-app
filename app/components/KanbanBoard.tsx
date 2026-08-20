@@ -83,6 +83,8 @@ export type BoardTask = {
   completedAt: string | null;
   updatedAt: string | null;
   skipInvoice: boolean;
+  /** When false, worker skips client gallery preview generation for this booking. */
+  generateGallery: boolean;
   isCreditNote: boolean;
   expectedRevenue: number;
   isPaid: boolean;
@@ -161,6 +163,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     completedAt: null,
     updatedAt: null,
     skipInvoice: false,
+    generateGallery: true,
     isCreditNote: false,
     expectedRevenue: 0,
     isPaid: false,
@@ -210,6 +213,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     completedAt: null,
     updatedAt: null,
     skipInvoice: false,
+    generateGallery: true,
     isCreditNote: false,
     expectedRevenue: 0,
     isPaid: false,
@@ -259,6 +263,7 @@ type DbTask = {
   completed_at: string | null;
   updated_at: string | null;
   skip_invoice?: boolean | null;
+  generate_gallery?: boolean | null;
   is_credit_note?: boolean | null;
   expected_revenue?: number | null;
   is_paid?: boolean | null;
@@ -656,6 +661,12 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
         : row.skip_invoice == null
           ? (existing?.skipInvoice ?? false)
           : Boolean(row.skip_invoice),
+    generateGallery:
+      typeof row.generate_gallery === "boolean"
+        ? row.generate_gallery
+        : row.generate_gallery == null
+          ? (existing?.generateGallery ?? true)
+          : Boolean(row.generate_gallery),
     isCreditNote:
       typeof row.is_credit_note === "boolean"
         ? row.is_credit_note

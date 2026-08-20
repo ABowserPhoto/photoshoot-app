@@ -61,6 +61,14 @@ export async function POST(request: Request) {
         ? ["1", "true", "yes", "on"].includes(skipInvoiceRaw.trim().toLowerCase())
         : false;
 
+  const generateGalleryRaw = insertRow.generate_gallery;
+  insertRow.generate_gallery =
+    typeof generateGalleryRaw === "boolean"
+      ? generateGalleryRaw
+      : typeof generateGalleryRaw === "string"
+        ? ["1", "true", "yes", "on"].includes(generateGalleryRaw.trim().toLowerCase())
+        : true;
+
   const creditNoteRaw = insertRow.is_credit_note;
   insertRow.is_credit_note =
     typeof creditNoteRaw === "boolean"

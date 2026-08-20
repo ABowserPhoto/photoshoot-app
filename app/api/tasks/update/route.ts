@@ -87,6 +87,11 @@ export async function POST(request: Request) {
     updateRow.skip_invoice = toBool(skipInvoiceRaw);
   }
 
+  const generateGalleryRaw = updateRow.generate_gallery;
+  if (generateGalleryRaw !== undefined) {
+    updateRow.generate_gallery = toBool(generateGalleryRaw, true);
+  }
+
   updateRow.updated_at = new Date().toISOString();
 
   // Auth already checked; service_role bypasses RLS for this trusted admin route.

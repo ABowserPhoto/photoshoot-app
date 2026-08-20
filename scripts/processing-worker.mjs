@@ -795,6 +795,15 @@ async function syncTaskPreviews(supabase, taskRow) {
     return;
   }
 
+  // Opt-out: booking asked not to generate client gallery previews.
+  // Return early (no watermark/upload loop) so folder watchers never get stuck.
+  if (taskRow.generate_gallery === false) {
+    console.info(
+      `[worker] Skipping gallery preview generation for folder [${localFolderName}] (task ${taskRow.id}): generate_gallery=false.`
+    );
+    return;
+  }
+
   const photoshootType =
     typeof taskRow.photoshoot_type === "string" ? taskRow.photoshoot_type.trim() : "";
 
@@ -940,7 +949,7 @@ async function syncPreviewsForLocalFolder(localFolderName) {
       const supabase = getSupabaseClient();
       const { data, error } = await supabase
         .from("tasks")
-        .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference, photoshoot_type")
+        .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference, photoshoot_type, generate_gallery")
         .eq("local_folder_name", localFolderName)
         .order("id", { ascending: false })
         .limit(1)
