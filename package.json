@@ -1,6 +1,6 @@
 {
   "name": "photoshoot-app",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "private": true,
   "main": "main.js",
   "scripts": {
