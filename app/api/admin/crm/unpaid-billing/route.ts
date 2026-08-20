@@ -11,7 +11,7 @@ import {
 } from "@/lib/crmUnpaidBilling";
 import type { ReminderTaskRow } from "@/lib/invoiceReminderWorkflow";
 import { listLexofficeUnpaidSalesInvoices } from "@/lib/lexoffice";
-import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
+import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -32,9 +32,9 @@ function serviceSupabase() {
 }
 
 export async function GET() {
-  const auth = await getAdminAreaAuth();
-  if (!auth.authenticated || !auth.isAdmin) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const access = await assertModuleAccess("crm");
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
   const supabase = serviceSupabase();

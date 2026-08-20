@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 import { buildCompanyLtvMap, normalizeCompanyKey } from "@/lib/crmClientLtv";
-import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
+import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 import { pushClientToLexoffice, type ContactPerson } from "@/lib/server/lexofficeContacts";
 
 export const dynamic = "force-dynamic";
@@ -92,9 +92,9 @@ function mapClientRow(row: ClientRow, ltvByCompany: Map<string, number>): CrmCli
 }
 
 export async function GET() {
-  const auth = await getAdminAreaAuth();
-  if (!auth.authenticated || !auth.isAdmin) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const access = await assertModuleAccess("crm");
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
   const supabase = serviceSupabase();
@@ -141,9 +141,9 @@ type ClientUpsertBody = {
 };
 
 export async function POST(request: Request) {
-  const auth = await getAdminAreaAuth();
-  if (!auth.authenticated || !auth.isAdmin) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const access = await assertModuleAccess("crm");
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
   let body: ClientUpsertBody;
@@ -251,9 +251,9 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const auth = await getAdminAreaAuth();
-  if (!auth.authenticated || !auth.isAdmin) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const access = await assertModuleAccess("crm");
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
   let body: { id?: unknown };

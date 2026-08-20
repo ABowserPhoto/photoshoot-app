@@ -4,6 +4,11 @@ import { Archive, ArchiveRestore, Key, Link2, Loader2, Unlink } from "lucide-rea
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { archiveUser, unarchiveUser } from "@/app/actions/users";
+import {
+  APP_MODULE_LABELS,
+  APP_MODULES,
+  type AppModule,
+} from "@/lib/appModules";
 
 export type CrmUser = {
   id: string;
@@ -15,6 +20,7 @@ export type CrmUser = {
   roleKey: "admin" | "staff";
   jibblePersonId: string | null;
   isArchived: boolean;
+  accessibleModules: AppModule[];
 };
 
 type JibblePerson = {
@@ -28,6 +34,7 @@ type UserFormState = {
   email: string;
   role: "admin" | "staff";
   password: string;
+  accessibleModules: AppModule[];
 };
 
 const EMPTY_FORM: UserFormState = {
@@ -36,6 +43,7 @@ const EMPTY_FORM: UserFormState = {
   email: "",
   role: "staff",
   password: "",
+  accessibleModules: [],
 };
 
 const PASSWORD_CHARSET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*";
@@ -89,6 +97,9 @@ export default function UserManagementSection({ active, onToast, onError }: User
         (json?.users ?? []).map((user) => ({
           ...user,
           isArchived: Boolean(user.isArchived),
+          accessibleModules: Array.isArray(user.accessibleModules)
+            ? user.accessibleModules
+            : [],
         }))
       );
     } catch (err) {
@@ -131,6 +142,7 @@ export default function UserManagementSection({ active, onToast, onError }: User
       email: user.email,
       role: user.roleKey,
       password: "",
+      accessibleModules: user.accessibleModules ?? [],
     });
     setModalOpen(true);
   };
@@ -220,8 +232,20 @@ export default function UserManagementSection({ active, onToast, onError }: User
         credentials: "include",
         body: JSON.stringify(
           isEditMode
-            ? { id: form.id, name: form.name.trim(), email: form.email.trim(), role: form.role }
-            : { name: form.name.trim(), email: form.email.trim(), password: form.password, role: form.role }
+            ? {
+                id: form.id,
+                name: form.name.trim(),
+                email: form.email.trim(),
+                role: form.role,
+                accessibleModules: form.role === "staff" ? form.accessibleModules : [],
+              }
+            : {
+                name: form.name.trim(),
+                email: form.email.trim(),
+                password: form.password,
+                role: form.role,
+                accessibleModules: form.role === "staff" ? form.accessibleModules : [],
+              }
         ),
       });
       const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
@@ -570,7 +594,7 @@ export default function UserManagementSection({ active, onToast, onError }: User
             role="dialog"
             aria-modal="true"
             aria-labelledby="user-modal-title"
-            className="w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl"
+            className="w-full max-w-xl rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
             <h3 id="user-modal-title" className="text-lg font-semibold text-white">
@@ -618,6 +642,48 @@ export default function UserManagementSection({ active, onToast, onError }: User
                   <option value="staff">Staff</option>
                 </select>
               </label>
+
+              {form.role === "staff" ? (
+                <fieldset className="rounded-xl border border-zinc-700 bg-zinc-950/60 p-3">
+                  <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                    Accessible modules
+                  </legend>
+                  <p className="mb-3 text-xs text-zinc-500">
+                    Staff only see navigation and routes for the modules you enable here. Admins
+                    always have full access.
+                  </p>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {APP_MODULES.map((module) => {
+                      const checked = form.accessibleModules.includes(module);
+                      return (
+                        <label
+                          key={module}
+                          className="flex cursor-pointer items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-200 hover:border-zinc-600"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() =>
+                              setForm((prev) => ({
+                                ...prev,
+                                accessibleModules: checked
+                                  ? prev.accessibleModules.filter((m) => m !== module)
+                                  : [...prev.accessibleModules, module],
+                              }))
+                            }
+                            className="h-4 w-4 rounded border-zinc-600 bg-zinc-950 text-violet-600 focus:ring-violet-500"
+                          />
+                          <span>{APP_MODULE_LABELS[module]}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+              ) : (
+                <p className="rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2 text-xs text-zinc-500">
+                  Admin accounts have access to every module. Module checklists apply to Staff only.
+                </p>
+              )}
 
               {!isEditMode ? (
                 <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">

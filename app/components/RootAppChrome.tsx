@@ -7,6 +7,7 @@ import { Suspense, type ReactNode } from "react";
 import AutoLogout from "@/app/components/AutoLogout";
 import ClientPlannerShell from "@/app/ClientPlannerShell";
 import GlobalAppHeader from "@/app/components/GlobalAppHeader";
+import ModuleAccessGuard from "@/app/components/ModuleAccessGuard";
 
 function isDesktopWidgetPath(pathname: string | null) {
   return pathname === "/desktop-widget" || Boolean(pathname?.startsWith("/desktop-widget/"));
@@ -26,7 +27,17 @@ export default function RootAppChrome({ children }: { children: ReactNode }) {
         <Suspense fallback={null}>
           <GlobalAppHeader />
         </Suspense>
-        <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <Suspense
+            fallback={
+              <main className="flex min-h-[40vh] items-center justify-center text-sm text-zinc-400">
+                Loading…
+              </main>
+            }
+          >
+            <ModuleAccessGuard>{children}</ModuleAccessGuard>
+          </Suspense>
+        </div>
       </ClientPlannerShell>
       <footer className="border-t border-zinc-800 bg-black px-4 py-8">
         <div className="mx-auto flex max-w-[1800px] flex-col items-center justify-center gap-3">

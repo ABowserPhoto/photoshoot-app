@@ -2,7 +2,8 @@
 
 import { createClient } from "@supabase/supabase-js";
 
-import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
+import { canAccessModule } from "@/lib/appModules";
+import { getAuthRole } from "@/lib/server/getAuthRole";
 import {
   isDateWithinReportingRange,
   resolveReportingRange,
@@ -348,8 +349,15 @@ function isWithinShift(at: Date | null, shift: ShiftRow): at is Date {
 }
 
 async function assertAdmin(): Promise<{ ok: true } | { ok: false; error: string }> {
-  const auth = await getAdminAreaAuth();
-  if (!auth.authenticated || !auth.isAdmin) {
+  const auth = await getAuthRole();
+  if (
+    !auth.authenticated ||
+    !canAccessModule({
+      isAdmin: auth.isAdmin,
+      accessibleModules: auth.accessibleModules,
+      module: "statistics",
+    })
+  ) {
     return { ok: false, error: "Forbidden" };
   }
   return { ok: true };

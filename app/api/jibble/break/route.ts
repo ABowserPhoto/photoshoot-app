@@ -3,14 +3,20 @@ import { NextResponse } from "next/server";
 import { getAuthRole } from "@/lib/server/getAuthRole";
 import {
   getSessionUserId,
-  postJibbleTimeEntry,
+  postJibbleBreakEntry,
   resolveJibbleEmployeeId,
 } from "@/lib/server/jibbleTimeEntries";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * POST /api/jibble/break
+ * Starts a Jibble break via TimeEntries type "StartBreak".
+ * Optional body: `{ "breakId": "<uuid>" }` for custom schedule breaks;
+ * otherwise uses `JIBBLE_BREAK_ID` or the first available GetBreaks policy
+ * (free-form orgs can omit breakId entirely).
+ */
 export async function POST(request: Request) {
-  void request;
   const auth = await getAuthRole();
   if (!auth.authenticated) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
@@ -30,12 +36,23 @@ export async function POST(request: Request) {
     );
   }
 
+  let breakId: string | null = null;
   try {
-    const result = await postJibbleTimeEntry({ employeeId, type: "Out" });
+    const body = (await request.json().catch(() => null)) as { breakId?: unknown } | null;
+    if (typeof body?.breakId === "string" && body.breakId.trim()) {
+      breakId = body.breakId.trim();
+    }
+  } catch {
+    // Empty / non-JSON body is fine — breakId stays optional.
+  }
+
+  try {
+    const result = await postJibbleBreakEntry({ employeeId, breakId });
     if (!result.ok) {
-      console.error("[jibble clock-out] request failed", {
+      console.error("[jibble break] request failed", {
         status: result.status,
         employeeId,
+        breakId,
         response: result.raw,
       });
       return NextResponse.json({ ok: false, error: result.error }, { status: result.status });
@@ -44,15 +61,16 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       employeeId: result.employeeId,
-      type: "Out",
-      mode: "out",
+      type: "StartBreak",
+      breakId: result.breakId,
+      mode: "break",
       raw: result.raw,
     });
   } catch (error) {
     return NextResponse.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Jibble clock-out failed.",
+        error: error instanceof Error ? error.message : "Jibble break failed.",
       },
       { status: 500 }
     );

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
+import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
 
 export const dynamic = "force-dynamic";
@@ -12,9 +12,9 @@ type MergeClientsBody = {
 };
 
 export async function POST(request: Request) {
-  const auth = await getAdminAreaAuth();
-  if (!auth.authenticated || !auth.isAdmin) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const access = await assertModuleAccess("crm");
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
   let body: MergeClientsBody;

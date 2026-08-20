@@ -370,12 +370,6 @@ export default function AdminStatisticsPage() {
             </p>
           </div>
           <Link
-            href="/admin/crm"
-            className="inline-flex h-10 items-center rounded-lg border border-zinc-700 bg-zinc-900 px-4 text-sm font-semibold text-zinc-100 hover:bg-zinc-800"
-          >
-            CRM
-          </Link>
-          <Link
             href="/"
             className="inline-flex h-10 items-center rounded-lg border border-zinc-700 bg-zinc-900 px-4 text-sm font-semibold text-zinc-100 hover:bg-zinc-800"
           >

@@ -58,7 +58,7 @@ const TAB_ITEMS: { id: CrmTab; label: string }[] = [
 ];
 
 export default function AdminCrmPage() {
-  const { isLoading: authLoading } = useAuthRole();
+  const { isLoading: authLoading, isAdmin, canAccess } = useAuthRole();
   const [activeTab, setActiveTab] = useState<CrmTab>("billing");
   const [items, setItems] = useState<UnpaidBillingItem[]>([]);
   const [billingSearch, setBillingSearch] = useState("");
@@ -176,12 +176,14 @@ export default function AdminCrmPage() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Link
-              href="/admin/statistics"
-              className="inline-flex h-10 items-center rounded-lg border border-zinc-700 bg-zinc-900 px-4 text-sm font-semibold text-zinc-100 hover:bg-zinc-800"
-            >
-              Analytics
-            </Link>
+            {isAdmin || canAccess("statistics") ? (
+              <Link
+                href="/admin/statistics"
+                className="inline-flex h-10 items-center rounded-lg border border-zinc-700 bg-zinc-900 px-4 text-sm font-semibold text-zinc-100 hover:bg-zinc-800"
+              >
+                Analytics
+              </Link>
+            ) : null}
             <Link
               href="/"
               className="inline-flex h-10 items-center rounded-lg border border-zinc-700 bg-zinc-900 px-4 text-sm font-semibold text-zinc-100 hover:bg-zinc-800"
@@ -192,7 +194,7 @@ export default function AdminCrmPage() {
         </header>
 
         <nav className="flex flex-wrap gap-2 border-b border-zinc-800 pb-1">
-          {TAB_ITEMS.map((tab) => {
+          {TAB_ITEMS.filter((tab) => tab.id !== "users" || isAdmin).map((tab) => {
             const isActive = activeTab === tab.id;
             return (
               <button
@@ -361,7 +363,7 @@ export default function AdminCrmPage() {
           />
         ) : null}
 
-        {activeTab === "users" ? (
+        {activeTab === "users" && isAdmin ? (
           <UserManagementSection
             active={activeTab === "users"}
             onToast={setToast}

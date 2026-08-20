@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 
+import {
+  normalizeAccessibleModules,
+  type AppModule,
+} from "@/lib/appModules";
 import { crmRoleFormValue, formatCrmUserRole, normalizeAssignableRole } from "@/lib/crmUserRoles";
 import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
@@ -17,6 +21,7 @@ export type CrmUserRecord = {
   roleKey: "admin" | "staff";
   jibblePersonId: string | null;
   isArchived: boolean;
+  accessibleModules: AppModule[];
 };
 
 function formatCreatedAtLabel(value: string | null): string {
@@ -47,7 +52,8 @@ function mapUserRecord(
     user_metadata?: Record<string, unknown> | null;
   },
   jibblePersonId: string | null = null,
-  isArchived = false
+  isArchived = false,
+  accessibleModules: AppModule[] = []
 ): CrmUserRecord {
   const metadata = user.user_metadata ?? {};
   const createdAt = user.created_at ?? null;
@@ -62,12 +68,19 @@ function mapUserRecord(
     roleKey: crmRoleFormValue(metadata.role),
     jibblePersonId,
     isArchived,
+    accessibleModules,
   };
 }
 
 async function upsertUserProfile(
   supabaseAdmin: NonNullable<ReturnType<typeof createSupabaseAdminClient>>,
-  payload: { id: string; email: string; role: string; name: string }
+  payload: {
+    id: string;
+    email: string;
+    role: string;
+    name: string;
+    accessibleModules: AppModule[];
+  }
 ) {
   const { error: profileError } = await supabaseAdmin.from("profiles").upsert(
     {
@@ -75,6 +88,8 @@ async function upsertUserProfile(
       email: payload.email,
       role: payload.role,
       full_name: payload.name || null,
+      // Admins ignore modules; store empty to keep the column clean.
+      accessible_modules: payload.role === "admin" ? [] : payload.accessibleModules,
     },
     { onConflict: "id" }
   );
@@ -115,27 +130,35 @@ async function listAllUsers() {
     page += 1;
   }
 
-  // Fetch jibble + archive flags from profiles for all users in one query.
+  // Fetch jibble + archive + module grants from profiles for all users in one query.
   const { data: profiles } = await supabaseAdmin
     .from("profiles")
-    .select("id, jibble_employee_id, is_archived");
+    .select("id, jibble_employee_id, is_archived, accessible_modules");
 
   const jibbleMap = new Map<string, string | null>();
   const archivedMap = new Map<string, boolean>();
+  const modulesMap = new Map<string, AppModule[]>();
   for (const profile of profiles ?? []) {
     const p = profile as {
       id: string;
       jibble_employee_id?: string | null;
       is_archived?: boolean | null;
+      accessible_modules?: unknown;
     };
     jibbleMap.set(p.id, p.jibble_employee_id?.trim() || null);
     archivedMap.set(p.id, p.is_archived === true);
+    modulesMap.set(p.id, normalizeAccessibleModules(p.accessible_modules));
   }
 
   return {
     users: authUsers
       .map((u) =>
-        mapUserRecord(u, jibbleMap.get(u.id) ?? null, archivedMap.get(u.id) ?? false)
+        mapUserRecord(
+          u,
+          jibbleMap.get(u.id) ?? null,
+          archivedMap.get(u.id) ?? false,
+          modulesMap.get(u.id) ?? []
+        )
       )
       .sort((a, b) => {
         // Active users first, then archived; stable email order within each group.
@@ -167,6 +190,7 @@ type CreateUserBody = {
   email?: unknown;
   password?: unknown;
   role?: unknown;
+  accessibleModules?: unknown;
 };
 
 export async function POST(request: Request) {
@@ -186,6 +210,8 @@ export async function POST(request: Request) {
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const password = typeof body.password === "string" ? body.password : "";
   const role = normalizeAssignableRole(body.role);
+  const accessibleModules =
+    role === "admin" ? [] : normalizeAccessibleModules(body.accessibleModules);
 
   if (!email) {
     return NextResponse.json({ error: "email is required." }, { status: 400 });
@@ -223,6 +249,7 @@ export async function POST(request: Request) {
       email,
       role,
       name,
+      accessibleModules,
     });
   }
 
@@ -241,7 +268,8 @@ export async function POST(request: Request) {
           user_metadata: createdUser.user_metadata as Record<string, unknown>,
         },
         null,
-        false
+        false,
+        accessibleModules
       ),
     },
     { status: 201 }
@@ -253,6 +281,7 @@ type UpdateUserBody = {
   name?: unknown;
   email?: unknown;
   role?: unknown;
+  accessibleModules?: unknown;
 };
 
 export async function PATCH(request: Request) {
@@ -272,6 +301,8 @@ export async function PATCH(request: Request) {
   const name = typeof body.name === "string" ? body.name.trim() : "";
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const role = normalizeAssignableRole(body.role);
+  const accessibleModules =
+    role === "admin" ? [] : normalizeAccessibleModules(body.accessibleModules);
 
   if (!id) {
     return NextResponse.json({ error: "id is required." }, { status: 400 });
@@ -324,11 +355,12 @@ export async function PATCH(request: Request) {
     email,
     role,
     name,
+    accessibleModules,
   });
 
   const { data: profileRow } = await supabaseAdmin
     .from("profiles")
-    .select("jibble_employee_id, is_archived")
+    .select("jibble_employee_id, is_archived, accessible_modules")
     .eq("id", updatedUser.id)
     .maybeSingle();
 
@@ -344,7 +376,8 @@ export async function PATCH(request: Request) {
       typeof profileRow?.jibble_employee_id === "string"
         ? profileRow.jibble_employee_id.trim() || null
         : null,
-      profileRow?.is_archived === true
+      profileRow?.is_archived === true,
+      normalizeAccessibleModules(profileRow?.accessible_modules)
     ),
   });
 }

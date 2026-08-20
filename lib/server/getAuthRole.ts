@@ -1,8 +1,13 @@
+import type { User } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
-import type { User } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
+import {
+  DEFAULT_STAFF_MODULES,
+  normalizeAccessibleModules,
+  type AppModule,
+} from "@/lib/appModules";
 import type { UserRole } from "@/lib/authRole";
 import { normalizeRole } from "@/lib/authRole";
 import { deriveGateToken, timingSafeEqualHex } from "@/lib/gateToken";
@@ -29,54 +34,100 @@ function createServiceSupabase() {
 async function profileAuthState(
   userId: string,
   fallbackUser: User
-): Promise<{ role: UserRole; isArchived: boolean }> {
+): Promise<{ role: UserRole; isArchived: boolean; accessibleModules: AppModule[] }> {
   const sb = createServiceSupabase();
   if (!sb) {
-    return { role: roleFromSupabaseUser(fallbackUser), isArchived: false };
+    return {
+      role: roleFromSupabaseUser(fallbackUser),
+      isArchived: false,
+      accessibleModules: [],
+    };
   }
 
   const { data, error } = await sb
     .from("profiles")
-    .select("role, is_archived")
+    .select("role, is_archived, accessible_modules")
     .eq("id", userId)
     .maybeSingle();
 
   if (error || !data || typeof data !== "object") {
-    // Older DBs without is_archived: fall back to role-only select.
-    if (error && /is_archived|column|schema|Could not find/i.test(error.message)) {
-      const retry = await sb.from("profiles").select("role").eq("id", userId).maybeSingle();
+    // Older DBs without new columns: degrade gracefully.
+    if (error && /accessible_modules|is_archived|column|schema|Could not find/i.test(error.message)) {
+      const retry = await sb
+        .from("profiles")
+        .select("role, is_archived")
+        .eq("id", userId)
+        .maybeSingle();
       if (retry.error || !retry.data) {
-        return { role: roleFromSupabaseUser(fallbackUser), isArchived: false };
+        const roleOnly = await sb.from("profiles").select("role").eq("id", userId).maybeSingle();
+        if (roleOnly.error || !roleOnly.data) {
+          return {
+            role: roleFromSupabaseUser(fallbackUser),
+            isArchived: false,
+            accessibleModules: [],
+          };
+        }
+        const rawRole = (roleOnly.data as { role?: unknown }).role;
+        return {
+          role:
+            rawRole === null || rawRole === undefined || String(rawRole).trim() === ""
+              ? roleFromSupabaseUser(fallbackUser)
+              : normalizeRole(rawRole),
+          isArchived: false,
+          accessibleModules: [...DEFAULT_STAFF_MODULES],
+        };
       }
-      const rawRole = (retry.data as { role?: unknown }).role;
-      if (rawRole === null || rawRole === undefined || String(rawRole).trim() === "") {
-        return { role: roleFromSupabaseUser(fallbackUser), isArchived: false };
-      }
-      return { role: normalizeRole(rawRole), isArchived: false };
+      const row = retry.data as { role?: unknown; is_archived?: unknown };
+      const role =
+        row.role === null || row.role === undefined || String(row.role).trim() === ""
+          ? roleFromSupabaseUser(fallbackUser)
+          : normalizeRole(row.role);
+      return {
+        role,
+        isArchived: row.is_archived === true,
+        accessibleModules: role === "admin" ? [] : [...DEFAULT_STAFF_MODULES],
+      };
     }
-    return { role: roleFromSupabaseUser(fallbackUser), isArchived: false };
+    return {
+      role: roleFromSupabaseUser(fallbackUser),
+      isArchived: false,
+      accessibleModules: [],
+    };
   }
 
-  const row = data as { role?: unknown; is_archived?: unknown };
+  const row = data as {
+    role?: unknown;
+    is_archived?: unknown;
+    accessible_modules?: unknown;
+  };
   const isArchived = row.is_archived === true;
   const rawRole = row.role;
-  if (rawRole === null || rawRole === undefined || String(rawRole).trim() === "") {
-    return { role: roleFromSupabaseUser(fallbackUser), isArchived };
-  }
+  const role =
+    rawRole === null || rawRole === undefined || String(rawRole).trim() === ""
+      ? roleFromSupabaseUser(fallbackUser)
+      : normalizeRole(rawRole);
 
-  return { role: normalizeRole(rawRole), isArchived };
+  return {
+    role,
+    isArchived,
+    accessibleModules: normalizeAccessibleModules(row.accessible_modules),
+  };
 }
 
-/**
- * Resolves current request auth:
- * - Supabase session (role from `profiles.role`, then user metadata), OR
- * - Gatekeeper cookie matching APP_ADMIN_PASSWORD / APP_EDITOR_PASSWORD.
- */
-export async function getAuthRole(): Promise<{
+export type AuthRoleResult = {
   authenticated: boolean;
   role: UserRole;
   isAdmin: boolean;
-}> {
+  /** Staff module grants. Empty for admins (they bypass checks). */
+  accessibleModules: AppModule[];
+};
+
+/**
+ * Resolves current request auth:
+ * - Supabase session (role + modules from `profiles`), OR
+ * - Gatekeeper cookie matching APP_ADMIN_PASSWORD / APP_EDITOR_PASSWORD.
+ */
+export async function getAuthRole(): Promise<AuthRoleResult> {
   const cookieStore = await cookies();
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
@@ -105,12 +156,22 @@ export async function getAuthRole(): Promise<{
     } = await supabase.auth.getUser();
 
     if (user) {
-      const { role, isArchived } = await profileAuthState(user.id, user);
+      const { role, isArchived, accessibleModules } = await profileAuthState(user.id, user);
       if (isArchived) {
-        // Soft-deleted employees must not retain app access even if a JWT is still present.
-        return { authenticated: false, role: "editor", isAdmin: false };
+        return {
+          authenticated: false,
+          role: "editor",
+          isAdmin: false,
+          accessibleModules: [],
+        };
       }
-      return { authenticated: true, role, isAdmin: role === "admin" };
+      const isAdmin = role === "admin";
+      return {
+        authenticated: true,
+        role,
+        isAdmin,
+        accessibleModules: isAdmin ? [] : accessibleModules,
+      };
     }
   }
 
@@ -122,14 +183,24 @@ export async function getAuthRole(): Promise<{
   if (secret && adminPassword && editorPassword && cookieVal) {
     const adminExpected = await deriveGateToken(secret, adminPassword);
     if (timingSafeEqualHex(cookieVal, adminExpected)) {
-      return { authenticated: true, role: "admin", isAdmin: true };
+      return { authenticated: true, role: "admin", isAdmin: true, accessibleModules: [] };
     }
 
     const editorExpected = await deriveGateToken(secret, editorPassword);
     if (timingSafeEqualHex(cookieVal, editorExpected)) {
-      return { authenticated: true, role: "editor", isAdmin: false };
+      return {
+        authenticated: true,
+        role: "editor",
+        isAdmin: false,
+        accessibleModules: [...DEFAULT_STAFF_MODULES],
+      };
     }
   }
 
-  return { authenticated: false, role: "editor", isAdmin: false };
+  return {
+    authenticated: false,
+    role: "editor",
+    isAdmin: false,
+    accessibleModules: [],
+  };
 }

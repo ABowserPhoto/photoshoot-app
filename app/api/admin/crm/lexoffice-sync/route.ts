@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
+import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 import { syncLexofficeContactsToClients } from "@/lib/server/lexofficeContacts";
 
 export const dynamic = "force-dynamic";
@@ -11,9 +11,9 @@ export const dynamic = "force-dynamic";
  * Admin-only endpoint.
  */
 export async function POST() {
-  const auth = await getAdminAreaAuth();
-  if (!auth.authenticated || !auth.isAdmin) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const access = await assertModuleAccess("crm");
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
   try {

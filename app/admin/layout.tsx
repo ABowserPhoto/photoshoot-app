@@ -1,15 +1,47 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
+import {
+  canAccessModule,
+  firstAccessibleHref,
+  moduleForPathname,
+  type AppModule,
+} from "@/lib/appModules";
 import { permissionDeniedRedirectPath } from "@/lib/permissionDenied";
 
+/**
+ * Admin shell: full admins always allowed.
+ * Staff may enter only when they were granted `statistics` or `crm`
+ * for the matching route. User Management APIs remain admin-only.
+ */
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const { authenticated, isLoading } = useAuthRole();
-  const [adminAllowed, setAdminAllowed] = useState<boolean | null>(null);
+  const pathname = usePathname();
+  const { authenticated, isLoading, isAdmin, accessibleModules } = useAuthRole();
+  const [checked, setChecked] = useState(false);
+
+  const requiredModule = useMemo(
+    () => moduleForPathname(pathname) as AppModule | null,
+    [pathname]
+  );
+
+  const allowed = useMemo(() => {
+    if (isAdmin) {
+      return true;
+    }
+    if (requiredModule === "statistics" || requiredModule === "crm") {
+      return canAccessModule({
+        isAdmin: false,
+        accessibleModules,
+        module: requiredModule,
+      });
+    }
+    // Unknown /admin/* routes stay admin-only.
+    return false;
+  }, [accessibleModules, isAdmin, requiredModule]);
 
   useEffect(() => {
     if (isLoading) {
@@ -19,38 +51,18 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       router.replace("/login");
       return;
     }
-
-    let cancelled = false;
-
-    async function verifyAdminAccess() {
-      try {
-        const response = await fetch("/api/auth/admin-access", { cache: "no-store", credentials: "include" });
-        const json = (await response.json().catch(() => null)) as { allowed?: boolean } | null;
-        if (cancelled) {
-          return;
-        }
-        if (response.ok && json?.allowed) {
-          setAdminAllowed(true);
-          return;
-        }
-        setAdminAllowed(false);
-        router.replace(permissionDeniedRedirectPath());
-      } catch {
-        if (!cancelled) {
-          setAdminAllowed(false);
-          router.replace(permissionDeniedRedirectPath());
-        }
-      }
+    if (!allowed) {
+      router.replace(
+        firstAccessibleHref({ isAdmin: false, accessibleModules }) === "/login"
+          ? permissionDeniedRedirectPath()
+          : firstAccessibleHref({ isAdmin: false, accessibleModules })
+      );
+      return;
     }
+    setChecked(true);
+  }, [allowed, authenticated, accessibleModules, isLoading, router]);
 
-    void verifyAdminAccess();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [authenticated, isLoading, router]);
-
-  if (isLoading || !authenticated || adminAllowed !== true) {
+  if (isLoading || !authenticated || !checked || !allowed) {
     return (
       <main className="flex min-h-[50vh] items-center justify-center text-sm text-zinc-400">
         Checking access…

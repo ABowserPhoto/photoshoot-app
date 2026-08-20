@@ -15,5 +15,6 @@ export async function GET() {
     authenticated: true,
     role: auth.role,
     isAdmin: auth.isAdmin,
+    accessibleModules: auth.accessibleModules,
   });
 }

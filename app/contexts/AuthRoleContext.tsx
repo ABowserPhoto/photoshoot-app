@@ -3,8 +3,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import type { UserRole } from "@/lib/authRole";
 import { handleClockOut } from "@/app/actions/shifts";
+import type { AppModule } from "@/lib/appModules";
+import { canAccessModule } from "@/lib/appModules";
+import type { UserRole } from "@/lib/authRole";
 import { supabase } from "@/lib/supabaseClient";
 
 type AuthUser = {
@@ -16,7 +18,9 @@ type AuthRoleState = {
   user: AuthUser | null;
   role: UserRole;
   isAdmin: boolean;
+  accessibleModules: AppModule[];
   isLoading: boolean;
+  canAccess: (module: AppModule) => boolean;
   refresh: () => void;
   logout: () => Promise<void>;
 };
@@ -29,6 +33,7 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [role, setRole] = useState<UserRole>("editor");
   const [isAdmin, setIsAdmin] = useState(false);
+  const [accessibleModules, setAccessibleModules] = useState<AppModule[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [tick, setTick] = useState(0);
 
@@ -61,6 +66,7 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
           authenticated?: boolean;
           role?: UserRole;
           isAdmin?: boolean;
+          accessibleModules?: AppModule[];
         } | null;
         if (cancelled) {
           return;
@@ -69,6 +75,7 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
           setAuthenticated(true);
           setRole(json.role ?? "editor");
           setIsAdmin(Boolean(json.isAdmin));
+          setAccessibleModules(Array.isArray(json.accessibleModules) ? json.accessibleModules : []);
           if (supabase) {
             const {
               data: { user: sessionUser },
@@ -82,6 +89,7 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
           setUser(null);
           setRole("editor");
           setIsAdmin(false);
+          setAccessibleModules([]);
         }
       } catch {
         if (!cancelled) {
@@ -89,6 +97,7 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
           setUser(null);
           setRole("editor");
           setIsAdmin(false);
+          setAccessibleModules([]);
         }
       } finally {
         if (!cancelled) {
@@ -127,15 +136,41 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
       setUser(null);
       setRole("editor");
       setIsAdmin(false);
+      setAccessibleModules([]);
       setIsLoading(false);
       router.push("/login");
       router.refresh();
     }
   }, [router]);
 
+  const canAccess = useCallback(
+    (module: AppModule) => canAccessModule({ isAdmin, accessibleModules, module }),
+    [isAdmin, accessibleModules]
+  );
+
   const value = useMemo(
-    () => ({ authenticated, user, role, isAdmin, isLoading, refresh, logout }),
-    [authenticated, user, role, isAdmin, isLoading, refresh, logout]
+    () => ({
+      authenticated,
+      user,
+      role,
+      isAdmin,
+      accessibleModules,
+      isLoading,
+      canAccess,
+      refresh,
+      logout,
+    }),
+    [
+      authenticated,
+      user,
+      role,
+      isAdmin,
+      accessibleModules,
+      isLoading,
+      canAccess,
+      refresh,
+      logout,
+    ]
   );
 
   return <AuthRoleContext.Provider value={value}>{children}</AuthRoleContext.Provider>;
