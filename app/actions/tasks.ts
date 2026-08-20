@@ -71,19 +71,18 @@ function isKanbanCompletionStatus(status: string): boolean {
 /**
  * Central status-update action.
  *
- * Timer auto-management (only when the caller does NOT provide explicit
- * `editing_started_at` or `total_editing_seconds` in `extra`):
+ * Timer auto-management:
  *
  * • Entering an editing-like status ("Editing", "Processing") from a
- *   non-editing status → stamps `editing_started_at = now`.
+ *   non-editing status → stamps `editing_started_at = now` unless a timer
+ *   is already running. Folder paths are irrelevant.
  *
  * • Leaving an editing-like status → calculates elapsed seconds since
  *   `editing_started_at`, adds them to `total_editing_seconds`, and
  *   resets `editing_started_at` to null.
  *
- * The frontend always passes explicit timer values in `extra`, so the
- * auto-logic is effectively a server-side fallback for programmatic
- * callers (background workers, API routes) that do not supply them.
+ * Explicit timer fields in `extra` are used when they contain real values.
+ * Passing `editing_started_at: null` on enter no longer skips the start.
  */
 export async function updateTaskStatus(
   taskId: string,
@@ -128,47 +127,63 @@ export async function updateTaskStatus(
   }
 
   // ── Auto-timer management ──────────────────────────────────────────────────
-  // Skip when the caller already provided explicit timer fields.
-  const callerProvidesTimer =
-    extra != null &&
-    ("editing_started_at" in extra || "total_editing_seconds" in extra);
+  // Always stamp/accumulate when entering or leaving editing-like statuses.
+  // Callers may pass explicit timer fields; a null/empty `editing_started_at`
+  // on enter must NOT skip the start (that used to disable auto-start).
+  const extraStartedRaw = extra && "editing_started_at" in extra ? extra.editing_started_at : undefined;
+  const extraStarted =
+    typeof extraStartedRaw === "string" && extraStartedRaw.trim() ? extraStartedRaw.trim() : null;
 
-  if (!callerProvidesTimer) {
-    const { data: currentTask } = await sb
-      .from("tasks")
-      .select("status, editing_started_at, total_editing_seconds")
-      .eq("id", id)
-      .maybeSingle();
+  const { data: currentTask } = await sb
+    .from("tasks")
+    .select("status, editing_started_at, total_editing_seconds")
+    .eq("id", id)
+    .maybeSingle();
 
-    const currentStatus = typeof currentTask?.status === "string" ? currentTask.status : "";
-    const enteringEditing = isEditingLikeStatus(status) && !isEditingLikeStatus(currentStatus);
-    const leavingEditing = !isEditingLikeStatus(status) && isEditingLikeStatus(currentStatus);
+  const currentStatus = typeof currentTask?.status === "string" ? currentTask.status : "";
+  const enteringEditing = isEditingLikeStatus(status) && !isEditingLikeStatus(currentStatus);
+  const leavingEditing = !isEditingLikeStatus(status) && isEditingLikeStatus(currentStatus);
 
-    if (enteringEditing) {
-      payload.editing_started_at = new Date().toISOString();
-      // Preserve whatever total was already accumulated; don't overwrite it.
-      if (payload.total_editing_seconds == null) {
-        payload.total_editing_seconds = Number(currentTask?.total_editing_seconds ?? 0);
-      }
-    } else if (leavingEditing) {
-      const startedAt = typeof currentTask?.editing_started_at === "string"
-        ? currentTask.editing_started_at
-        : null;
-      const startedAtMs = startedAt ? new Date(startedAt).getTime() : NaN;
-      const elapsed =
-        !Number.isNaN(startedAtMs) ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000)) : 0;
-      const prevTotal = Number(currentTask?.total_editing_seconds ?? 0);
-      payload.editing_started_at = null;
-      payload.total_editing_seconds = prevTotal + elapsed;
+  if (enteringEditing) {
+    const alreadyRunning =
+      extraStarted ||
+      (typeof currentTask?.editing_started_at === "string" && currentTask.editing_started_at.trim());
+    payload.editing_started_at = alreadyRunning || new Date().toISOString();
+    if (payload.total_editing_seconds == null) {
+      payload.total_editing_seconds = Number(currentTask?.total_editing_seconds ?? 0);
     }
+  } else if (leavingEditing) {
+    const startedAt =
+      extraStarted ||
+      (typeof currentTask?.editing_started_at === "string" ? currentTask.editing_started_at : null);
+    const startedAtMs = startedAt ? new Date(startedAt).getTime() : NaN;
+    const elapsed =
+      !Number.isNaN(startedAtMs) ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000)) : 0;
+    const prevTotal = Number(
+      extra && typeof extra.total_editing_seconds === "number"
+        ? extra.total_editing_seconds
+        : (currentTask?.total_editing_seconds ?? 0)
+    );
+    // If the caller already added elapsed into total_editing_seconds, don't double-count.
+    const callerAlreadyAccumulated = extra != null && "total_editing_seconds" in extra && extraStartedRaw === null;
+    payload.editing_started_at = null;
+    payload.total_editing_seconds = callerAlreadyAccumulated ? prevTotal : prevTotal + elapsed;
   }
   // ── End auto-timer ─────────────────────────────────────────────────────────
 
-  const { error } = await sb.from("tasks").update(payload).eq("id", id);
-  if (error) {
-    console.error("[updateTaskStatus]", error);
-    return { ok: false, error: error.message };
-  }
+  try {
+    const { error } = await sb.from("tasks").update(payload).eq("id", id);
+    if (error) {
+      console.error("[updateTaskStatus]", error);
+      return { ok: false, error: error.message };
+    }
 
-  return { ok: true };
+    return { ok: true };
+  } catch (error) {
+    console.error("[updateTaskStatus]", error);
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to update task status.",
+    };
+  }
 }

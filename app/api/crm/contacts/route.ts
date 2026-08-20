@@ -2,11 +2,8 @@ import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
-import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const dynamic = "force-dynamic";
-
-const FETCH_TIMEOUT_MS = Number(process.env.TASKS_FETCH_TIMEOUT_MS ?? "8000");
 
 export type CrmContactEmail = {
   id: string;
@@ -34,76 +31,47 @@ export type CrmContactRecord = {
   ccEmails: string[];
 };
 
-function getSupabase() {
+const CONTACTS_SELECT = `
+  id,
+  first_name,
+  last_name,
+  phone,
+  role,
+  company_id,
+  clients!contacts_company_id_fkey (
+    id,
+    company_name,
+    street,
+    city,
+    zip_code,
+    country,
+    billing_street,
+    billing_city,
+    billing_postal_code,
+    billing_country,
+    lexoffice_contact_id,
+    lexoffice_id
+  ),
+  contact_emails (
+    id,
+    email,
+    is_cc,
+    is_primary
+  )
+`;
+
+function getServiceSupabase() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const key =
-    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
   if (!url || !key) return null;
   return createClient(url, key, {
     auth: { persistSession: false },
-    global: {
-      fetch: (input, init) => fetchWithTimeout(input, init, FETCH_TIMEOUT_MS),
-    },
   });
 }
 
-/**
- * GET /api/crm/contacts
- * Returns searchable contacts with company billing details and emails.
- */
-export async function GET() {
-  const auth = await getAuthRole();
-  if (!auth.authenticated) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const supabase = getSupabase();
-  if (!supabase) {
-    return NextResponse.json({ error: "Supabase is not configured." }, { status: 503 });
-  }
-
-  const { data, error } = await supabase
-    .from("contacts")
-    .select(
-      `
-      id,
-      first_name,
-      last_name,
-      phone,
-      role,
-      company_id,
-      clients!inner (
-        id,
-        company_name,
-        street,
-        city,
-        zip_code,
-        country,
-        billing_street,
-        billing_city,
-        billing_postal_code,
-        billing_country,
-        lexoffice_contact_id,
-        lexoffice_id
-      ),
-      contact_emails (
-        id,
-        email,
-        is_cc,
-        is_primary
-      )
-    `
-    )
-    .order("last_name", { ascending: true })
-    .order("first_name", { ascending: true });
-
-  if (error) {
-    console.error("[api/crm/contacts]", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  const contacts: CrmContactRecord[] = (data ?? []).map((row) => {
+function mapContactRows(data: unknown[] | null): CrmContactRecord[] {
+  return (data ?? []).map((raw) => {
+    const row = raw as Record<string, unknown>;
     const companyRaw = Array.isArray(row.clients) ? row.clients[0] : row.clients;
     const company = (companyRaw ?? {}) as {
       id?: string;
@@ -157,7 +125,7 @@ export async function GET() {
       fullName,
       phone: typeof row.phone === "string" ? row.phone.trim() : "",
       role: typeof row.role === "string" ? row.role.trim() : "",
-      companyId: typeof company.id === "string" ? company.id : String(row.company_id),
+      companyId: typeof company.id === "string" ? company.id : String(row.company_id ?? ""),
       companyName: typeof company.company_name === "string" ? company.company_name.trim() : "",
       lexofficeContactId:
         (typeof company.lexoffice_contact_id === "string" && company.lexoffice_contact_id.trim()) ||
@@ -172,6 +140,49 @@ export async function GET() {
       ccEmails,
     };
   });
+}
 
+/**
+ * GET /api/crm/contacts
+ * Returns searchable contacts with company billing details and emails.
+ * Uses service_role under RLS (anon cannot see contacts).
+ */
+export async function GET() {
+  const auth = await getAuthRole();
+  if (!auth.authenticated) {
+    console.warn("[api/crm/contacts] unauthorized — no Supabase session or gate cookie");
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const supabase = getServiceSupabase();
+  if (!supabase) {
+    console.error("[api/crm/contacts] SUPABASE_SERVICE_ROLE_KEY missing — cannot read contacts under RLS");
+    return NextResponse.json(
+      {
+        error:
+          "Supabase service role is not configured. Contact dropdown requires SUPABASE_SERVICE_ROLE_KEY under RLS.",
+      },
+      { status: 503 }
+    );
+  }
+
+  const { data, error } = await supabase
+    .from("contacts")
+    .select(CONTACTS_SELECT)
+    .order("last_name", { ascending: true })
+    .order("first_name", { ascending: true });
+
+  if (error) {
+    console.error("[api/crm/contacts] query failed:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  const contacts = mapContactRows((data as unknown[] | null) ?? null);
+  console.info(`[api/crm/contacts] loaded ${contacts.length} contacts for role=${auth.role}`);
   return NextResponse.json({ ok: true, contacts });
 }

@@ -9,13 +9,8 @@ export type TriggerPreviewEmailResult = {
   gmailDraftId?: string;
 };
 
-function resolvePublicAppBaseUrl(): string {
-  const raw =
-    process.env.NEXT_PUBLIC_BASE_URL?.trim() ||
-    process.env.NEXT_PUBLIC_APP_URL?.trim() ||
-    "https://workflow.abowserphoto.com";
-  return raw.replace(/\/$/, "");
-}
+/** Client-facing gallery links must always use production, never localhost/Electron. */
+const PUBLIC_GALLERY_BASE_URL = "https://workflow.abowserphoto.com";
 
 function normalizeCcHeader(raw: string): string | undefined {
   const parts = raw
@@ -82,7 +77,7 @@ export async function createPreviewEmailDraft(taskId: string): Promise<TriggerPr
       typeof row.email_cc === "string" ? normalizeCcHeader(row.email_cc) : undefined;
 
     const shootId = String(row.id);
-    const previewLink = `${resolvePublicAppBaseUrl()}/gallery/${shootId}`;
+    const previewLink = `${PUBLIC_GALLERY_BASE_URL}/gallery/${shootId}`;
 
     const { emailVariant, subject, htmlBody, plainTextBody } = buildPreviewEmailContent({
       photoshootType,

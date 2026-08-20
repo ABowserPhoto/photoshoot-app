@@ -486,7 +486,7 @@ function HomeContent() {
       supabase
         .from("clients")
         .select(
-          "id, company_name, street, zip_code, city, country, billing_street, billing_city, billing_postal_code, billing_country, email, phone, lexoffice_contact_id"
+          "id, company_name, street, zip_code, city, country, billing_street, billing_city, billing_postal_code, billing_country, email, phone, lexoffice_contact_id, lexoffice_id, contact_persons"
         )
         .order("company_name", { ascending: true }),
       supabase
@@ -506,6 +506,7 @@ function HomeContent() {
             error?: string;
           } | null;
           if (!response.ok) {
+            console.warn("[booking] /api/crm/contacts failed:", response.status, json?.error);
             return {
               error: json?.error ?? `HTTP ${response.status}`,
               contacts: [] as CrmContactDirectoryEntry[],
@@ -526,11 +527,148 @@ function HomeContent() {
     if (taskClientError) {
       setFormError(`Failed to load client suggestions: ${taskClientError.message}`);
     }
-    if (contactsLoad.error) {
-      console.warn("[booking] contacts load:", contactsLoad.error);
-    } else {
-      setCrmContacts(contactsLoad.contacts);
+
+    let nextContacts = contactsLoad.contacts;
+    if (contactsLoad.error || nextContacts.length === 0) {
+      // Fallback 1: direct browser Supabase read (authenticated RLS) when the API
+      // fails or returns empty under a misconfigured service-role key.
+      const { data: directContacts, error: directError } = await supabase
+        .from("contacts")
+        .select(
+          `
+          id,
+          first_name,
+          last_name,
+          phone,
+          company_id,
+          clients!contacts_company_id_fkey (
+            id,
+            company_name,
+            street,
+            city,
+            zip_code,
+            country,
+            billing_street,
+            billing_city,
+            billing_postal_code,
+            billing_country,
+            lexoffice_contact_id,
+            lexoffice_id
+          ),
+          contact_emails ( email, is_cc, is_primary )
+        `
+        )
+        .order("last_name", { ascending: true })
+        .order("first_name", { ascending: true });
+
+      if (!directError && Array.isArray(directContacts) && directContacts.length > 0) {
+        nextContacts = directContacts.map((row) => {
+          const companyRaw = Array.isArray(row.clients) ? row.clients[0] : row.clients;
+          const company = (companyRaw ?? {}) as {
+            id?: string;
+            company_name?: string | null;
+            street?: string | null;
+            city?: string | null;
+            zip_code?: string | null;
+            country?: string | null;
+            billing_street?: string | null;
+            billing_city?: string | null;
+            billing_postal_code?: string | null;
+            billing_country?: string | null;
+            lexoffice_contact_id?: string | null;
+            lexoffice_id?: string | null;
+          };
+          const emails = Array.isArray(row.contact_emails) ? row.contact_emails : [];
+          const primary =
+            emails.find((e) => e.is_primary && !e.is_cc)?.email ||
+            emails.find((e) => !e.is_cc)?.email ||
+            emails[0]?.email ||
+            "";
+          const firstName = typeof row.first_name === "string" ? row.first_name.trim() : "";
+          const lastName = typeof row.last_name === "string" ? row.last_name.trim() : "";
+          const fullName = [firstName, lastName].filter(Boolean).join(" ").trim() || "Contact";
+          return {
+            id: String(row.id),
+            firstName,
+            lastName,
+            fullName,
+            phone: typeof row.phone === "string" ? row.phone.trim() : "",
+            companyId: typeof company.id === "string" ? company.id : String(row.company_id ?? ""),
+            companyName: typeof company.company_name === "string" ? company.company_name.trim() : "",
+            lexofficeContactId:
+              (typeof company.lexoffice_contact_id === "string" &&
+                company.lexoffice_contact_id.trim()) ||
+              (typeof company.lexoffice_id === "string" && company.lexoffice_id.trim()) ||
+              "",
+            billingStreet: (company.billing_street || company.street || "").trim(),
+            billingCity: (company.billing_city || company.city || "").trim(),
+            billingPostalCode: (company.billing_postal_code || company.zip_code || "").trim(),
+            billingCountry: (company.billing_country || company.country || "").trim(),
+            primaryEmail: typeof primary === "string" ? primary.trim() : "",
+            ccEmails: emails
+              .filter((e) => e.is_cc && typeof e.email === "string")
+              .map((e) => String(e.email).trim())
+              .filter(Boolean),
+          } satisfies CrmContactDirectoryEntry;
+        });
+        console.info(`[booking] loaded ${nextContacts.length} contacts via browser Supabase fallback`);
+      } else if (directError) {
+        console.warn("[booking] contacts browser fallback failed:", directError.message);
+      }
     }
+
+    // Fallback 2: synthesize options from clients.contact_persons (Lexoffice sync JSON).
+    if (nextContacts.length === 0 && Array.isArray(clientsData)) {
+      const synthesized: CrmContactDirectoryEntry[] = [];
+      for (const client of clientsData) {
+        const persons = Array.isArray((client as { contact_persons?: unknown }).contact_persons)
+          ? ((client as { contact_persons: Array<Record<string, unknown>> }).contact_persons)
+          : [];
+        const companyId = typeof client.id === "string" ? client.id : "";
+        const companyName =
+          typeof client.company_name === "string" ? client.company_name.trim() : "";
+        const lexofficeContactId =
+          (typeof client.lexoffice_contact_id === "string" && client.lexoffice_contact_id.trim()) ||
+          (typeof (client as { lexoffice_id?: string }).lexoffice_id === "string" &&
+            String((client as { lexoffice_id?: string }).lexoffice_id).trim()) ||
+          "";
+        for (const person of persons) {
+          const name = typeof person.name === "string" ? person.name.trim() : "";
+          if (!name) continue;
+          const parts = name.split(/\s+/);
+          const firstName = parts.length > 1 ? parts.slice(0, -1).join(" ") : parts[0] ?? "";
+          const lastName = parts.length > 1 ? (parts[parts.length - 1] ?? "") : "";
+          synthesized.push({
+            id: `lex-${companyId}-${typeof person.id === "string" ? person.id : synthesized.length}`,
+            firstName,
+            lastName,
+            fullName: name,
+            phone: typeof person.phone === "string" ? person.phone.trim() : "",
+            companyId,
+            companyName,
+            lexofficeContactId,
+            billingStreet: (client.billing_street || client.street || "").trim(),
+            billingCity: (client.billing_city || client.city || "").trim(),
+            billingPostalCode: (client.billing_postal_code || client.zip_code || "").trim(),
+            billingCountry: (client.billing_country || client.country || "").trim(),
+            primaryEmail: typeof person.email === "string" ? person.email.trim() : "",
+            ccEmails: [],
+          });
+        }
+      }
+      if (synthesized.length > 0) {
+        nextContacts = synthesized;
+        console.info(
+          `[booking] synthesized ${synthesized.length} contacts from clients.contact_persons`
+        );
+      }
+    }
+
+    if (contactsLoad.error && nextContacts.length === 0) {
+      setFormError(`Failed to load contacts: ${contactsLoad.error}`);
+      console.warn("[booking] contacts load:", contactsLoad.error);
+    }
+    setCrmContacts(nextContacts);
 
     const mergedClients = new Map<string, ClientDirectoryEntry>();
     const applyClientRecord = (record: {
@@ -823,8 +961,10 @@ function HomeContent() {
     setCompanyName(option.label);
 
     if (option.client) {
-      setEmail(option.client.email);
-      setPhone(option.client.phone);
+      if (!email.trim()) {
+        setEmail(option.client.email ?? "");
+      }
+      setPhone(option.client.phone ?? "");
       setStreet(option.client.street);
       setZipCode(option.client.zip_code);
       setCity(option.client.city);
@@ -834,8 +974,7 @@ function HomeContent() {
     }
 
     if (actionMeta.action === "create-option") {
-      setEmail("");
-      setPhone("");
+      // Keep email/phone the user already typed for the contact person.
       setStreet("");
       setZipCode("");
       setCity("");
@@ -859,7 +998,12 @@ function HomeContent() {
     }
 
     const contact = option.contact;
-    setSelectedContactId(contact.id);
+    // Synthesized Lexoffice JSON rows use `lex-…` ids and are not real contacts FK rows.
+    const isPersistedContact =
+      Boolean(contact.id) &&
+      !contact.id.startsWith("lex-") &&
+      /^[0-9a-f-]{36}$/i.test(contact.id);
+    setSelectedContactId(isPersistedContact ? contact.id : null);
     setContactPerson(contact.fullName);
     setCompanyName(contact.companyName);
     setEmail(contact.primaryEmail);
@@ -1083,7 +1227,7 @@ function HomeContent() {
       lexoffice_contact_id: lexofficeContactId || null,
       country,
       address_supplement: addressSupplement,
-      email,
+      email: email.trim(),
       email_cc: emailCc.trim() || null,
       gallery_link: galleryLink.trim() || null,
       has_separate_invoice_email: hasSeparateInvoiceEmail,

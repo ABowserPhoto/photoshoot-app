@@ -419,6 +419,18 @@ function formatDuration(totalSeconds: number): string {
   return [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
 }
 
+function liveEditingSeconds(task: BoardTask, nowMs: number): number {
+  let total = Math.max(0, task.totalEditingSeconds);
+  if (!task.editingStartedAt) {
+    return total;
+  }
+  const startedAtMs = new Date(task.editingStartedAt).getTime();
+  if (Number.isNaN(startedAtMs)) {
+    return total;
+  }
+  return total + Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
+}
+
 function toErrorString(value: unknown, fallback: string): string {
   if (typeof value === "string" && value.trim()) return value;
   if (value && typeof value === "object") {
@@ -703,7 +715,9 @@ export default function KanbanBoard({
   const [board, setBoard] = useState<BoardState>(INITIAL_BOARD);
   const [ipcRefreshSignal, setIpcRefreshSignal] = useState(0);
   const [archivedTasks, setArchivedTasks] = useState<BoardTask[]>([]);
-  const [collapsedColumns, setCollapsedColumns] = useState<Partial<Record<ColumnKey, boolean>>>({});
+  const [collapsedColumns, setCollapsedColumns] = useState<Partial<Record<ColumnKey, boolean>>>({
+    completed: true,
+  });
   const [isLoading, setIsLoading] = useState(true);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [celebrationToast, setCelebrationToast] = useState<string | null>(null);
@@ -711,6 +725,7 @@ export default function KanbanBoard({
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [sourceColumn, setSourceColumn] = useState<ColumnKey | null>(null);
   const [activeDropColumn, setActiveDropColumn] = useState<ColumnKey | null>(null);
+  const [clockMs, setClockMs] = useState(() => Date.now());
   const [mergePrompt, setMergePrompt] = useState<{ task: BoardTask; from: ColumnKey } | null>(null);
   const [mergePromptProcessing, setMergePromptProcessing] = useState(false);
   const [mergePromptError, setMergePromptError] = useState<string | null>(null);
@@ -734,6 +749,21 @@ export default function KanbanBoard({
   useEffect(() => {
     archivedTasksRef.current = archivedTasks;
   }, [archivedTasks]);
+
+  useEffect(() => {
+    const hasRunningTimer = COLUMN_CONFIG.some((column) =>
+      board[column.id].some((task) => Boolean(task.editingStartedAt))
+    );
+    if (!hasRunningTimer) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setClockMs(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [board]);
 
   useEffect(() => {
     if (!celebrationToast) {
@@ -1245,24 +1275,28 @@ export default function KanbanBoard({
 
     const now = new Date();
     const nowIso = now.toISOString();
-    const nextEditingStartedAt =
-      targetColumn === "editing"
-        ? now.toISOString()
-        : targetColumn === "edited"
-          ? null
-          : dragged.task.editingStartedAt;
+    const enteringEditing = targetColumn === "editing" && sourceColumn !== "editing";
+    const leavingEditing = sourceColumn === "editing" && targetColumn !== "editing";
+
+    // Timer is independent of folders / merge / Drive. Always start on enter
+    // and always accumulate on leave, even when local_folder_name is empty.
+    let nextEditingStartedAt = dragged.task.editingStartedAt;
     let nextTotalEditingSeconds = dragged.task.totalEditingSeconds;
 
-    if (targetColumn === "editing" && sourceColumn !== "editing") {
-      // Timer start is handled automatically by updateTaskStatus; no popup needed.
+    if (enteringEditing) {
+      if (!nextEditingStartedAt) {
+        nextEditingStartedAt = nowIso;
+      }
     }
 
-    if (sourceColumn === "editing" && targetColumn === "edited") {
-      const startedAtTs = dragged.task.editingStartedAt ? new Date(dragged.task.editingStartedAt).getTime() : null;
-      if (startedAtTs && !Number.isNaN(startedAtTs)) {
-        const elapsed = Math.max(0, Math.floor((now.getTime() - startedAtTs) / 1000));
-        nextTotalEditingSeconds += elapsed;
+    if (leavingEditing) {
+      const startedAtTs = dragged.task.editingStartedAt
+        ? new Date(dragged.task.editingStartedAt).getTime()
+        : Number.NaN;
+      if (!Number.isNaN(startedAtTs)) {
+        nextTotalEditingSeconds += Math.max(0, Math.floor((now.getTime() - startedAtTs) / 1000));
       }
+      nextEditingStartedAt = null;
     }
 
     const movedTask: BoardTask = {
@@ -1421,11 +1455,20 @@ export default function KanbanBoard({
     }
 
     const statusLabel = COLUMN_LABEL_BY_KEY[targetColumn];
-    const updateRes = await updateTaskStatus(dragged.task.id, statusLabel, {
-      editing_started_at: nextEditingStartedAt,
-      total_editing_seconds: nextTotalEditingSeconds,
-      ...(targetColumn === "completed" ? { completed_at: nowIso } : {}),
-    });
+    let updateRes: { ok: true } | { ok: false; error: string };
+    try {
+      updateRes = await updateTaskStatus(dragged.task.id, statusLabel, {
+        editing_started_at: nextEditingStartedAt,
+        total_editing_seconds: nextTotalEditingSeconds,
+        ...(targetColumn === "completed" ? { completed_at: nowIso } : {}),
+      });
+    } catch (error) {
+      setBoard(previousBoard);
+      setStatusMessage(
+        `Could not update task status: ${toErrorString(error, "Status update failed.")}`
+      );
+      return;
+    }
 
     if (!updateRes.ok) {
       setBoard(previousBoard);
@@ -1433,16 +1476,20 @@ export default function KanbanBoard({
       return;
     }
 
-    void syncKanbanPhotoshootStatus({
-      photoshootId: dragged.task.id,
-      newStatusLabel: COLUMN_LABEL_BY_KEY[targetColumn],
-      photoshootDisplayName:
-        dragged.task.taskTitle?.trim() || dragged.task.companyName?.trim() || "Photoshoot",
-    }).then((res) => {
-      if (!res.ok) {
-        console.warn("[KanbanBoard] agency sync:", res.error);
-      }
-    });
+    try {
+      void syncKanbanPhotoshootStatus({
+        photoshootId: dragged.task.id,
+        newStatusLabel: COLUMN_LABEL_BY_KEY[targetColumn],
+        photoshootDisplayName:
+          dragged.task.taskTitle?.trim() || dragged.task.companyName?.trim() || "Photoshoot",
+      }).then((res) => {
+        if (!res.ok) {
+          console.warn("[KanbanBoard] agency sync:", res.error);
+        }
+      });
+    } catch (error) {
+      console.warn("[KanbanBoard] agency sync threw:", error);
+    }
 
     if (targetColumn === "completed") {
       const todayCompletionCount = countTodayCompletions(nextBoard, archivedTasks, {
@@ -1498,7 +1545,11 @@ export default function KanbanBoard({
       setStatusMessage(null);
     }
 
-    onTaskMoved?.(movedTask, sourceColumn, targetColumn);
+    try {
+      onTaskMoved?.(movedTask, sourceColumn, targetColumn);
+    } catch (error) {
+      console.warn("[KanbanBoard] onTaskMoved threw (timer already saved):", error);
+    }
   };
 
   const isColumnCollapsed = (columnId: ColumnKey) => {
@@ -1888,9 +1939,10 @@ export default function KanbanBoard({
                               </button>
                             );
                           })() : null}
-                          {task.totalEditingSeconds > 0 ? (
+                          {liveEditingSeconds(task, clockMs) > 0 || task.editingStartedAt ? (
                             <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
-                              Total Edit Time: {formatDuration(task.totalEditingSeconds)}
+                              {task.editingStartedAt ? "Editing: " : "Total Edit Time: "}
+                              {formatDuration(liveEditingSeconds(task, clockMs))}
                             </p>
                           ) : null}
                           {task.localFolderName?.trim() ? (

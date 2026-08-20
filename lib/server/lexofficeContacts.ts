@@ -126,16 +126,150 @@ function extractPhoneFromContact(contact: LexofficeApiContact): string {
 }
 
 function extractContactPersons(contact: LexofficeApiContact): ContactPerson[] {
-  if (!contact.company?.contactPersons?.length) {
+  if (contact.company?.contactPersons?.length) {
+    return contact.company.contactPersons.map((cp, i) => ({
+      id: String(i),
+      name: [cp.firstName?.trim(), cp.lastName?.trim()].filter(Boolean).join(" "),
+      email: cp.emailAddress?.trim() ?? "",
+      phone: cp.phoneNumber?.trim() ?? "",
+      role: cp.primary ? "Primary" : "",
+    }));
+  }
+
+  // Person-type Lexoffice contacts (no company.contactPersons).
+  const firstName = contact.person?.firstName?.trim() ?? "";
+  const lastName = contact.person?.lastName?.trim() ?? "";
+  const name = [firstName, lastName].filter(Boolean).join(" ");
+  if (!name) {
     return [];
   }
-  return contact.company.contactPersons.map((cp, i) => ({
-    id: String(i),
-    name: [cp.firstName?.trim(), cp.lastName?.trim()].filter(Boolean).join(" "),
-    email: cp.emailAddress?.trim() ?? "",
-    phone: cp.phoneNumber?.trim() ?? "",
-    role: cp.primary ? "Primary" : "",
-  }));
+  return [
+    {
+      id: "0",
+      name,
+      email: extractEmailFromContact(contact),
+      phone: extractPhoneFromContact(contact),
+      role: "Primary",
+    },
+  ];
+}
+
+function splitPersonName(name: string): { firstName: string; lastName: string } {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return { firstName: "", lastName: "" };
+  }
+  const parts = trimmed.split(/\s+/);
+  if (parts.length === 1) {
+    return { firstName: parts[0] ?? "", lastName: "" };
+  }
+  return {
+    firstName: parts.slice(0, -1).join(" "),
+    lastName: parts[parts.length - 1] ?? "",
+  };
+}
+
+/**
+ * Upserts Lexoffice contact persons into public.contacts + contact_emails so the
+ * Booking Modal Contact Person dropdown (GET /api/crm/contacts) stays populated.
+ */
+async function syncContactPersonsToCrmTables(
+  supabase: NonNullable<ReturnType<typeof serviceSupabase>>,
+  companyId: string,
+  persons: ContactPerson[]
+): Promise<string | null> {
+  if (persons.length === 0) {
+    return null;
+  }
+
+  const { data: existingRows, error: existingError } = await supabase
+    .from("contacts")
+    .select("id, first_name, last_name, contact_emails(id, email)")
+    .eq("company_id", companyId);
+
+  if (existingError) {
+    return `contacts load: ${existingError.message}`;
+  }
+
+  const existing = Array.isArray(existingRows) ? existingRows : [];
+
+  for (const person of persons) {
+    const { firstName, lastName } = splitPersonName(person.name);
+    if (!firstName && !lastName) {
+      continue;
+    }
+
+    const match = existing.find((row) => {
+      const rowFirst = typeof row.first_name === "string" ? row.first_name.trim().toLowerCase() : "";
+      const rowLast = typeof row.last_name === "string" ? row.last_name.trim().toLowerCase() : "";
+      return rowFirst === firstName.toLowerCase() && rowLast === lastName.toLowerCase();
+    });
+
+    let contactId = typeof match?.id === "string" ? match.id : "";
+
+    if (contactId) {
+      const { error: updateError } = await supabase
+        .from("contacts")
+        .update({
+          phone: person.phone || null,
+          role: person.role || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", contactId);
+      if (updateError) {
+        return `contacts update: ${updateError.message}`;
+      }
+    } else {
+      const { data: inserted, error: insertError } = await supabase
+        .from("contacts")
+        .insert({
+          company_id: companyId,
+          first_name: firstName,
+          last_name: lastName,
+          phone: person.phone || null,
+          role: person.role || null,
+        })
+        .select("id")
+        .maybeSingle();
+      if (insertError) {
+        return `contacts insert: ${insertError.message}`;
+      }
+      contactId = typeof inserted?.id === "string" ? inserted.id : "";
+      if (!contactId) {
+        return "contacts insert: no id returned";
+      }
+    }
+
+    const email = person.email.trim().toLowerCase();
+    if (!email) {
+      continue;
+    }
+
+    const existingEmails = Array.isArray(match?.contact_emails) ? match.contact_emails : [];
+    const emailExists = existingEmails.some(
+      (entry) =>
+        typeof (entry as { email?: string }).email === "string" &&
+        String((entry as { email: string }).email).trim().toLowerCase() === email
+    );
+    if (emailExists) {
+      continue;
+    }
+
+    const { error: insertEmailError } = await supabase.from("contact_emails").insert({
+      contact_id: contactId,
+      email: person.email.trim(),
+      is_primary: true,
+      is_cc: false,
+    });
+    if (
+      insertEmailError &&
+      !/duplicate|unique/i.test(insertEmailError.message ?? "")
+    ) {
+      return `contact_emails: ${insertEmailError.message}`;
+    }
+  }
+
+  return null;
 }
 
 async function fetchLexofficeContactsPage(
@@ -147,17 +281,31 @@ async function fetchLexofficeContactsPage(
     page: String(page),
     size: "250",
   });
-  const response = await fetch(`${LEXOFFICE_API_BASE_URL}/contacts?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json",
-    },
-  });
+  const url = `${LEXOFFICE_API_BASE_URL}/contacts?${params.toString()}`;
+  console.info(`[lexoffice] GET contacts page=${page}`);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[lexoffice] network error fetching contacts page=${page}:`, message);
+    throw new Error(`Lexoffice contacts fetch network error: ${message}`);
+  }
   if (!response.ok) {
     const body = await response.text().catch(() => "");
+    console.error(`[lexoffice] contacts page=${page} rejected:`, response.status, body.slice(0, 500));
     throw new Error(`Lexoffice contacts fetch failed (${response.status}): ${body}`);
   }
-  return response.json() as Promise<LexofficeContactListResponse>;
+  const data = (await response.json()) as LexofficeContactListResponse;
+  console.info(
+    `[lexoffice] contacts page=${page} ok — content=${data.content?.length ?? 0}, totalElements=${data.totalElements ?? "?"}, last=${data.last}`
+  );
+  return data;
 }
 
 /**
@@ -171,6 +319,7 @@ export async function syncLexofficeContactsToClients(): Promise<LexofficeSyncRes
     throw new Error("Supabase admin client is not configured. Set SUPABASE_SERVICE_ROLE_KEY.");
   }
 
+  console.info("[lexoffice] sync starting — pulling customer contacts");
   const contacts: LexofficeApiContact[] = [];
   let page = 0;
   let isLast = false;
@@ -184,6 +333,7 @@ export async function syncLexofficeContactsToClients(): Promise<LexofficeSyncRes
     if (page > 100) break;
   }
 
+  console.info(`[lexoffice] sync fetched ${contacts.length} Lexoffice contacts — upserting clients + CRM contacts`);
   const errors: string[] = [];
   let synced = 0;
 
@@ -215,25 +365,62 @@ export async function syncLexofficeContactsToClients(): Promise<LexofficeSyncRes
           .join(", ")
       : "";
 
-    const { error } = await supabase.from("clients").upsert(
-      {
-        company_name: companyName,
-        lexoffice_id: id,
-        email: email || null,
-        phone: phone || null,
-        billing_address: billingAddress || null,
-        contact_persons: contactPersons,
-      },
-      { onConflict: "lexoffice_id" }
-    );
+    const { data: upserted, error } = await supabase
+      .from("clients")
+      .upsert(
+        {
+          company_name: companyName,
+          lexoffice_id: id,
+          lexoffice_contact_id: id,
+          email: email || null,
+          phone: phone || null,
+          billing_address: billingAddress || null,
+          contact_persons: contactPersons,
+          street: billingAddr?.street?.trim() || null,
+          zip_code: billingAddr?.zip?.trim() || null,
+          city: billingAddr?.city?.trim() || null,
+          country: billingAddr?.countryCode?.trim() || null,
+        },
+        { onConflict: "lexoffice_id" }
+      )
+      .select("id")
+      .maybeSingle();
 
     if (error) {
       errors.push(`${companyName} (${id}): ${error.message}`);
+      continue;
+    }
+
+    const companyId = typeof upserted?.id === "string" ? upserted.id : "";
+    if (!companyId) {
+      // Upsert without RETURNING can happen on some PostgREST configs — resolve by lexoffice_id.
+      const { data: found, error: findError } = await supabase
+        .from("clients")
+        .select("id")
+        .eq("lexoffice_id", id)
+        .maybeSingle();
+      if (findError || !found?.id) {
+        errors.push(`${companyName} (${id}): client upserted but id not returned`);
+        continue;
+      }
+      const personError = await syncContactPersonsToCrmTables(supabase, found.id, contactPersons);
+      if (personError) {
+        errors.push(`${companyName} (${id}): ${personError}`);
+      } else {
+        synced += 1;
+      }
+      continue;
+    }
+
+    const personError = await syncContactPersonsToCrmTables(supabase, companyId, contactPersons);
+    if (personError) {
+      errors.push(`${companyName} (${id}): ${personError}`);
     } else {
       synced += 1;
     }
   }
 
+  console.info(`[lexoffice] sync finished — synced=${synced}, errors=${errors.length}`);
   return { synced, errors };
 }
 

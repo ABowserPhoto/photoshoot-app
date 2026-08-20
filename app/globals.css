@@ -65,6 +65,28 @@ body {
   }
 }
 
+/* Studio Planner Master To-Do List — unlayered so it beats the .bg-white dark-force above. */
+.planner-master-column {
+  background-color: #1f1f22 !important;
+  border-color: #18181b !important;
+  margin-right: 2rem;
+}
+
+.planner-master-card {
+  background-color: #2a2a2e !important;
+  padding: 0.5rem 0.625rem !important;
+}
+
+.planner-master-card-title {
+  font-size: 0.75rem !important;
+  line-height: 1.15rem !important;
+  font-weight: 600 !important;
+}
+
+.planner-master-progress {
+  height: 0.25rem !important;
+}
+
 /* Restrict styles to the Tiptap editor */
 .ProseMirror {
   outline: none;

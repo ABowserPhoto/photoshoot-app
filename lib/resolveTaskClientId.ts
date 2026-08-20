@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizeCompanyKey } from "@/lib/crmClientLtv";
+import { ensureCrmContactWithEmails } from "@/lib/server/ensureCrmContactWithEmails";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
 
 export type TaskClientLinkInput = {
@@ -84,13 +85,16 @@ async function findClientByCompanyName(
  * Finds an existing CRM client by company/client name (case-insensitive) or creates one.
  * Returns null when no company/client label is available on the task.
  */
-export async function resolveOrCreateClientIdForTask(input: TaskClientLinkInput): Promise<string | null> {
+export async function resolveOrCreateClientIdForTask(
+  input: TaskClientLinkInput,
+  supabaseClient?: SupabaseClient | null
+): Promise<string | null> {
   const companyName = resolveTaskCompanyName(input);
   if (!companyName) {
     return null;
   }
 
-  const supabase = createSupabaseAdminClient();
+  const supabase = supabaseClient ?? createSupabaseAdminClient();
   if (!supabase) {
     throw new Error("Supabase admin client is not configured. Set SUPABASE_SERVICE_ROLE_KEY.");
   }
@@ -116,7 +120,12 @@ export async function resolveOrCreateClientIdForTask(input: TaskClientLinkInput)
 export async function attachClientIdToTaskPayload(
   payload: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const clientId = await resolveOrCreateClientIdForTask({
+  const supabase = createSupabaseAdminClient();
+  if (!supabase) {
+    throw new Error("Supabase admin client is not configured. Set SUPABASE_SERVICE_ROLE_KEY.");
+  }
+
+  const linkInput: TaskClientLinkInput = {
     company_name: trimString(payload.company_name) || null,
     client: trimString(payload.client) || null,
     contact_first_name: trimString(payload.contact_first_name) || null,
@@ -127,11 +136,26 @@ export async function attachClientIdToTaskPayload(
     zip_code: trimString(payload.zip_code) || null,
     city: trimString(payload.city) || null,
     lexoffice_contact_id: trimString(payload.lexoffice_contact_id) || null,
-  });
+  };
 
+  const clientId = await resolveOrCreateClientIdForTask(linkInput, supabase);
   if (!clientId) {
     return payload;
   }
 
-  return { ...payload, client_id: clientId };
+  const contactId = await ensureCrmContactWithEmails(supabase, {
+    companyId: clientId,
+    contactId: trimString(payload.contact_id) || null,
+    firstName: linkInput.contact_first_name,
+    lastName: linkInput.contact_last_name,
+    phone: linkInput.phone,
+    email: linkInput.email,
+    emailCc: trimString(payload.email_cc) || null,
+  });
+
+  return {
+    ...payload,
+    client_id: clientId,
+    ...(contactId ? { contact_id: contactId } : {}),
+  };
 }

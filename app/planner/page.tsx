@@ -451,7 +451,9 @@ function mapRowToTask(row: StudioTaskRow): PlannerTask {
 export default function PlannerPage() {
   const { authenticated, isLoading: authLoading } = useAuthRole();
   const [board, setBoard] = useState<PlannerBoardState>(EMPTY_BOARD);
-  const [collapsedColumns, setCollapsedColumns] = useState<Partial<Record<PlannerColumnKey, boolean>>>({});
+  const [collapsedColumns, setCollapsedColumns] = useState<Partial<Record<PlannerColumnKey, boolean>>>({
+    completed: true,
+  });
   const [activeDropColumn, setActiveDropColumn] = useState<PlannerColumnKey | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [sourceColumn, setSourceColumn] = useState<PlannerStatusKey | null>(null);
@@ -2011,8 +2013,8 @@ export default function PlannerPage() {
           }))}
         />
 
-        <div className="grid min-w-0 gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-          <aside className="h-[70vh] rounded-xl border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-8">
+          <aside className="planner-master-column h-[70vh] rounded-xl border border-zinc-900 p-3 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Master To-Do List</h2>
               <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
@@ -2022,11 +2024,11 @@ export default function PlannerPage() {
             <button
               type="button"
               onClick={openCreateTaskModal}
-              className="mb-3 inline-flex h-9 w-full items-center justify-center rounded-md border border-zinc-300 bg-white px-3 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="mb-3 inline-flex h-9 w-full items-center justify-center rounded-md border border-zinc-300 bg-white px-3 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/80 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               Add Master Task
             </button>
-            <div className="h-[calc(70vh-92px)] space-y-2 overflow-y-auto pr-1 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-600">
+            <div className="h-[calc(70vh-92px)] space-y-1.5 overflow-y-auto pr-1 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-600">
               {masterTasksSorted.map((task) => {
                 const completedCount = task.subtasks.filter((subtask) => subtask.isCompleted).length;
                 const totalCount = task.subtasks.length;
@@ -2059,9 +2061,9 @@ export default function PlannerPage() {
                       setIsCreateModalOpen(false);
                       setActiveTaskId(task.id);
                     }}
-                    className="group cursor-pointer rounded-lg border border-zinc-300 bg-white p-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-900"
+                    className="planner-master-card group cursor-pointer rounded-lg border border-zinc-700/80 shadow-sm"
                   >
-                    <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start justify-between gap-1.5">
                       <div className="flex min-w-0 flex-1 items-start gap-1">
                         <button
                           type="button"
@@ -2069,7 +2071,7 @@ export default function PlannerPage() {
                             event.stopPropagation();
                             toggleMasterListSubtasksPanel(task.id, task);
                           }}
-                          className="mt-0.5 shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                          className="mt-0.5 shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
                           aria-expanded={panelExpanded}
                           aria-label={panelExpanded ? "Collapse subtasks" : "Expand subtasks"}
                         >
@@ -2077,7 +2079,7 @@ export default function PlannerPage() {
                             {panelExpanded ? "▼" : "▶"}
                           </span>
                         </button>
-                        <h3 className="min-w-0 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                        <h3 className="planner-master-card-title min-w-0 text-zinc-100">
                           {task.title}
                         </h3>
                       </div>
@@ -2088,41 +2090,47 @@ export default function PlannerPage() {
                             event.stopPropagation();
                             handleDeletePost(task.id);
                           }}
-                          className="rounded-md p-1 text-zinc-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-300"
+                          className="rounded-md p-0.5 text-zinc-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-300"
                           aria-label="Delete post"
                           title="Delete post"
                         >
-                          <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                          <Trash2 className="h-3 w-3" strokeWidth={2} />
                         </button>
                         <TaskAssigneeAvatars assignees={task.assignedUsers} />
                         {task.label ? (
-                          <span className="text-xs font-medium text-zinc-400 dark:text-zinc-500">{task.label}</span>
+                          <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
+                            {task.label}
+                          </span>
                         ) : null}
                         {statusLabel ? (
-                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                          <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                             {statusLabel}
                           </span>
                         ) : null}
                         {isDueSoonCard ? (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:bg-orange-900/40 dark:text-orange-200">
+                          <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700 dark:bg-orange-900/40 dark:text-orange-200">
                             <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
                             Due Soon
                           </span>
                         ) : null}
                       </div>
                     </div>
-                    <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{task.description}</p>
+                    {task.description.trim() ? (
+                      <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
+                        {task.description}
+                      </p>
+                    ) : null}
                     {task.dueDate ? (
-                      <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                      <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
                         Due: {new Date(task.dueDate).toLocaleString()}
                       </p>
                     ) : null}
                     {totalCount > 0 ? (
-                      <div className="mt-2">
-                        <p className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                      <div className="mt-1">
+                        <p className="text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
                           {completedCount}/{totalCount} Sub-tasks
                         </p>
-                        <div className="mt-1 h-1.5 w-full rounded-full bg-zinc-200 dark:bg-zinc-700">
+                        <div className="planner-master-progress mt-0.5 w-full rounded-full bg-zinc-700">
                           <div
                             className="h-full rounded-full bg-zinc-900 transition-all dark:bg-zinc-100"
                             style={{ width: `${progress}%` }}
@@ -2132,7 +2140,7 @@ export default function PlannerPage() {
                     ) : null}
                     {panelExpanded ? (
                       <div
-                        className="mt-2 space-y-1.5"
+                        className="mt-1.5 space-y-1"
                         onClick={(event) => event.stopPropagation()}
                         onKeyDown={(event) => event.stopPropagation()}
                       >
@@ -2148,7 +2156,7 @@ export default function PlannerPage() {
                           return (
                             <div
                               key={subtask.id}
-                              className="flex items-start gap-2 rounded-md border border-zinc-200 bg-zinc-50/80 px-2 py-1.5 dark:border-zinc-700 dark:bg-zinc-800/50"
+                              className="flex items-start gap-1.5 rounded-md border border-zinc-200 bg-zinc-50/80 px-1.5 py-1 dark:border-zinc-700 dark:bg-zinc-900/50"
                             >
                               <input
                                 type="checkbox"
@@ -2157,7 +2165,7 @@ export default function PlannerPage() {
                                 onChange={(event) =>
                                   onMasterListSubtaskToggle(task, subtask, event.target.checked)
                                 }
-                                className={`mt-0.5 h-4 w-4 shrink-0 rounded border-zinc-400 ${checkboxLockedClass}`}
+                                className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded border-zinc-400 ${checkboxLockedClass}`}
                               />
                               <input
                                 value={subtask.title}
