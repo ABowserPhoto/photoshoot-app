@@ -56,6 +56,18 @@ function formatSelectionLockedLabel(submittedAt: string): string | null {
   return `Auswahl gesperrt am ${datePart} um ${timePart} Uhr`;
 }
 
+function WatermarkOverlay() {
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src="/watermark.png"
+      alt=""
+      aria-hidden
+      className="pointer-events-none absolute inset-0 z-[1] h-full w-full object-cover opacity-40"
+    />
+  );
+}
+
 export default function GalleryPage() {
   const searchParams = useSearchParams();
   const routeParams = useParams<{ shootId: string }>();
@@ -92,12 +104,10 @@ export default function GalleryPage() {
     const type = photoshootType.trim().toLowerCase();
     return type === "immobilien" || type === "food" || type === "real estate";
   }, [photoshootType]);
-  // object-contain (not cover) so we never crop/stretch RAW orientation into the wrong frame.
-  const thumbImageClass =
-    "h-full w-full bg-zinc-950 object-contain transition duration-200 group-hover:opacity-95";
-  const thumbFrameClass = isLandscape
-    ? "relative aspect-[3/2] w-full overflow-hidden bg-zinc-950"
-    : "relative aspect-[2/3] w-full overflow-hidden bg-zinc-950";
+  // object-contain (not cover) so portrait/RAW orientation stays upright without cropping.
+  const thumbImageClass = isLandscape
+    ? "h-32 w-full bg-black object-contain transition duration-200 group-hover:opacity-95"
+    : "aspect-[3/4] h-auto w-full bg-black object-contain transition duration-200 group-hover:opacity-95";
   const selectedIndices = useMemo(
     () => Array.from(selectedChunks).sort((a, b) => a - b),
     [selectedChunks]
@@ -501,8 +511,8 @@ export default function GalleryPage() {
             </div>
           ) : (
             <p className="mt-1 text-sm text-zinc-400">
-              Klicken Sie auf ein Bild, um die Szene zu markieren. Über das Vergrößern-Symbol öffnen
-              Sie die Vollansicht.
+              Klicken Sie auf ein Bild für die Vollansicht. Markieren Sie Szenen über das
+              Häkchen in der Ecke.
             </p>
           )}
         </header>
@@ -578,46 +588,45 @@ export default function GalleryPage() {
                     selected ? "border-green-500/80 ring-1 ring-green-500/40" : "border-zinc-800"
                   }`}
                 >
-                  <button
-                    type="button"
-                    disabled={isSuccess || isLockedByServer}
-                    onClick={() => toggleChunk(item.chunkIndex)}
-                    className="relative block w-full text-left disabled:cursor-not-allowed"
-                    aria-pressed={selected}
-                    aria-label={`Szene ${item.chunkIndex + 1} ${selected ? "abwählen" : "auswählen"}`}
-                  >
-                    <div className={thumbFrameClass}>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => openLightbox(item.chunkIndex)}
+                      className="relative block w-full text-left"
+                      aria-label={`Szene ${item.chunkIndex + 1} in Vollansicht öffnen`}
+                    >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
                         src={item.previewUrl}
                         alt={`Scene ${item.chunkIndex + 1}`}
-                        className={`absolute inset-0 ${thumbImageClass}`}
+                        className={thumbImageClass}
                         loading="lazy"
                       />
-                    </div>
-                    {selected ? (
-                      <span className="absolute left-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-green-500 text-xs font-bold text-white shadow">
-                        ✓
-                      </span>
-                    ) : null}
-                  </button>
+                      <WatermarkOverlay />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSuccess || isLockedByServer}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleChunk(item.chunkIndex);
+                      }}
+                      aria-pressed={selected}
+                      aria-label={`Szene ${item.chunkIndex + 1} ${selected ? "abwählen" : "auswählen"}`}
+                      className={`absolute left-2 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold shadow disabled:cursor-not-allowed disabled:opacity-70 ${
+                        selected
+                          ? "bg-green-500 text-white"
+                          : "border border-white/80 bg-zinc-950/55 text-white/0 hover:bg-zinc-900/80"
+                      }`}
+                    >
+                      {selected ? "✓" : ""}
+                    </button>
+                  </div>
                   <div className="border-t border-zinc-800 px-2 py-2">
                     <div className="truncate text-[11px] text-zinc-400">{displayFilename(item.firstFilename)}</div>
                     <div className="mt-1 flex items-center justify-between gap-2">
                       <StarsRow chunkIndex={item.chunkIndex} disabled={isSuccess || isLockedByServer} />
                       <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            openLightbox(item.chunkIndex);
-                          }}
-                          title="Vollansicht"
-                          aria-label={`Szene ${item.chunkIndex + 1} vergrößern`}
-                          className="inline-flex h-5 min-w-5 items-center justify-center rounded-sm border border-zinc-500 bg-zinc-900 px-1 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800"
-                        >
-                          ⤢
-                        </button>
                         <button
                           type="button"
                           disabled={isSuccess || isLockedByServer || isRotatingThisItem}
@@ -724,12 +733,15 @@ export default function GalleryPage() {
             className="mx-auto flex h-full w-full max-w-7xl flex-col items-center justify-center px-4 pb-8 pt-16"
             onClick={(event) => event.stopPropagation()}
           >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={activeModalItem.previewUrl}
-              alt={activeModalItem.firstFilename}
-              className="max-h-[78vh] w-auto max-w-full object-contain"
-            />
+            <div className="relative inline-flex max-h-[78vh] max-w-full">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={activeModalItem.previewUrl}
+                alt={activeModalItem.firstFilename}
+                className="max-h-[78vh] w-auto max-w-full object-contain"
+              />
+              <WatermarkOverlay />
+            </div>
             <div className="mt-3 w-full max-w-3xl rounded-lg border border-zinc-700 bg-zinc-900/80 px-4 py-3">
               <div className="truncate text-sm text-zinc-300">{displayFilename(activeModalItem.firstFilename)}</div>
               <div className="mt-2 flex items-center justify-between gap-3">
