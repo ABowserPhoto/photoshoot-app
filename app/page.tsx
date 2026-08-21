@@ -8,6 +8,7 @@ import CreatableSelect from "react-select/creatable";
 import KanbanBoard, { type BoardTask } from "./components/KanbanBoard";
 import StatsSidebar from "./components/StatsSidebar";
 import CreditNoteUploadModal from "@/app/components/CreditNoteUploadModal";
+import UploadDeliverablesModal from "@/app/components/UploadDeliverablesModal";
 import GlobalNavButtons from "@/app/components/GlobalNavButtons";
 import GlobalLogoutControl from "@/app/components/GlobalLogoutControl";
 import JibbleClockToggle from "@/app/components/JibbleClockToggle";
@@ -15,7 +16,6 @@ import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { PERMISSION_DENIED_QUERY } from "@/lib/permissionDenied";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
-import { DELIVERABLE_FILE_INPUT_ACCEPT, isEditedUploadFile } from "@/lib/deliverableFiles";
 import { buildFinalizeShootPayload } from "@/lib/finalizeShootPayload";
 
 type AmountType = "Net" | "Gross";
@@ -299,9 +299,6 @@ function HomeContent() {
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploadTask, setUploadTask] = useState<BoardTask | null>(null);
-  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
   const [allBoardTasks, setAllBoardTasks] = useState<BoardTask[]>([]);
   const [linkedItemId, setLinkedItemId] = useState<string | null>(null);
   const [localOpenPath, setLocalOpenPath] = useState("");
@@ -888,25 +885,30 @@ function HomeContent() {
     resetForm();
   };
 
-  const closeUploadModal = () => {
+  const closeUploadModal = (opts?: { cancelled?: boolean }) => {
     setShowUploadModal(false);
     setUploadTask(null);
-    setUploadFiles([]);
-    setUploadError(null);
-    setIsUploading(false);
+    if (opts?.cancelled) {
+      // Revert optimistic Edited placement by reloading board state.
+      setRefreshSignal((prev) => prev + 1);
+    }
+  };
+
+  const handleEditedIntercept = (task: BoardTask, _from: string) => {
+    setUploadTask({
+      ...task,
+      services: Array.isArray(task.services) ? task.services : [],
+      products: Array.isArray(task.products) ? task.products : [],
+    });
+    setShowUploadModal(true);
   };
 
   const handleTaskMoved = (task: BoardTask, _from: string, to: string) => {
+    // Edited drops are handled by onEditedIntercept (modal gate).
     if (to === "edited") {
-      setUploadTask({
-        ...task,
-        services: Array.isArray(task.services) ? task.services : [],
-        products: Array.isArray(task.products) ? task.products : [],
-      });
-      setUploadFiles([]);
-      setUploadError(null);
-      setShowUploadModal(true);
+      return;
     }
+    void task;
   };
 
   const openEditModal = (task: BoardTask) => {
@@ -1430,31 +1432,24 @@ function HomeContent() {
     }
   }, []);
 
-  const handleUploadSubmit = async () => {
-    if (!uploadTask) return;
-    if (uploadFiles.length === 0) {
-      setUploadError("Please select at least one file.");
-      return;
+  const runDriveUploadAndFinalize = async (files: File[]) => {
+    if (!uploadTask) {
+      throw new Error("Missing upload task.");
     }
-
-    // Validate fields required by finalize-shoot before starting.
+    if (files.length === 0) {
+      throw new Error("Please select at least one file.");
+    }
     if (!uploadTask.email.trim()) {
-      setUploadError("Cannot finalize: client email is missing on this task.");
-      return;
+      throw new Error("Cannot finalize: client email is missing on this task.");
     }
     if (!uploadTask.localFolderName.trim()) {
-      setUploadError(
+      throw new Error(
         "Cannot finalize: no local folder is set for this task. Ensure the PC worker has created shoot folders."
       );
-      return;
     }
 
-    setIsUploading(true);
-    setUploadError(null);
-
-    // ── Step 1: Save files to the shared drive + local 4_Final folder ──────────
     const formData = new FormData();
-    for (const file of uploadFiles) {
+    for (const file of files) {
       formData.append("files", file);
     }
 
@@ -1481,65 +1476,96 @@ function HomeContent() {
       skip_invoice: uploadTask.skipInvoice ?? false,
     };
 
-    console.log("UPLOAD PAYLOAD:", uploadPayload);
     formData.append("taskData", JSON.stringify(uploadPayload));
 
-    try {
-      // Do NOT set Content-Type manually. The browser must add
-      // multipart/form-data with the correct boundary=... for FormData.
-      const uploadResponse = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
+    const uploadResponse = await fetch("/api/upload", {
+      method: "POST",
+      body: formData,
+    });
 
-      if (!uploadResponse.ok) {
-        let message = "Upload failed.";
-        try {
-          const errorPayload = (await uploadResponse.json()) as { error?: string };
-          if (errorPayload.error) message = errorPayload.error;
-        } catch {}
-        setUploadError(message);
-        return;
+    if (!uploadResponse.ok) {
+      let message = "Upload failed.";
+      try {
+        const errorPayload = (await uploadResponse.json()) as { error?: string };
+        if (errorPayload.error) message = errorPayload.error;
+      } catch {
+        /* ignore */
       }
+      throw new Error(message);
+    }
 
-      // ── Step 2: Run the full finalize-shoot workflow ──────────────────────────
-      // This creates the Drive folder, uploads photos from 4_Final, optionally
-      // creates a Lexoffice invoice, creates the Gmail draft, and updates the
-      // task status — exactly the same side-effects as the manual Kanban drag.
-      const finalizePayload = buildFinalizeShootPayload(uploadTask);
+    // Existing Google Drive + email finalize path (unchanged).
+    const finalizePayload = buildFinalizeShootPayload(uploadTask);
+    const finalizeResponse = await fetch("/api/workflows/finalize-shoot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(finalizePayload),
+    });
 
-      const finalizeResponse = await fetch("/api/workflows/finalize-shoot", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(finalizePayload),
-      });
+    const finalizeJson = (await finalizeResponse.json().catch(() => null)) as {
+      success?: boolean;
+      error?: unknown;
+      step?: string;
+      skippedInvoice?: boolean;
+      status?: string;
+    } | null;
 
-      const finalizeJson = (await finalizeResponse.json().catch(() => null)) as {
-        success?: boolean;
-        error?: unknown;
-        step?: string;
-        skippedInvoice?: boolean;
-        status?: string;
-      } | null;
+    if (!finalizeResponse.ok || !finalizeJson?.success) {
+      const detail =
+        finalizeJson?.error instanceof Error
+          ? finalizeJson.error.message
+          : typeof finalizeJson?.error === "string"
+            ? finalizeJson.error
+            : `Finalize shoot failed (${finalizeResponse.status}).`;
+      const step = typeof finalizeJson?.step === "string" ? finalizeJson.step : "";
+      // Still mark status so the card progresses even if an optional step failed.
+      void updateTaskStatus(uploadTask.id, "Send Email");
+      throw new Error(step ? `${detail} (step: ${step})` : detail);
+    }
 
-      if (!finalizeResponse.ok || !finalizeJson?.success) {
-        const detail =
-          finalizeJson?.error instanceof Error
-            ? finalizeJson.error.message
-            : typeof finalizeJson?.error === "string"
-              ? finalizeJson.error
-              : `Finalize shoot failed (${finalizeResponse.status}).`;
-        const step = typeof finalizeJson?.step === "string" ? finalizeJson.step : "";
-        setUploadError(step ? `${detail} (step: ${step})` : detail);
-        // Still mark status manually so the card moves even if an optional step failed.
-        void updateTaskStatus(uploadTask.id, "Send Email");
-        return;
-      }
+    // Ensure Kanban reflects Edited staging completed into the finalize workflow status.
+    const workflowStatus =
+      typeof finalizeJson.status === "string" && finalizeJson.status.trim()
+        ? finalizeJson.status.trim()
+        : finalizeJson.skippedInvoice
+          ? "Send Email"
+          : "Invoice Sent";
+    void workflowStatus;
+  };
 
-      setRefreshSignal((prev) => prev + 1);
-      closeUploadModal();
-    } finally {
-      setIsUploading(false);
+  const runSocialGridSchedule = async (socialFiles: File[]) => {
+    if (!uploadTask) {
+      throw new Error("Missing upload task.");
+    }
+    if (socialFiles.length === 0) {
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("taskId", uploadTask.id);
+    formData.append("photoshootType", uploadTask.photoshootType);
+    formData.append(
+      "clientName",
+      uploadTask.companyName.trim() ||
+        [uploadTask.contactFirstName, uploadTask.contactLastName].filter(Boolean).join(" ").trim()
+    );
+    formData.append("shootLocation", uploadTask.shootLocation);
+    for (const file of socialFiles) {
+      formData.append("files", file);
+    }
+
+    const response = await fetch("/api/social/queue-from-deliverables", {
+      method: "POST",
+      body: formData,
+    });
+    const payload = (await response.json().catch(() => null)) as {
+      success?: boolean;
+      error?: string;
+      message?: string;
+    } | null;
+
+    if (!response.ok || payload?.success === false) {
+      throw new Error(payload?.error ?? `Social scheduling failed (${response.status}).`);
     }
   };
 
@@ -1598,6 +1624,7 @@ function HomeContent() {
                 refreshSignal={refreshSignal}
                 onTaskClick={openEditModal}
                 onTaskMoved={handleTaskMoved}
+                onEditedIntercept={handleEditedIntercept}
                 showArchived={showArchiveView}
                 onBoardChange={setAllBoardTasks}
               />
@@ -1612,6 +1639,7 @@ function HomeContent() {
               refreshSignal={refreshSignal}
               onTaskClick={openEditModal}
               onTaskMoved={handleTaskMoved}
+              onEditedIntercept={handleEditedIntercept}
               showArchived={showArchiveView}
               onBoardChange={setAllBoardTasks}
             />
@@ -2439,95 +2467,32 @@ function HomeContent() {
         </div>
       ) : null}
 
-      {showUploadModal ? (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl dark:bg-zinc-900 sm:p-8">
-            <div className="mb-5 flex items-start justify-between gap-4">
-              <div>
-                <h3 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Upload Photos</h3>
-                <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                  Add edited files for {uploadTask ? getTaskTitle(uploadTask) : "this task"}.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={closeUploadModal}
-                className="rounded-md px-2 py-1 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-              >
-                X
-              </button>
-            </div>
-
-            <div
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault();
-                const dropped = Array.from(event.dataTransfer.files).filter(isEditedUploadFile);
-                if (dropped.length > 0) {
-                  setUploadFiles((prev) => [...prev, ...dropped]);
-                  setUploadError(null);
-                } else {
-                  setUploadError("Only JPG/JPEG images, videos, and PDF files are supported.");
-                }
-              }}
-              className="rounded-xl border-2 border-dashed border-zinc-300 bg-zinc-50 p-8 text-center dark:border-zinc-700 dark:bg-zinc-800/60"
-            >
-              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-200">
-                Drag & drop JPG, video, or PDF files here
-              </p>
-              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">or choose files manually</p>
-              <input
-                type="file"
-                multiple
-                accept={DELIVERABLE_FILE_INPUT_ACCEPT}
-                onChange={(event) => {
-                  const selected = Array.from(event.target.files ?? []).filter(isEditedUploadFile);
-                  if (selected.length > 0) {
-                    setUploadFiles((prev) => [...prev, ...selected]);
-                    setUploadError(null);
-                  } else if ((event.target.files?.length ?? 0) > 0) {
-                    setUploadError("Only JPG/JPEG images, videos, and PDF files are supported.");
-                  }
-                  event.target.value = "";
-                }}
-                className="mt-4 block w-full text-sm text-zinc-700 file:mr-4 file:rounded-md file:border-0 file:bg-zinc-900 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-zinc-700 dark:text-zinc-200 dark:file:bg-zinc-100 dark:file:text-zinc-900"
-              />
-            </div>
-
-            <div className="mt-4 max-h-36 overflow-y-auto rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
-              {uploadFiles.length === 0 ? (
-                <p className="text-sm text-zinc-500 dark:text-zinc-400">No files selected yet.</p>
-              ) : (
-                <ul className="space-y-1 text-sm text-zinc-700 dark:text-zinc-200">
-                  {uploadFiles.map((file, index) => (
-                    <li key={`${file.name}-${index}`}>{file.name}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            {uploadError ? <p className="mt-3 text-sm text-red-600 dark:text-red-400">{uploadError}</p> : null}
-
-            <div className="mt-6 flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={closeUploadModal}
-                className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-300 px-4 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleUploadSubmit()}
-                disabled={isUploading}
-                className="inline-flex h-10 items-center justify-center rounded-lg bg-zinc-900 px-4 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-              >
-                {isUploading ? "Uploading..." : "Complete & Send"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <UploadDeliverablesModal
+        open={showUploadModal}
+        task={
+          uploadTask
+            ? {
+                id: uploadTask.id,
+                taskTitle: getTaskTitle(uploadTask),
+                photoshootType: uploadTask.photoshootType,
+                companyName: uploadTask.companyName,
+                contactFirstName: uploadTask.contactFirstName,
+                contactLastName: uploadTask.contactLastName,
+                shootLocation: uploadTask.shootLocation,
+                email: uploadTask.email,
+                localFolderName: uploadTask.localFolderName,
+              }
+            : null
+        }
+        category={uploadTask?.photoshootType}
+        onClose={() => closeUploadModal({ cancelled: true })}
+        onUploadToDrive={runDriveUploadAndFinalize}
+        onScheduleSocials={runSocialGridSchedule}
+        onComplete={() => {
+          setRefreshSignal((prev) => prev + 1);
+          closeUploadModal();
+        }}
+      />
 
       {editingTaskId ? (
         <CreditNoteUploadModal

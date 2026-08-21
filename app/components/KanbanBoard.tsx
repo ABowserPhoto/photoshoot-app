@@ -530,6 +530,12 @@ type KanbanBoardProps = {
   refreshSignal?: number;
   onTaskClick?: (task: BoardTask) => void;
   onTaskMoved?: (task: BoardTask, from: ColumnKey, to: ColumnKey) => void;
+  /**
+   * When set, dropping into "Edited" does not persist status or trigger Drive/email.
+   * The board moves the card visually; the parent opens UploadDeliverablesModal and
+   * must call onCancelEditedIntercept / refresh after success.
+   */
+  onEditedIntercept?: (task: BoardTask, from: ColumnKey) => void;
   showArchived?: boolean;
   /** Called whenever the flat board task list changes (e.g. after load or status update). */
   onBoardChange?: (tasks: BoardTask[]) => void;
@@ -721,6 +727,7 @@ export default function KanbanBoard({
   refreshSignal = 0,
   onTaskClick,
   onTaskMoved,
+  onEditedIntercept,
   showArchived = false,
   onBoardChange,
 }: KanbanBoardProps) {
@@ -1286,6 +1293,64 @@ export default function KanbanBoard({
       setMergePrompt({ task: dragged.task, from: sourceColumn });
       setMergePromptError(null);
       clearDragState();
+      return;
+    }
+
+    // Edited column: open deliverables modal instead of persisting status / Drive workflows.
+    if (targetColumn === "edited" && onEditedIntercept) {
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const leavingEditing = sourceColumn === "editing";
+
+      let nextEditingStartedAt = dragged.task.editingStartedAt;
+      let nextTotalEditingSeconds = dragged.task.totalEditingSeconds;
+
+      if (leavingEditing) {
+        const startedAtTs = dragged.task.editingStartedAt
+          ? new Date(dragged.task.editingStartedAt).getTime()
+          : Number.NaN;
+        if (!Number.isNaN(startedAtTs)) {
+          nextTotalEditingSeconds += Math.max(0, Math.floor((now.getTime() - startedAtTs) / 1000));
+        }
+        nextEditingStartedAt = null;
+      }
+
+      const pendingTask: BoardTask = {
+        ...dragged.task,
+        status: "edited",
+        editingStartedAt: nextEditingStartedAt,
+        totalEditingSeconds: nextTotalEditingSeconds,
+      };
+
+      const previousBoard = board;
+      const nextBoard: BoardState = {
+        ...board,
+        [sourceColumn]: board[sourceColumn].filter((task) => task.id !== draggingTaskId),
+        edited: sortTasksByShootDateAsc(
+          dedupeTasksById([...board.edited.filter((task) => task.id !== pendingTask.id), pendingTask])
+        ),
+      };
+      setBoard(sanitizeBoardState(nextBoard));
+      clearDragState();
+
+      // Persist editing timer only — do not write status "Edited" until modal completes.
+      if (leavingEditing && supabase) {
+        void updateTaskStatus(dragged.task.id, COLUMN_LABEL_BY_KEY[sourceColumn], {
+          editing_started_at: nextEditingStartedAt,
+          total_editing_seconds: nextTotalEditingSeconds,
+        }).then((res) => {
+          if (!res.ok) {
+            console.warn("[KanbanBoard] timer save on Edited intercept:", res.error);
+          }
+        });
+      }
+
+      try {
+        onEditedIntercept(pendingTask, sourceColumn);
+      } catch (error) {
+        setBoard(previousBoard);
+        console.warn("[KanbanBoard] onEditedIntercept threw:", error);
+      }
       return;
     }
 
