@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { runGmailInvoiceScanner } from "@/lib/server/gmailInvoiceScanner";
+import {
+  DEFAULT_INVOICE_SCAN_TIMEFRAME,
+  normalizeInvoiceScanTimeframe,
+  runGmailInvoiceScanner,
+} from "@/lib/server/gmailInvoiceScanner";
 import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 
 export const runtime = "nodejs";
@@ -47,8 +51,8 @@ async function authorizeAdminOrCron(
 /**
  * POST /api/finance/invoice-scanner
  *
- * Scans Gmail (last 7 days) for invoice/receipt messages and uploads documents
- * to Lexoffice Inbox (POST /v1/files, type=voucher).
+ * Scans Gmail for invoice/receipt messages within a configurable timeframe (default 7d)
+ * and uploads documents to Lexoffice Inbox (POST /v1/files, type=voucher).
  *
  * Auth: CRM admin session OR CRON_SECRET (Bearer / ?secret=).
  */
@@ -69,10 +73,13 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const result = await runGmailInvoiceScanner();
+    const body = (await request.json().catch(() => null)) as { timeframe?: string } | null;
+    const timeframe = normalizeInvoiceScanTimeframe(body?.timeframe ?? DEFAULT_INVOICE_SCAN_TIMEFRAME);
+    const result = await runGmailInvoiceScanner(timeframe);
     return NextResponse.json({
       ok: true,
       via: auth.via,
+      timeframe,
       ...result,
     });
   } catch (error) {

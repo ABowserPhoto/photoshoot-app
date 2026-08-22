@@ -71,6 +71,7 @@ export default function AdminCrmPage() {
     label: string;
   } | null>(null);
   const [invoiceScanBusy, setInvoiceScanBusy] = useState(false);
+  const [invoiceScanTimeframe, setInvoiceScanTimeframe] = useState("7d");
 
   const filteredItems = useMemo(
     () => items.filter((item) => matchesUnpaidBillingSearch(item, billingSearch)),
@@ -165,7 +166,9 @@ export default function AdminCrmPage() {
     try {
       const response = await fetch("/api/finance/invoice-scanner", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         credentials: "include",
+        body: JSON.stringify({ timeframe: invoiceScanTimeframe }),
       });
       const json = (await response.json().catch(() => null)) as
         | {
@@ -266,13 +269,25 @@ export default function AdminCrmPage() {
                   Open Lexoffice invoices plus local credit-note self-billing, sorted oldest first.
                 </p>
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={invoiceScanTimeframe}
+                  onChange={(event) => setInvoiceScanTimeframe(event.target.value)}
+                  disabled={invoiceScanBusy || loading}
+                  className="h-10 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none ring-zinc-500 focus:ring-2 disabled:opacity-50"
+                  aria-label="Gmail invoice scan timeframe"
+                >
+                  <option value="7d">7 Days</option>
+                  <option value="1m">1 Month</option>
+                  <option value="3m">3 Months</option>
+                  <option value="6m">6 Months</option>
+                </select>
                 <button
                   type="button"
                   onClick={() => void handleRunInvoiceScanner()}
                   disabled={invoiceScanBusy || loading}
                   className="inline-flex h-10 items-center rounded-lg border border-emerald-600/50 bg-emerald-950/40 px-4 text-sm font-semibold text-emerald-100 hover:bg-emerald-900/50 disabled:opacity-50"
-                  title="Scan Gmail for invoices/receipts from the last 7 days and upload to Lexoffice"
+                  title="Scan Gmail for invoices/receipts and upload to Lexoffice"
                 >
                   {invoiceScanBusy ? "Scanning Gmail…" : "Scan Gmail → Lexoffice"}
                 </button>

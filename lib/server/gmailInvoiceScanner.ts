@@ -16,18 +16,19 @@ import {
 
 const GMAIL_USER = "me";
 const MAX_MESSAGES = 40;
-const INVOICE_KEYWORDS =
-  /invoice|rechnung|receipt|quittung|beleg|zahlungsbeleg|payment confirmation/i;
-const INVOICE_URL_PATTERN =
-  /https?:\/\/[^\s"'<>]+(?:invoice|rechnung|receipt|quittung|beleg|bill|payment|zahlung)[^\s"'<>]*/gi;
 
-const ATTACHMENT_MIME_TYPES = new Set([
-  "application/pdf",
-  "image/jpeg",
-  "image/jpg",
-  "image/png",
-  "image/webp",
-]);
+export const DEFAULT_INVOICE_SCAN_TIMEFRAME = "7d";
+const ALLOWED_INVOICE_SCAN_TIMEFRAMES = new Set(["7d", "1m", "3m", "6m"]);
+
+const INVOICE_STRUCTURAL_PHRASES =
+  /Rechnungsnummer|Invoice Number|Bestellnummer|Order Number|Rechnungsbetrag|Total Due|Receipt Number|Transaktionsnummer/i;
+
+const SUBJECT_INVOICE_PATTERN = /\b(invoice|rechnung|receipt|quittung)\b/i;
+
+const INVOICE_LINK_CONTEXT =
+  /download invoice|rechnung herunterladen|view receipt|beleg ansehen/i;
+
+const IMAGE_ATTACHMENT_PATTERN = /\.(jpe?g|png|gif|webp)$/i;
 
 export type InvoiceScannerUploadResult = {
   messageId: string;
@@ -75,18 +76,56 @@ function sanitizeFileName(name: string, fallback: string): string {
   return cleaned || fallback;
 }
 
-function extensionForMime(mimeType: string): string {
-  switch (mimeType.toLowerCase()) {
-    case "image/jpeg":
-    case "image/jpg":
-      return ".jpg";
-    case "image/png":
-      return ".png";
-    case "image/webp":
-      return ".webp";
-    default:
-      return ".pdf";
+function isPdfAttachment(mimeType: string, fileName: string): boolean {
+  const lowerName = fileName.toLowerCase();
+  const mime = mimeType.toLowerCase();
+  if (IMAGE_ATTACHMENT_PATTERN.test(lowerName) || mime.startsWith("image/")) {
+    return false;
   }
+  return mime === "application/pdf" || lowerName.endsWith(".pdf");
+}
+
+function stripHtmlTags(html: string): string {
+  return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function bodyHasStructuralInvoicePhrases(htmlBody: string, textBody: string): boolean {
+  const plainFromHtml = stripHtmlTags(htmlBody);
+  const combined = [plainFromHtml, textBody].filter(Boolean).join("\n");
+  return INVOICE_STRUCTURAL_PHRASES.test(combined);
+}
+
+function extractExplicitInvoiceLinks(htmlBody: string, textBody: string): string[] {
+  const urls = new Set<string>();
+
+  const anchorPattern = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of htmlBody.matchAll(anchorPattern)) {
+    const href = match[1]?.trim();
+    const linkText = stripHtmlTags(match[2] ?? "");
+    if (!href?.startsWith("http")) {
+      continue;
+    }
+    if (INVOICE_LINK_CONTEXT.test(linkText)) {
+      urls.add(href);
+    }
+  }
+
+  const combined = `${htmlBody}\n${textBody}`;
+  for (const match of combined.matchAll(/https?:\/\/[^\s"'<>]+/gi)) {
+    const url = match[0]?.trim();
+    if (!url) {
+      continue;
+    }
+    const index = match.index ?? 0;
+    const contextStart = Math.max(0, index - 140);
+    const contextEnd = Math.min(combined.length, index + url.length + 140);
+    const context = stripHtmlTags(combined.slice(contextStart, contextEnd));
+    if (INVOICE_LINK_CONTEXT.test(context)) {
+      urls.add(url);
+    }
+  }
+
+  return Array.from(urls).slice(0, 3);
 }
 
 function walkParts(part: GmailPart | undefined, visit: (part: GmailPart) => void) {
@@ -150,7 +189,7 @@ async function extractDocumentsFromMessage(
     const mimeType = (part.mimeType ?? "").toLowerCase();
     const fileName = typeof part.filename === "string" ? part.filename.trim() : "";
     const attachmentId = part.body?.attachmentId;
-    if (!fileName || !attachmentId || !ATTACHMENT_MIME_TYPES.has(mimeType)) {
+    if (!fileName || !attachmentId || !isPdfAttachment(mimeType, fileName)) {
       return;
     }
 
@@ -159,9 +198,9 @@ async function extractDocumentsFromMessage(
         const buffer = await downloadAttachment(gmail, messageId, attachmentId);
         documents.push({
           source: "attachment",
-          fileName: sanitizeFileName(fileName, `attachment${extensionForMime(mimeType)}`),
+          fileName: sanitizeFileName(fileName, "attachment.pdf"),
           buffer,
-          contentType: mimeType === "image/jpg" ? "image/jpeg" : mimeType,
+          contentType: "application/pdf",
         });
       })()
     );
@@ -171,13 +210,7 @@ async function extractDocumentsFromMessage(
   if (documents.length === 0) {
     const html = htmlBody.trim();
     const plain = textBody.trim();
-    const combined = html || plain;
-    const looksLikeInvoice =
-      INVOICE_KEYWORDS.test(subject) ||
-      INVOICE_KEYWORDS.test(combined) ||
-      INVOICE_KEYWORDS.test(from);
-
-    if (looksLikeInvoice && combined) {
+    if (bodyHasStructuralInvoicePhrases(html, plain) && (html || plain)) {
       const pdfBuffer = html
         ? htmlEmailToPdfBuffer({ subject, from, date, html })
         : htmlEmailToPdfBuffer({
@@ -195,9 +228,8 @@ async function extractDocumentsFromMessage(
     }
   }
 
-  const linkSource = `${htmlBody}\n${textBody}`;
-  const links = Array.from(new Set(linkSource.match(INVOICE_URL_PATTERN) ?? [])).slice(0, 3);
-  for (const rawUrl of links) {
+  const explicitLinks = extractExplicitInvoiceLinks(htmlBody, textBody);
+  for (const rawUrl of explicitLinks) {
     try {
       const downloaded = await downloadInvoiceFromUrl(rawUrl);
       if (downloaded) {
@@ -220,7 +252,7 @@ async function downloadInvoiceFromUrl(url: string): Promise<ExtractedDocument | 
       redirect: "follow",
       headers: {
         "User-Agent": "PhotoshootApp-InvoiceScanner/1.0",
-        Accept: "application/pdf,image/*,text/html;q=0.9,*/*;q=0.8",
+        Accept: "application/pdf,text/html;q=0.5,*/*;q=0.1",
       },
     });
     if (!response.ok) {
@@ -242,18 +274,11 @@ async function downloadInvoiceFromUrl(url: string): Promise<ExtractedDocument | 
       };
     }
 
-    if (contentType.startsWith("image/")) {
-      const ext = extensionForMime(contentType);
-      return {
-        source: "link",
-        fileName: sanitizeFileName(`invoice-link${ext}`, `invoice-link${ext}`),
-        buffer,
-        contentType,
-      };
-    }
-
     if (contentType.includes("html")) {
       const html = buffer.toString("utf8");
+      if (!INVOICE_STRUCTURAL_PHRASES.test(stripHtmlTags(html))) {
+        return null;
+      }
       const pdfBuffer = htmlEmailToPdfBuffer({
         subject: "Hosted invoice",
         from: url,
@@ -274,34 +299,78 @@ async function downloadInvoiceFromUrl(url: string): Promise<ExtractedDocument | 
   }
 }
 
-function buildGmailQuery(): string {
+function buildGmailQuery(timeframe: string): string {
   return [
-    "newer_than:7d",
+    `newer_than:${timeframe}`,
+    `(subject:Rechnung OR subject:Invoice OR subject:Quittung OR subject:Receipt OR "Rechnungsnummer" OR "Invoice Number")`,
     `-label:"${LEXOFFICE_PROCESSED_LABEL}"`,
-    "(invoice OR Rechnung OR receipt OR Quittung OR Beleg OR zahlungsbeleg OR \"payment confirmation\")",
+    "-in:sent",
+    "-from:me",
   ].join(" ");
+}
+
+function getWorkspaceUserEmail(): string {
+  return process.env.GOOGLE_WORKSPACE_USER_EMAIL?.trim().toLowerCase() ?? "";
+}
+
+function isOutgoingMessage(fromHeader: string): boolean {
+  const from = fromHeader.trim().toLowerCase();
+  if (!from) {
+    return false;
+  }
+  if (from === "me") {
+    return true;
+  }
+  const workspaceEmail = getWorkspaceUserEmail();
+  if (workspaceEmail && from.includes(workspaceEmail)) {
+    return true;
+  }
+  return false;
+}
+
+export function normalizeInvoiceScanTimeframe(value: unknown): string {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (ALLOWED_INVOICE_SCAN_TIMEFRAMES.has(trimmed)) {
+      return trimmed;
+    }
+  }
+  return DEFAULT_INVOICE_SCAN_TIMEFRAME;
 }
 
 function messageMatchesKeywords(message: gmail_v1.Schema$Message): boolean {
   const subject = getHeader(message.payload?.headers, "Subject");
+  if (SUBJECT_INVOICE_PATTERN.test(subject)) {
+    return true;
+  }
+
   const snippet = message.snippet ?? "";
-  const plainFromParts: string[] = [];
+  const bodyParts: string[] = [];
   walkParts(message.payload, (part) => {
     const data = part.body?.data;
     if (!data) return;
     const mime = (part.mimeType ?? "").toLowerCase();
     if (mime === "text/plain" || mime === "text/html") {
-      plainFromParts.push(decodeBase64Url(data).toString("utf8"));
+      bodyParts.push(decodeBase64Url(data).toString("utf8"));
     }
   });
-  const combined = [subject, snippet, ...plainFromParts].join("\n");
-  return INVOICE_KEYWORDS.test(combined);
+
+  const combinedBody = bodyParts.join("\n");
+  return (
+    INVOICE_STRUCTURAL_PHRASES.test(combinedBody) ||
+    INVOICE_STRUCTURAL_PHRASES.test(snippet) ||
+    /Rechnungsnummer|Invoice Number/i.test(combinedBody) ||
+    /Rechnungsnummer|Invoice Number/i.test(snippet)
+  );
 }
 
-export async function runGmailInvoiceScanner(): Promise<InvoiceScannerRunResult> {
+export async function runGmailInvoiceScanner(
+  timeframe: string = DEFAULT_INVOICE_SCAN_TIMEFRAME
+): Promise<InvoiceScannerRunResult> {
+  const normalizedTimeframe = normalizeInvoiceScanTimeframe(timeframe);
   const gmail = await getGmailReadonlyClient();
   const processedLabelId = await ensureLexofficeProcessedLabel(gmail);
-  const query = buildGmailQuery();
+  const query = buildGmailQuery(normalizedTimeframe);
   const listResponse = await gmail.users.messages.list({
     userId: GMAIL_USER,
     q: query,
@@ -339,6 +408,11 @@ export async function runGmailInvoiceScanner(): Promise<InvoiceScannerRunResult>
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       errors.push(`Could not load message ${messageId}: ${msg}`);
+      continue;
+    }
+
+    const fromHeader = getHeader(message.payload?.headers, "From");
+    if (isOutgoingMessage(fromHeader)) {
       continue;
     }
 
