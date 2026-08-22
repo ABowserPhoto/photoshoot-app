@@ -886,10 +886,12 @@ export type UploadLexofficeVoucherFileResult = {
  */
 export async function uploadLexofficeVoucherFile(
   file: Blob | Buffer | Uint8Array,
-  fileName: string
+  fileName: string,
+  contentType = "application/pdf"
 ): Promise<UploadLexofficeVoucherFileResult> {
-  const trimmedName = fileName.trim() || "credit-note.pdf";
+  const trimmedName = fileName.trim() || "document.pdf";
   const apiKey = getLexofficeApiKey();
+  const normalizedType = contentType.trim() || "application/pdf";
 
   const bytes =
     file instanceof Buffer
@@ -899,17 +901,17 @@ export async function uploadLexofficeVoucherFile(
         : Buffer.from(await file.arrayBuffer());
 
   if (bytes.length === 0) {
-    throw new Error("Credit note file is empty.");
+    throw new Error("Voucher file is empty.");
   }
   if (bytes.length > 5 * 1024 * 1024) {
-    throw new Error("Credit note file exceeds Lexoffice 5 MB limit.");
+    throw new Error("Voucher file exceeds Lexoffice 5 MB limit.");
   }
 
   const form = new FormData();
   form.append(
     "file",
-    new Blob([new Uint8Array(bytes)], { type: "application/pdf" }),
-    trimmedName.toLowerCase().endsWith(".pdf") ? trimmedName : `${trimmedName}.pdf`
+    new Blob([new Uint8Array(bytes)], { type: normalizedType }),
+    trimmedName
   );
   // Official Lexoffice files endpoint field name is `type` with value `voucher`.
   form.append("type", "voucher");

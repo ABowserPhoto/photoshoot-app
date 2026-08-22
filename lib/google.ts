@@ -11,6 +11,8 @@ import { guessDeliverableMimeType, isDeliverableFileName } from "@/lib/deliverab
 const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/drive",
   "https://www.googleapis.com/auth/gmail.compose",
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.modify",
 ] as const;
 
 export interface CreateDriveFolderResult {
@@ -460,4 +462,11 @@ export async function createGmailDraft(
       `Gmail draft creation failed: ${extractGoogleApiError(error)} (To: ${recipient})`
     );
   }
+}
+
+/** Authorized Gmail API client (domain-wide delegation / workspace user). */
+export async function getGmailReadonlyClient() {
+  const auth = getJwtClient();
+  await auth.authorize();
+  return google.gmail({ version: "v1", auth });
 }

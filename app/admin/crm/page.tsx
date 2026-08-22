@@ -70,6 +70,7 @@ export default function AdminCrmPage() {
     taskId: string;
     label: string;
   } | null>(null);
+  const [invoiceScanBusy, setInvoiceScanBusy] = useState(false);
 
   const filteredItems = useMemo(
     () => items.filter((item) => matchesUnpaidBillingSearch(item, billingSearch)),
@@ -158,6 +159,39 @@ export default function AdminCrmPage() {
     }
   };
 
+  const handleRunInvoiceScanner = async () => {
+    setInvoiceScanBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/finance/invoice-scanner", {
+        method: "POST",
+        credentials: "include",
+      });
+      const json = (await response.json().catch(() => null)) as
+        | {
+            ok?: boolean;
+            error?: string;
+            scannedMessages?: number;
+            skippedAlreadyProcessed?: number;
+            candidateMessages?: number;
+            uploadsSucceeded?: number;
+            uploadsFailed?: number;
+          }
+        | null;
+      if (!response.ok || !json?.ok) {
+        throw new Error(json?.error ?? `Invoice scan failed (${response.status})`);
+      }
+      const skipped = json.skippedAlreadyProcessed ?? 0;
+      setToast(
+        `Invoice scan complete — ${json.uploadsSucceeded ?? 0} uploaded, ${json.uploadsFailed ?? 0} failed, ${skipped} skipped (already processed).`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invoice scan failed.");
+    } finally {
+      setInvoiceScanBusy(false);
+    }
+  };
+
   if (authLoading) {
     return (
       <main className="flex min-h-[50vh] items-center justify-center text-sm text-zinc-400">
@@ -232,14 +266,25 @@ export default function AdminCrmPage() {
                   Open Lexoffice invoices plus local credit-note self-billing, sorted oldest first.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => void loadUnpaid()}
-                disabled={loading}
-                className="inline-flex h-10 items-center rounded-lg bg-violet-600 px-4 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
-              >
-                {loading ? "Refreshing…" : "Refresh"}
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleRunInvoiceScanner()}
+                  disabled={invoiceScanBusy || loading}
+                  className="inline-flex h-10 items-center rounded-lg border border-emerald-600/50 bg-emerald-950/40 px-4 text-sm font-semibold text-emerald-100 hover:bg-emerald-900/50 disabled:opacity-50"
+                  title="Scan Gmail for invoices/receipts from the last 7 days and upload to Lexoffice"
+                >
+                  {invoiceScanBusy ? "Scanning Gmail…" : "Scan Gmail → Lexoffice"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void loadUnpaid()}
+                  disabled={loading}
+                  className="inline-flex h-10 items-center rounded-lg bg-violet-600 px-4 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+                >
+                  {loading ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
             </div>
 
             <div className="relative mb-4">
