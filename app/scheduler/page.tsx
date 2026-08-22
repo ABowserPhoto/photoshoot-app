@@ -1532,33 +1532,33 @@ export default function SchedulerPage() {
       return;
     }
 
-    const previousSlots = [...slots];
-    const wasEditing = editingSlotIndex === absoluteIndex;
-    updateActiveData((data) => {
-      if (absoluteIndex < 0 || absoluteIndex >= data.slots.length) {
-        return data;
-      }
-      const nextSlots = [...data.slots];
-      nextSlots[absoluteIndex] = null;
-      return { ...data, slots: nextSlots };
-    });
-    if (wasEditing) {
-      setEditingSlotIndex(null);
-      setCaptionDraft("");
-      setIsGeneratingTags(false);
-    }
-
-    if (target.fileUrl.startsWith("blob:")) {
-      URL.revokeObjectURL(target.fileUrl);
-      objectUrlsRef.current.delete(target.fileUrl);
-    }
-
     void (async () => {
       try {
         const result = await deleteSchedulerPost(target.id);
         if (!result.ok) {
           throw new Error(result.error);
         }
+
+        const wasEditing = editingSlotIndex === absoluteIndex;
+        updateActiveData((data) => {
+          if (absoluteIndex < 0 || absoluteIndex >= data.slots.length) {
+            return data;
+          }
+          const nextSlots = [...data.slots];
+          nextSlots[absoluteIndex] = null;
+          return { ...data, slots: nextSlots };
+        });
+        if (wasEditing) {
+          setEditingSlotIndex(null);
+          setCaptionDraft("");
+          setIsGeneratingTags(false);
+        }
+
+        if (target.fileUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(target.fileUrl);
+          objectUrlsRef.current.delete(target.fileUrl);
+        }
+
         setPersistenceError(null);
       } catch (error) {
         console.error("[scheduler delete post]", {
@@ -1567,7 +1567,6 @@ export default function SchedulerPage() {
           error,
         });
         setPersistenceError(error instanceof Error ? error.message : "Could not delete post.");
-        updateActiveData((data) => ({ ...data, slots: previousSlots }));
       }
     })();
   };
