@@ -1,7 +1,8 @@
 import { createBrowserClient } from "@supabase/ssr";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+import { getSupabasePublicEnv } from "@/lib/supabaseEnv";
+
+const { url: supabaseUrl, anonKey: supabaseAnonKey } = getSupabasePublicEnv();
 
 /** localStorage key for client-side inactivity tracking (AutoLogout). */
 export const LAST_ACTIVE_STORAGE_KEY = "workflow_last_active_time";
@@ -45,6 +46,14 @@ export function clearLastActiveTime(): void {
   } catch {
     // Ignore storage errors.
   }
+}
+
+if (typeof window !== "undefined" && (!supabaseUrl || !supabaseAnonKey)) {
+  console.error(
+    "[supabaseClient] Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY. " +
+      "These must be set in the Vercel project Environment Variables for Production " +
+      "(and available at build time for client bundles). Auth, realtime, and module nav will fail."
+  );
 }
 
 /**

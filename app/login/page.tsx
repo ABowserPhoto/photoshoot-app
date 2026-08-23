@@ -47,10 +47,18 @@ function LoginForm() {
           }
         }
 
-        const sessionCheck = await fetch("/api/auth/me", { cache: "no-store" });
-        if (!sessionCheck.ok) {
+        const sessionCheck = await fetch("/api/auth/me", {
+          cache: "no-store",
+          credentials: "include",
+        });
+        const sessionJson = (await sessionCheck.json().catch(() => null)) as {
+          authenticated?: boolean;
+          error?: string;
+        } | null;
+        if (!sessionCheck.ok || !sessionJson?.authenticated) {
           setError(
-            "Signed in with Supabase, but the session cookie was not established. Try again or clear site cookies."
+            sessionJson?.error ??
+              "Signed in with Supabase, but the session cookie was not established. Try again or clear site cookies."
           );
           return;
         }
@@ -58,11 +66,19 @@ function LoginForm() {
         const res = await fetch("/api/auth/gate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({ password }),
         });
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         if (!res.ok) {
           setError(data?.error ?? `Sign-in failed (${res.status}).`);
+          return;
+        }
+
+        const meCheck = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" });
+        const meJson = (await meCheck.json().catch(() => null)) as { authenticated?: boolean } | null;
+        if (!meJson?.authenticated) {
+          setError("Password accepted, but the session cookie was not established. Try again.");
           return;
         }
       }

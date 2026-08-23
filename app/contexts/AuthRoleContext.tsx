@@ -43,6 +43,9 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!supabase) {
+      console.error(
+        "[AuthRole] Browser Supabase client is null. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in Vercel (Production + Preview), then redeploy so the client bundle picks them up."
+      );
       return;
     }
     const {
@@ -61,21 +64,27 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
     async function load() {
       setIsLoading(true);
       try {
-        const res = await fetch("/api/auth/me", { cache: "no-store" });
+        const res = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" });
         const json = (await res.json().catch(() => null)) as {
           authenticated?: boolean;
-          role?: UserRole;
+          role?: UserRole | null;
           isAdmin?: boolean;
           accessibleModules?: AppModule[];
+          error?: string;
         } | null;
         if (cancelled) {
           return;
         }
-        if (res.ok && json?.authenticated) {
+        if (json?.authenticated) {
           setAuthenticated(true);
           setRole(json.role ?? "editor");
           setIsAdmin(Boolean(json.isAdmin));
           setAccessibleModules(Array.isArray(json.accessibleModules) ? json.accessibleModules : []);
+          if (!json.isAdmin && (!json.accessibleModules || json.accessibleModules.length === 0)) {
+            console.warn(
+              "[AuthRole] Authenticated without admin flag and with empty accessibleModules — CRM/Notes/Scripts nav may hide. Check profiles.role / SUPABASE_SERVICE_ROLE_KEY on Vercel."
+            );
+          }
           if (supabase) {
             const {
               data: { user: sessionUser },
@@ -91,7 +100,8 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
           setIsAdmin(false);
           setAccessibleModules([]);
         }
-      } catch {
+      } catch (error) {
+        console.error("[AuthRole] Failed to load auth role:", error);
         if (!cancelled) {
           setAuthenticated(false);
           setUser(null);
@@ -130,6 +140,7 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
       await fetch("/api/auth/logout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
       }).catch(() => null);
     } finally {
       setAuthenticated(false);

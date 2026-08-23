@@ -1,8 +1,8 @@
 import type { User } from "@supabase/supabase-js";
-import { createServerClient } from "@supabase/ssr";
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
+import { GATE_COOKIE } from "@/lib/authCookies";
 import {
   DEFAULT_STAFF_MODULES,
   normalizeAccessibleModules,
@@ -11,8 +11,10 @@ import {
 import type { UserRole } from "@/lib/authRole";
 import { normalizeRole } from "@/lib/authRole";
 import { deriveGateToken, timingSafeEqualHex } from "@/lib/gateToken";
-
-const GATE_COOKIE = "workflow_gate";
+import {
+  createCookieAuthServerClient,
+  createServiceRoleClient,
+} from "@/lib/server/supabaseServer";
 
 function roleFromSupabaseUser(user: User): UserRole {
   const meta = user.user_metadata as Record<string, unknown> | undefined;
@@ -22,84 +24,44 @@ function roleFromSupabaseUser(user: User): UserRole {
   return normalizeRole(raw);
 }
 
-function createServiceSupabase() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
-  if (!url || !serviceKey) {
-    return null;
-  }
-  return createClient(url, serviceKey, { auth: { persistSession: false } });
-}
+type ProfileRow = {
+  role?: unknown;
+  is_archived?: unknown;
+  accessible_modules?: unknown;
+};
 
-async function profileAuthState(
-  userId: string,
-  fallbackUser: User
-): Promise<{ role: UserRole; isArchived: boolean; accessibleModules: AppModule[] }> {
-  const sb = createServiceSupabase();
-  if (!sb) {
-    return {
-      role: roleFromSupabaseUser(fallbackUser),
-      isArchived: false,
-      accessibleModules: [],
-    };
-  }
-
+async function readProfileRow(
+  sb: SupabaseClient,
+  userId: string
+): Promise<{ data: ProfileRow | null; error: { message: string } | null }> {
   const { data, error } = await sb
     .from("profiles")
     .select("role, is_archived, accessible_modules")
     .eq("id", userId)
     .maybeSingle();
 
-  if (error || !data || typeof data !== "object") {
-    // Older DBs without new columns: degrade gracefully.
-    if (error && /accessible_modules|is_archived|column|schema|Could not find/i.test(error.message)) {
-      const retry = await sb
-        .from("profiles")
-        .select("role, is_archived")
-        .eq("id", userId)
-        .maybeSingle();
-      if (retry.error || !retry.data) {
+  if (error) {
+    if (/accessible_modules|is_archived|column|schema|Could not find/i.test(error.message)) {
+      const retry = await sb.from("profiles").select("role, is_archived").eq("id", userId).maybeSingle();
+      if (retry.error) {
         const roleOnly = await sb.from("profiles").select("role").eq("id", userId).maybeSingle();
         if (roleOnly.error || !roleOnly.data) {
-          return {
-            role: roleFromSupabaseUser(fallbackUser),
-            isArchived: false,
-            accessibleModules: [],
-          };
+          return { data: null, error: roleOnly.error ?? retry.error };
         }
-        const rawRole = (roleOnly.data as { role?: unknown }).role;
-        return {
-          role:
-            rawRole === null || rawRole === undefined || String(rawRole).trim() === ""
-              ? roleFromSupabaseUser(fallbackUser)
-              : normalizeRole(rawRole),
-          isArchived: false,
-          accessibleModules: [...DEFAULT_STAFF_MODULES],
-        };
+        return { data: roleOnly.data as ProfileRow, error: null };
       }
-      const row = retry.data as { role?: unknown; is_archived?: unknown };
-      const role =
-        row.role === null || row.role === undefined || String(row.role).trim() === ""
-          ? roleFromSupabaseUser(fallbackUser)
-          : normalizeRole(row.role);
-      return {
-        role,
-        isArchived: row.is_archived === true,
-        accessibleModules: role === "admin" ? [] : [...DEFAULT_STAFF_MODULES],
-      };
+      return { data: retry.data as ProfileRow, error: null };
     }
-    return {
-      role: roleFromSupabaseUser(fallbackUser),
-      isArchived: false,
-      accessibleModules: [],
-    };
+    return { data: null, error };
   }
 
-  const row = data as {
-    role?: unknown;
-    is_archived?: unknown;
-    accessible_modules?: unknown;
-  };
+  return { data: (data as ProfileRow | null) ?? null, error: null };
+}
+
+function profileStateFromRow(
+  row: ProfileRow,
+  fallbackUser: User
+): { role: UserRole; isArchived: boolean; accessibleModules: AppModule[] } {
   const isArchived = row.is_archived === true;
   const rawRole = row.role;
   const role =
@@ -110,8 +72,72 @@ async function profileAuthState(
   return {
     role,
     isArchived,
-    accessibleModules: normalizeAccessibleModules(row.accessible_modules),
+    accessibleModules:
+      role === "admin" ? [] : normalizeAccessibleModules(row.accessible_modules),
   };
+}
+
+function metadataFallbackProfileState(fallbackUser: User) {
+  const role = roleFromSupabaseUser(fallbackUser);
+  return {
+    role,
+    isArchived: false,
+    accessibleModules: role === "admin" ? [] : [...DEFAULT_STAFF_MODULES],
+  };
+}
+
+async function profileAuthState(
+  userId: string,
+  fallbackUser: User
+): Promise<{ role: UserRole; isArchived: boolean; accessibleModules: AppModule[] }> {
+  const clients: SupabaseClient[] = [];
+  const serviceClient = createServiceRoleClient();
+  if (serviceClient) {
+    clients.push(serviceClient);
+  }
+  const sessionClient = await createCookieAuthServerClient();
+  if (sessionClient) {
+    clients.push(sessionClient);
+  }
+
+  for (const sb of clients) {
+    const { data, error } = await readProfileRow(sb, userId);
+    if (data && typeof data === "object") {
+      return profileStateFromRow(data, fallbackUser);
+    }
+    if (error) {
+      console.warn("[getAuthRole] profiles lookup failed:", error.message);
+    }
+  }
+
+  return metadataFallbackProfileState(fallbackUser);
+}
+
+async function resolveGateAuth(cookieVal: string | undefined): Promise<AuthRoleResult | null> {
+  const secret = process.env.APP_AUTH_SECRET?.trim();
+  const adminPassword = process.env.APP_ADMIN_PASSWORD?.trim();
+  const editorPassword = process.env.APP_EDITOR_PASSWORD?.trim();
+
+  if (!secret || !adminPassword || !editorPassword || !cookieVal) {
+    return null;
+  }
+
+  const adminExpected = await deriveGateToken(secret, adminPassword);
+  if (timingSafeEqualHex(cookieVal, adminExpected)) {
+    return { authenticated: true, role: "admin", isAdmin: true, accessibleModules: [] };
+  }
+
+  const editorExpected = await deriveGateToken(secret, editorPassword);
+  if (timingSafeEqualHex(cookieVal, editorExpected)) {
+    return {
+      authenticated: true,
+      role: "editor",
+      isAdmin: false,
+      accessibleModules: [...DEFAULT_STAFF_MODULES],
+    };
+  }
+
+  return null;
 }
 
 export type AuthRoleResult = {
@@ -122,79 +148,52 @@ export type AuthRoleResult = {
   accessibleModules: AppModule[];
 };
 
+type GetAuthRoleOptions = {
+  /** Reuse a route-handler Supabase client (avoids duplicate session refresh). */
+  supabaseClient?: SupabaseClient | null;
+  /** User already resolved via supabase.auth.getUser() on the same client. */
+  prefetchUser?: User | null;
+};
+
 /**
  * Resolves current request auth:
  * - Supabase session (role + modules from `profiles`), OR
  * - Gatekeeper cookie matching APP_ADMIN_PASSWORD / APP_EDITOR_PASSWORD.
  */
-export async function getAuthRole(): Promise<AuthRoleResult> {
+export async function getAuthRole(options?: GetAuthRoleOptions): Promise<AuthRoleResult> {
   const cookieStore = await cookies();
+  const supabase = options?.supabaseClient ?? (await createCookieAuthServerClient());
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
-
-  if (supabaseUrl && supabaseAnonKey) {
-    const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll();
-        },
-        setAll(cookiesToSet) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) => {
-              cookieStore.set(name, value, options);
-            });
-          } catch {
-            // Cookie writes can fail in non-mutable contexts; session read still works.
-          }
-        },
-      },
-    });
-
+  let user = options?.prefetchUser ?? null;
+  if (!user && supabase) {
     const {
-      data: { user },
+      data: { user: resolvedUser },
     } = await supabase.auth.getUser();
-
-    if (user) {
-      const { role, isArchived, accessibleModules } = await profileAuthState(user.id, user);
-      if (isArchived) {
-        return {
-          authenticated: false,
-          role: "editor",
-          isAdmin: false,
-          accessibleModules: [],
-        };
-      }
-      const isAdmin = role === "admin";
-      return {
-        authenticated: true,
-        role,
-        isAdmin,
-        accessibleModules: isAdmin ? [] : accessibleModules,
-      };
-    }
+    user = resolvedUser ?? null;
   }
 
-  const secret = process.env.APP_AUTH_SECRET?.trim();
-  const adminPassword = process.env.APP_ADMIN_PASSWORD?.trim();
-  const editorPassword = process.env.APP_EDITOR_PASSWORD?.trim();
-  const cookieVal = cookieStore.get(GATE_COOKIE)?.value;
-
-  if (secret && adminPassword && editorPassword && cookieVal) {
-    const adminExpected = await deriveGateToken(secret, adminPassword);
-    if (timingSafeEqualHex(cookieVal, adminExpected)) {
-      return { authenticated: true, role: "admin", isAdmin: true, accessibleModules: [] };
-    }
-
-    const editorExpected = await deriveGateToken(secret, editorPassword);
-    if (timingSafeEqualHex(cookieVal, editorExpected)) {
+  if (user) {
+    const { role, isArchived, accessibleModules } = await profileAuthState(user.id, user);
+    if (isArchived) {
       return {
-        authenticated: true,
+        authenticated: false,
         role: "editor",
         isAdmin: false,
-        accessibleModules: [...DEFAULT_STAFF_MODULES],
+        accessibleModules: [],
       };
     }
+    const isAdmin = role === "admin";
+    return {
+      authenticated: true,
+      role,
+      isAdmin,
+      accessibleModules: isAdmin ? [] : accessibleModules,
+    };
+  }
+
+  const gateAuth = await resolveGateAuth(cookieStore.get(GATE_COOKIE)?.value);
+  if (gateAuth) {
+    return gateAuth;
   }
 
   return {

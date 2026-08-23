@@ -1,46 +1,10 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import { createServerClient } from "@supabase/ssr";
-import { cookies } from "next/headers";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
 import { isStudioTaskUnassigned, isUserOnStudioTask } from "@/lib/plannerAssignees";
+import { createRouteSupabaseClient, getSessionUser } from "@/lib/server/supabaseServer";
 
 export const dynamic = "force-dynamic";
-
-function serviceSupabase() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
-  const key = serviceKey || anonKey;
-  if (!url || !key) {
-    return null;
-  }
-  return createClient(url, key, { auth: { persistSession: false } });
-}
-
-async function getSessionUserId(): Promise<string | null> {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return null;
-  }
-  const cookieStore = await cookies();
-  const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
-    cookies: {
-      getAll() {
-        return cookieStore.getAll();
-      },
-      setAll() {
-        // No-op on route reads.
-      },
-    },
-  });
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  return user?.id ?? null;
-}
 
 export async function GET(request: Request) {
   const auth = await getAuthRole();
@@ -48,16 +12,19 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const sb = serviceSupabase();
-  if (!sb) {
+  const routeClient = await createRouteSupabaseClient();
+  if (!routeClient) {
     return NextResponse.json({ error: "Database is not configured." }, { status: 503 });
   }
 
-  const userId = await getSessionUserId();
+  const userId = (await getSessionUser())?.id ?? null;
   const url = new URL(request.url);
   const assigneeFilter = url.searchParams.get("assignee")?.trim() || null;
 
-  const { data, error } = await sb.from("studio_tasks").select("*").order("order_index", { ascending: true });
+  const { data, error } = await routeClient.client
+    .from("studio_tasks")
+    .select("*")
+    .order("order_index", { ascending: true });
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
@@ -165,10 +132,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const sb = serviceSupabase();
-  if (!sb) {
+  const routeClient = await createRouteSupabaseClient();
+  if (!routeClient) {
     return NextResponse.json({ error: "Database is not configured." }, { status: 503 });
   }
+  const sb = routeClient.client;
 
   let body: CreatePlannerTaskBody;
   try {
@@ -280,10 +248,11 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const sb = serviceSupabase();
-  if (!sb) {
+  const routeClient = await createRouteSupabaseClient();
+  if (!routeClient) {
     return NextResponse.json({ error: "Database is not configured." }, { status: 503 });
   }
+  const sb = routeClient.client;
 
   let body: PatchPlannerTaskBody;
   try {

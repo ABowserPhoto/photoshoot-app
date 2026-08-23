@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const GATE_COOKIE = "workflow_gate";
+import { GATE_COOKIE } from "@/lib/authCookies";
 
 export const runtime = "nodejs";
 

@@ -916,18 +916,31 @@ export default function KanbanBoard({
       setStaleDataBanner(null);
 
       try {
-        const response = await fetch("/api/tasks", { cache: "no-store" });
+        const response = await fetch("/api/tasks", { cache: "no-store", credentials: "include" });
 
         if (!response.ok) {
-          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+          const payload = (await response.json().catch(() => null)) as {
+            error?: string;
+            warning?: string;
+            meta?: { stale?: boolean };
+          } | null;
           const message =
             payload?.error ??
+            payload?.warning ??
             (response.status === 503
-              ? "Supabase client is not configured. Check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY."
+              ? "Supabase client is not configured. Check NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, and SUPABASE_SERVICE_ROLE_KEY on Vercel."
               : `Failed to load tasks (${response.status}).`);
+          console.error("[KanbanBoard] /api/tasks failed:", {
+            status: response.status,
+            error: payload?.error,
+            warning: payload?.warning,
+            meta: payload?.meta,
+          });
           if (isMounted) {
             setStatusMessage(message);
-            setStaleDataBanner(null);
+            setStaleDataBanner(payload?.warning ?? null);
+            setBoard(sanitizeBoardState(createEmptyBoard()));
+            setArchivedTasks([]);
           }
           return;
         }
@@ -938,20 +951,48 @@ export default function KanbanBoard({
           meta?: { stale?: boolean };
         };
         const data = json.data ?? [];
+        const isStale = Boolean(json.meta?.stale);
+        const warning = typeof json.warning === "string" ? json.warning.trim() : "";
 
         if (!isMounted) {
           return;
         }
 
-        if (data.length === 0) {
-          const fallbackBoard = createEmptyBoard();
-          for (const task of FALLBACK_TASKS) {
-            fallbackBoard[task.status].push(task);
-          }
-          setBoard(sanitizeBoardState(fallbackBoard));
+        // Production trap: /api/tasks returns HTTP 200 + empty data when Supabase
+        // fails on a cold serverless instance (no in-memory cache). Do not treat
+        // that as "no tasks" or swap in dummy cards.
+        if (data.length === 0 && (isStale || warning)) {
+          console.error("[KanbanBoard] Supabase tasks unavailable:", warning || "stale empty response", {
+            status: response.status,
+            meta: json.meta,
+          });
+          setBoard(sanitizeBoardState(createEmptyBoard()));
           setArchivedTasks([]);
-          setStatusMessage("No tasks found in Supabase. Showing local dummy tasks.");
-          setStaleDataBanner(json.meta?.stale ? (json.warning ?? "Showing cached task data.") : null);
+          setStatusMessage(
+            warning ||
+              "Supabase temporarily unavailable. Check NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, and SUPABASE_SERVICE_ROLE_KEY on Vercel."
+          );
+          setStaleDataBanner(warning || "Supabase temporarily unavailable.");
+          return;
+        }
+
+        if (data.length === 0) {
+          console.warn("[KanbanBoard] /api/tasks returned an empty task list (no stale warning).");
+          const fallbackBoard = createEmptyBoard();
+          // Dummy seed only in local development — never mask prod empties as sample data.
+          if (process.env.NODE_ENV === "development") {
+            for (const task of FALLBACK_TASKS) {
+              fallbackBoard[task.status].push(task);
+            }
+            setBoard(sanitizeBoardState(fallbackBoard));
+            setArchivedTasks([]);
+            setStatusMessage("No tasks found in Supabase. Showing local dummy tasks.");
+          } else {
+            setBoard(sanitizeBoardState(fallbackBoard));
+            setArchivedTasks([]);
+            setStatusMessage("No tasks found in Supabase.");
+          }
+          setStaleDataBanner(null);
           return;
         }
 
@@ -993,10 +1034,11 @@ export default function KanbanBoard({
           const flat = COLUMN_CONFIG.flatMap((col) => sanitizeBoardState(grouped)[col.id] ?? []);
           onBoardChange(flat);
         }
-      } catch {
+      } catch (error) {
+        console.error("[KanbanBoard] Failed to load tasks:", error);
         if (isMounted) {
           setStatusMessage(
-            "Failed to load tasks: network error. Ensure the dev server listens on all interfaces (see package.json \"dev\" script) and retry."
+            "Failed to load tasks: network error. Check browser console for details, then verify Supabase env vars on Vercel."
           );
           setStaleDataBanner(null);
         }
@@ -1811,6 +1853,7 @@ export default function KanbanBoard({
       const response = await fetch("/api/tasks", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ taskId: task.id }),
       });
       const payload = (await response.json().catch(() => null)) as

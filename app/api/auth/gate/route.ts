@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 
+import { GATE_COOKIE } from "@/lib/authCookies";
 import { deriveGateToken } from "@/lib/gateToken";
-
-const GATE_COOKIE = "workflow_gate";
 
 export const runtime = "nodejs";
 

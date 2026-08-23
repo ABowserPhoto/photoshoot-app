@@ -11,8 +11,8 @@ import {
 } from "@/lib/appModules";
 import { normalizeRole } from "@/lib/authRole";
 import { deriveGateToken, timingSafeEqualHex } from "@/lib/gateToken";
-
-const GATE_COOKIE = "workflow_gate";
+import { GATE_COOKIE } from "@/lib/authCookies";
+import { getSupabasePublicEnv, getSupabaseServiceRoleKey } from "@/lib/supabaseEnv";
 
 function isPublicRoute(pathname: string): boolean {
   if (pathname === "/login") {
@@ -50,8 +50,8 @@ async function resolveModuleAccess(params: {
     return { isAdmin: false, accessibleModules: [], isArchived: false };
   }
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  const { url } = getSupabasePublicEnv();
+  const serviceKey = getSupabaseServiceRoleKey();
   if (!url || !serviceKey) {
     return { isAdmin: false, accessibleModules: [...DEFAULT_STAFF_MODULES], isArchived: false };
   }
@@ -101,8 +101,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
+  const { url: supabaseUrl, anonKey: supabaseAnonKey } = getSupabasePublicEnv();
 
   let supabaseResponse = NextResponse.next({
     request,

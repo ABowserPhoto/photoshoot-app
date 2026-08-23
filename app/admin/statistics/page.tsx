@@ -258,7 +258,7 @@ export default function AdminStatisticsPage() {
         isCustomTimeframe ? customEndDate : undefined,
         isDayTimeframe ? selectedDayDate : undefined
       ),
-      fetch(`/api/admin-stats${businessQuery}`, { cache: "no-store" }),
+      fetch(`/api/admin-stats${businessQuery}`, { cache: "no-store", credentials: "include" }),
     ]);
 
     if (!productivityRes.ok) {

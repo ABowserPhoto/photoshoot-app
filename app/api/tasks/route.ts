@@ -1,9 +1,7 @@
-import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
-import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
-import { purgeTaskStorage } from "@/lib/server/purgeTaskStorage";
+import { createRouteSupabaseClient } from "@/lib/server/supabaseServer";
 import { redactTaskRowForRole } from "@/lib/tasksRedact";
 import type { TaskRow } from "@/lib/tasksRedact";
 
@@ -11,21 +9,8 @@ export const dynamic = "force-dynamic";
 const TASKS_FETCH_TIMEOUT_MS = Number(process.env.TASKS_FETCH_TIMEOUT_MS ?? "8000");
 let cachedRows: TaskRow[] = [];
 
-function getDeleteClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const key = supabaseServiceRoleKey || supabaseAnonKey;
-  if (!supabaseUrl || !key) {
-    return null;
-  }
-  return createClient(supabaseUrl, key, {
-    auth: { persistSession: false },
-    global: {
-      fetch: (input, init) => fetchWithTimeout(input, init, TASKS_FETCH_TIMEOUT_MS),
-    },
-  });
-}
+const TASK_SELECT_COLUMNS =
+  "id, title, company_name, lexoffice_contact_id, contact_first_name, contact_last_name, email, email_cc, phone, street, zip_code, city, country, address_supplement, services, products, tax_percentage, amount_type, discount, photoshoot_type, shoot_location, photoshoot_date, preview_preference, due_date, editing_started_at, total_editing_seconds, status, is_archived, local_folder_name, bracket_size, cover_image_url, completed_at, updated_at, skip_invoice, generate_gallery, is_credit_note, expected_revenue, is_paid, credit_note_paid, credit_note_file_url, has_separate_invoice_email, invoice_email_address, linked_item_id, local_open_path, gallery_link, contact_id";
 
 export async function GET() {
   const auth = await getAuthRole();
@@ -33,36 +18,29 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Prefer service_role so this trusted route keeps working under RLS.
-  // Auth is already enforced above via getAuthRole(); bare anon has no RLS policies.
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
-
-  if (!supabaseUrl || !supabaseKey) {
+  const routeClient = await createRouteSupabaseClient(TASKS_FETCH_TIMEOUT_MS);
+  if (!routeClient) {
     return NextResponse.json(
       {
         error:
-          "Supabase client is not configured. Check NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
+          "Supabase client is not configured. Check NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, and SUPABASE_SERVICE_ROLE_KEY on Vercel.",
       },
       { status: 503 }
     );
   }
 
-  const supabase = createClient(supabaseUrl, supabaseKey, {
-    auth: { persistSession: false },
-    global: {
-      fetch: (input, init) => fetchWithTimeout(input, init, TASKS_FETCH_TIMEOUT_MS),
-    },
-  });
+  if (routeClient.mode === "session") {
+    console.warn(
+      "[api/tasks] SUPABASE_SERVICE_ROLE_KEY missing — using cookie session client (RLS applies). Set service role on Vercel for consistent reads."
+    );
+  }
+
+  const supabase = routeClient.client;
 
   try {
     const { data, error } = await supabase
       .from("tasks")
-      .select(
-        "id, title, company_name, lexoffice_contact_id, contact_first_name, contact_last_name, email, email_cc, phone, street, zip_code, city, country, address_supplement, services, products, tax_percentage, amount_type, discount, photoshoot_type, shoot_location, photoshoot_date, preview_preference, due_date, editing_started_at, total_editing_seconds, status, is_archived, local_folder_name, bracket_size, cover_image_url, completed_at, updated_at, skip_invoice, generate_gallery, is_credit_note, expected_revenue, is_paid, credit_note_paid, credit_note_file_url, has_separate_invoice_email, invoice_email_address, linked_item_id, local_open_path, gallery_link, contact_id"
-      )
+      .select(TASK_SELECT_COLUMNS)
       .order("id", { ascending: true });
 
     if (error) {
@@ -77,7 +55,12 @@ export async function GET() {
 
     return NextResponse.json({
       data: visible,
-      meta: { role: auth.role, isAdmin: auth.isAdmin, stale: false },
+      meta: {
+        role: auth.role,
+        isAdmin: auth.isAdmin,
+        stale: false,
+        supabaseMode: routeClient.mode,
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown tasks fetch error.";
@@ -86,13 +69,23 @@ export async function GET() {
     const visibleFallback = auth.isAdmin
       ? fallbackRows
       : fallbackRows.map((row) => redactTaskRowForRole(row, auth.role));
+
+    if (fallbackRows.length === 0) {
+      return NextResponse.json(
+        {
+          error: `Supabase tasks fetch failed: ${message}`,
+          data: [],
+          meta: { role: auth.role, isAdmin: auth.isAdmin, stale: true, supabaseMode: routeClient.mode },
+          warning: "Supabase temporarily unavailable; returning empty task list.",
+        },
+        { status: 503 }
+      );
+    }
+
     return NextResponse.json({
       data: visibleFallback,
-      meta: { role: auth.role, isAdmin: auth.isAdmin, stale: true },
-      warning:
-        fallbackRows.length > 0
-          ? "Supabase temporarily unavailable; serving cached tasks."
-          : "Supabase temporarily unavailable; returning empty task list.",
+      meta: { role: auth.role, isAdmin: auth.isAdmin, stale: true, supabaseMode: routeClient.mode },
+      warning: "Supabase temporarily unavailable; serving cached tasks.",
     });
   }
 }
@@ -113,10 +106,10 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: "taskId is required." }, { status: 400 });
   }
 
-  // Best-effort storage purge — orphaned files are logged but never block deletion.
+  const { purgeTaskStorage } = await import("@/lib/server/purgeTaskStorage");
+
   const purgeResult = await purgeTaskStorage(taskId);
   if (!purgeResult.ok) {
-    // purgeTaskStorage only returns ok:false when Supabase credentials are missing entirely.
     return NextResponse.json(
       { error: purgeResult.error || "Supabase storage is not configured." },
       { status: 503 }
@@ -130,12 +123,12 @@ export async function DELETE(request: Request) {
     );
   }
 
-  const supabase = getDeleteClient();
-  if (!supabase) {
+  const routeClient = await createRouteSupabaseClient(TASKS_FETCH_TIMEOUT_MS);
+  if (!routeClient) {
     return NextResponse.json({ error: "Supabase is not configured for deletion." }, { status: 503 });
   }
 
-  const { error: deleteError } = await supabase.from("tasks").delete().eq("id", taskId);
+  const { error: deleteError } = await routeClient.client.from("tasks").delete().eq("id", taskId);
   if (deleteError) {
     return NextResponse.json({ error: deleteError.message }, { status: 500 });
   }
