@@ -17,6 +17,7 @@ import { PERMISSION_DENIED_QUERY } from "@/lib/permissionDenied";
 import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
 import { buildFinalizeShootPayload } from "@/lib/finalizeShootPayload";
+import { uploadSocialDeliverableFiles } from "@/lib/socialDeliverableUpload";
 
 type AmountType = "Net" | "Gross";
 type PhotoshootType =
@@ -1541,22 +1542,21 @@ function HomeContent() {
       return;
     }
 
-    const formData = new FormData();
-    formData.append("taskId", uploadTask.id);
-    formData.append("photoshootType", uploadTask.photoshootType);
-    formData.append(
-      "clientName",
-      uploadTask.companyName.trim() ||
-        [uploadTask.contactFirstName, uploadTask.contactLastName].filter(Boolean).join(" ").trim()
-    );
-    formData.append("shootLocation", uploadTask.shootLocation);
-    for (const file of socialFiles) {
-      formData.append("files", file);
-    }
+    const fileUrls = await uploadSocialDeliverableFiles(socialFiles, uploadTask.id);
 
     const response = await fetch("/api/social/queue-from-deliverables", {
       method: "POST",
-      body: formData,
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        taskId: uploadTask.id,
+        photoshootType: uploadTask.photoshootType,
+        clientName:
+          uploadTask.companyName.trim() ||
+          [uploadTask.contactFirstName, uploadTask.contactLastName].filter(Boolean).join(" ").trim(),
+        shootLocation: uploadTask.shootLocation,
+        fileUrls,
+      }),
     });
     const payload = (await response.json().catch(() => null)) as {
       success?: boolean;
@@ -2474,13 +2474,30 @@ function HomeContent() {
             ? {
                 id: uploadTask.id,
                 taskTitle: getTaskTitle(uploadTask),
-                photoshootType: uploadTask.photoshootType,
+                localFolderName: uploadTask.localFolderName,
                 companyName: uploadTask.companyName,
+                lexofficeContactId: uploadTask.lexofficeContactId,
                 contactFirstName: uploadTask.contactFirstName,
                 contactLastName: uploadTask.contactLastName,
-                shootLocation: uploadTask.shootLocation,
                 email: uploadTask.email,
-                localFolderName: uploadTask.localFolderName,
+                emailCc: uploadTask.emailCc,
+                street: uploadTask.street,
+                zipCode: uploadTask.zipCode,
+                city: uploadTask.city,
+                country: uploadTask.country,
+                addressSupplement: uploadTask.addressSupplement,
+                galleryLink: uploadTask.galleryLink,
+                hasSeparateInvoiceEmail: uploadTask.hasSeparateInvoiceEmail,
+                invoiceEmailAddress: uploadTask.invoiceEmailAddress,
+                services: uploadTask.services,
+                products: uploadTask.products,
+                taxPercentage: uploadTask.taxPercentage,
+                amountType: uploadTask.amountType,
+                discount: uploadTask.discount,
+                photoshootType: uploadTask.photoshootType,
+                shootLocation: uploadTask.shootLocation,
+                photoshootDate: uploadTask.photoshootDate,
+                skipInvoice: uploadTask.skipInvoice,
               }
             : null
         }

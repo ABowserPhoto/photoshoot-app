@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
 import { queueDeliverablesToSocialGrid } from "@/lib/server/socialGridQueue";
+import { isTaskSocialMediaFileUrl } from "@/lib/socialMediaStorage";
 import { resolveSocialCategoryRoute } from "@/lib/socialCategoryRouting";
 
 export const runtime = "nodejs";
@@ -17,24 +18,20 @@ function serviceSupabase() {
   return createClient(url, serviceKey, { auth: { persistSession: false } });
 }
 
-function isImageFile(file: File): boolean {
-  const mime = (file.type || "").toLowerCase();
-  const name = file.name.toLowerCase();
-  return (
-    mime === "image/jpeg" ||
-    mime === "image/jpg" ||
-    mime === "image/png" ||
-    mime === "image/webp" ||
-    name.endsWith(".jpg") ||
-    name.endsWith(".jpeg") ||
-    name.endsWith(".png") ||
-    name.endsWith(".webp")
-  );
-}
+type QueueFromDeliverablesBody = {
+  taskId?: unknown;
+  photoshootType?: unknown;
+  clientName?: unknown;
+  shootLocation?: unknown;
+  fileUrls?: unknown;
+};
 
 /**
- * Route B: upload social selections to the social_media bucket and insert
- * scheduled rows into social_posts for the category-mapped profile grid.
+ * Route B: register client-uploaded social_media URLs and insert scheduled rows
+ * into social_posts for the category-mapped profile grid.
+ *
+ * Files must be uploaded to Supabase Storage from the browser first — this route
+ * accepts URL strings only to stay under Vercel's serverless body limit.
  */
 export async function POST(request: Request) {
   const auth = await getAuthRole();
@@ -50,29 +47,42 @@ export async function POST(request: Request) {
     );
   }
 
-  let form: FormData;
+  let body: QueueFromDeliverablesBody;
   try {
-    form = await request.formData();
+    body = (await request.json()) as QueueFromDeliverablesBody;
   } catch {
-    return NextResponse.json({ error: "Expected multipart form data." }, { status: 400 });
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  const taskId = String(form.get("taskId") ?? "").trim();
-  const photoshootType = String(form.get("photoshootType") ?? "").trim();
-  const clientName = String(form.get("clientName") ?? "").trim();
-  const shootLocation = String(form.get("shootLocation") ?? "").trim();
+  const taskId = typeof body.taskId === "string" ? body.taskId.trim() : "";
+  const photoshootType = typeof body.photoshootType === "string" ? body.photoshootType.trim() : "";
+  const clientName = typeof body.clientName === "string" ? body.clientName.trim() : "";
+  const shootLocation = typeof body.shootLocation === "string" ? body.shootLocation.trim() : "";
   const routePreview = resolveSocialCategoryRoute(photoshootType);
 
   if (!taskId) {
     return NextResponse.json({ error: "taskId is required.", route: routePreview }, { status: 400 });
   }
 
-  const files = form
-    .getAll("files")
-    .filter((entry): entry is File => entry instanceof File && entry.size > 0)
-    .filter(isImageFile);
+  const rawUrls = Array.isArray(body.fileUrls) ? body.fileUrls : [];
+  const fileUrls = rawUrls
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 
-  if (files.length === 0) {
+  const invalidUrl = fileUrls.find((url) => !isTaskSocialMediaFileUrl(url, taskId));
+  if (invalidUrl) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Each fileUrl must be a social_media object URL for this task.",
+        route: routePreview,
+      },
+      { status: 400 }
+    );
+  }
+
+  if (fileUrls.length === 0) {
     return NextResponse.json({
       success: true,
       skipped: true,
@@ -87,7 +97,7 @@ export async function POST(request: Request) {
     photoshootType,
     clientName,
     shootLocation,
-    files,
+    fileUrls,
     taskId,
   });
 

@@ -231,7 +231,8 @@ export async function queueDeliverablesToSocialGrid(input: {
   photoshootType: string;
   clientName: string;
   shootLocation: string;
-  files: File[];
+  /** Public URLs in the social_media bucket (uploaded client-side). */
+  fileUrls: string[];
   taskId: string;
 }): Promise<{ ok: true; posts: QueuedSocialPost[]; route: SocialCategoryRoute; handle: string } | { ok: false; error: string; route: SocialCategoryRoute }> {
   const resolved = await resolveProfileForCategory(input.supabase, input.photoshootType);
@@ -240,7 +241,7 @@ export async function queueDeliverablesToSocialGrid(input: {
   }
 
   const { route, profile } = resolved;
-  if (input.files.length === 0) {
+  if (input.fileUrls.length === 0) {
     return { ok: true, posts: [], route, handle: profile.handle };
   }
 
@@ -270,14 +271,14 @@ export async function queueDeliverablesToSocialGrid(input: {
     .maybeSingle();
 
   const scheduledAts = computeScheduledAtsForNewSlots(
-    input.files.length,
+    input.fileUrls.length,
     (ruleRow as SocialRuleRow | null) ?? null,
     existingScheduledAts
   );
 
   const nextIndexes: number[] = [];
   let cursor = 0;
-  while (nextIndexes.length < input.files.length) {
+  while (nextIndexes.length < input.fileUrls.length) {
     if (!occupied.has(cursor)) {
       nextIndexes.push(cursor);
     }
@@ -292,29 +293,10 @@ export async function queueDeliverablesToSocialGrid(input: {
 
   const queued: QueuedSocialPost[] = [];
 
-  for (let i = 0; i < input.files.length; i += 1) {
-    const file = input.files[i];
+  for (let i = 0; i < input.fileUrls.length; i += 1) {
+    const fileUrl = input.fileUrls[i].trim();
     const absoluteIndex = nextIndexes[i];
     const scheduledAt = scheduledAts[i];
-    const extension = file.name.includes(".") ? file.name.split(".").pop() : "jpg";
-    const objectPath = `${profile.id}/${input.taskId}/${Date.now()}-${i}-${Math.random()
-      .toString(36)
-      .slice(2, 8)}.${extension ?? "jpg"}`;
-
-    const upload = await input.supabase.storage.from("social_media").upload(objectPath, file, {
-      upsert: false,
-      contentType: file.type || "image/jpeg",
-    });
-    if (upload.error) {
-      return {
-        ok: false,
-        error: `Social asset upload failed for ${file.name}: ${upload.error.message}`,
-        route,
-      };
-    }
-
-    const { data: publicData } = input.supabase.storage.from("social_media").getPublicUrl(objectPath);
-    const fileUrl = publicData.publicUrl;
     const status = scheduledAt ? "scheduled" : "pending";
 
     const insertPayload = {

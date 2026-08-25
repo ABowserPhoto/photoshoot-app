@@ -112,6 +112,17 @@ export function buildContactPersonName(task: FinalizeShootTask): string {
     .join(" ");
 }
 
+/** Single-line billing address for invoice pre-flight UI. */
+export function formatBillingAddress(task: FinalizeShootTask): string {
+  const street = task.street.trim();
+  const zipCity = [task.zipCode.trim(), task.city.trim()].filter(Boolean).join(" ");
+  const parts = [street, zipCity].filter(Boolean);
+  if (task.country.trim()) {
+    parts.push(task.country.trim());
+  }
+  return parts.join(", ");
+}
+
 const COUNTRY_NAME_TO_CODE: Record<string, string> = {
   germany: "DE",
   deutschland: "DE",
@@ -188,6 +199,73 @@ export function buildTaskLineItems(task: FinalizeShootTask): FinalizeShootLineIt
       taxRate,
     },
   ];
+}
+
+export type InvoicePreflightLineItem = {
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+};
+
+export type InvoicePreflightSummary = {
+  billingEntityName: string;
+  billingAddress: string;
+  contactPersonName: string;
+  skipInvoice: boolean;
+  taxRate: number;
+  taxType: "net" | "gross";
+  lineItems: InvoicePreflightLineItem[];
+  subtotalNet: number;
+  subtotalGross: number;
+  taxAmount: number;
+  warnings: string[];
+};
+
+export function buildInvoicePreflightSummary(task: FinalizeShootTask): InvoicePreflightSummary {
+  const billingEntityName = task.companyName.trim();
+  const contactPersonName = buildContactPersonName(task);
+  const taxRate = Number.isFinite(task.taxPercentage) ? task.taxPercentage : 19;
+  const taxType: "net" | "gross" = task.amountType === "Gross" ? "gross" : "net";
+  const taxMultiplier = taxRate / 100;
+  const rawLineItems = buildTaskLineItems(task);
+
+  const lineItems: InvoicePreflightLineItem[] = rawLineItems.map((item) => ({
+    name: item.name,
+    quantity: item.quantity,
+    unitPrice: item.price,
+    lineTotal: item.quantity * item.price,
+  }));
+
+  const subtotal = lineItems.reduce((sum, item) => sum + item.lineTotal, 0);
+  const subtotalNet = taxType === "gross" && taxMultiplier > 0 ? subtotal / (1 + taxMultiplier) : subtotal;
+  const subtotalGross = taxType === "net" ? subtotal * (1 + taxMultiplier) : subtotal;
+  const taxAmount = subtotalGross - subtotalNet;
+
+  const warnings: string[] = [];
+  if (!task.skipInvoice && !billingEntityName) {
+    warnings.push("Billing entity / company name is required for the Lexoffice invoice.");
+  }
+  if (!task.skipInvoice && !resolveCountryCode(task.country)) {
+    warnings.push("Country is required on the booking for Lexoffice (e.g. DE).");
+  }
+  if (!task.skipInvoice && !formatBillingAddress(task)) {
+    warnings.push("Billing address (street, zip, city) is missing.");
+  }
+
+  return {
+    billingEntityName,
+    billingAddress: formatBillingAddress(task),
+    contactPersonName,
+    skipInvoice: task.skipInvoice,
+    taxRate,
+    taxType,
+    lineItems,
+    subtotalNet,
+    subtotalGross,
+    taxAmount,
+    warnings,
+  };
 }
 
 export function buildFinalizeShootPayload(task: FinalizeShootTask): FinalizeShootPayload {

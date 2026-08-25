@@ -599,16 +599,17 @@ async function resolveLexofficeContactId(client: LexofficeClientDetails): Promis
   });
 }
 
-function buildLexofficeInvoicePayload(invoiceData: CreateLexofficeInvoiceData, contactId: string | null) {
+function buildLexofficeInvoicePayload(invoiceData: CreateLexofficeInvoiceData) {
   const { client, lineItems, taxType = "net", currency = "EUR" } = invoiceData;
 
   if (!Array.isArray(lineItems) || lineItems.length === 0) {
     throw new Error("At least one invoice line item is required.");
   }
 
+  // Billing entity / company only — never fall back to a contact person name.
   const invoiceName = client.invoiceName.trim();
   if (!invoiceName) {
-    throw new Error("invoiceName is required.");
+    throw new Error("invoiceName (billing entity / company name) is required.");
   }
 
   const countryCode = resolveCountryCode(client.countryCode, client.country);
@@ -660,8 +661,9 @@ function buildLexofficeInvoicePayload(invoiceData: CreateLexofficeInvoiceData, c
     };
   });
 
+  // One-time address only: omit contactId so Lexoffice does not auto-fill the read-only
+  // contactPerson from the linked contact record. Never send contactPerson on the address.
   const address = {
-    ...(contactId ? { contactId } : {}),
     name: invoiceName,
     countryCode,
     ...(client.addressSupplement?.trim() ? { supplement: client.addressSupplement.trim() } : {}),
@@ -723,9 +725,10 @@ export async function createLexofficeInvoice(
 ): Promise<CreateLexofficeInvoiceResult> {
   const apiKey = getLexofficeApiKey();
   const finalize = invoiceData.finalize ?? false;
-  const contactId = await resolveLexofficeContactId(invoiceData.client);
+  // Ensure a Lexoffice contact exists for CRM sync, but invoice uses a one-time company address.
+  await resolveLexofficeContactId(invoiceData.client);
   const requestUrl = `${LEXOFFICE_API_BASE_URL}/invoices${finalize ? "?finalize=true" : ""}`;
-  const requestBody = buildLexofficeInvoicePayload(invoiceData, contactId);
+  const requestBody = buildLexofficeInvoicePayload(invoiceData);
 
   const response = await lexofficeFetch(requestUrl, {
     method: "POST",
