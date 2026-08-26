@@ -1762,12 +1762,13 @@ function HomeContent() {
                       </label>
                       {hasSeparateInvoiceEmail ? (
                         <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                          Invoice Email Address
+                          Invoice Email Address{" "}
+                          <span className="font-normal text-zinc-500">(comma-separated OK)</span>
                           <input
-                            type="email"
+                            type="text"
                             value={invoiceEmailAddress}
                             onChange={(event) => setInvoiceEmailAddress(event.target.value)}
-                            placeholder="billing@company.com"
+                            placeholder="billing@company.com, ap@company.com"
                             required
                             className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                           />

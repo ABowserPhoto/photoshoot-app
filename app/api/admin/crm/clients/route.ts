@@ -166,7 +166,8 @@ export async function POST(request: Request) {
     );
   }
 
-  const lexofficeId = typeof body.lexoffice_id === "string" ? body.lexoffice_id.trim() || null : null;
+  const lexofficeId =
+    typeof body.lexoffice_id === "string" ? body.lexoffice_id.trim() || null : null;
   const contactPersons = safeContactPersons(body.contact_persons);
 
   const payload = {
@@ -227,8 +228,89 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, client: mapClientRow(data as ClientRow, ltvByCompany) });
   }
 
+  // Match on lexoffice_id when present so re-saves do not hit clients_lexoffice_id_key.
+  if (lexofficeId) {
+    const { data: upserted, error: upsertError } = await supabase
+      .from("clients")
+      .upsert(payload, { onConflict: "lexoffice_id" })
+      .select("*")
+      .maybeSingle();
+
+    if (!upsertError && upserted) {
+      const insertedId = (upserted as { id: string }).id;
+      const newLexId = await lexofficePushPromise;
+      if (newLexId) {
+        await supabase
+          .from("clients")
+          .update({ lexoffice_id: newLexId, lexoffice_contact_id: newLexId })
+          .eq("id", insertedId);
+      }
+
+      const { data: tasks } = await supabase
+        .from("tasks")
+        .select(
+          "company_name, client, expected_revenue, is_paid, credit_note_paid, is_credit_note, status, services, products, discount, tax_percentage, amount_type"
+        );
+      const ltvByCompany = buildCompanyLtvMap((tasks ?? []) as Record<string, unknown>[]);
+      return NextResponse.json({ ok: true, client: mapClientRow(upserted as ClientRow, ltvByCompany) }, { status: 201 });
+    }
+
+    if (upsertError && /clients_lexoffice_id_key|duplicate key.*lexoffice_id/i.test(upsertError.message)) {
+      const { data: existing } = await supabase
+        .from("clients")
+        .select("*")
+        .eq("lexoffice_id", lexofficeId)
+        .maybeSingle();
+      if (existing) {
+        const { data: updated, error: updateError } = await supabase
+          .from("clients")
+          .update(payload)
+          .eq("id", (existing as { id: string }).id)
+          .select("*")
+          .single();
+        if (!updateError && updated) {
+          const { data: tasks } = await supabase
+            .from("tasks")
+            .select(
+              "company_name, client, expected_revenue, is_paid, credit_note_paid, is_credit_note, status, services, products, discount, tax_percentage, amount_type"
+            );
+          const ltvByCompany = buildCompanyLtvMap((tasks ?? []) as Record<string, unknown>[]);
+          return NextResponse.json({ ok: true, client: mapClientRow(updated as ClientRow, ltvByCompany) });
+        }
+      }
+    }
+
+    if (upsertError && !/onConflict|column|schema|Could not find/i.test(upsertError.message)) {
+      return NextResponse.json({ error: upsertError.message }, { status: 400 });
+    }
+  }
+
   const { data, error } = await supabase.from("clients").insert(payload).select("*").single();
   if (error) {
+    if (/clients_lexoffice_id_key|duplicate key.*lexoffice_id/i.test(error.message) && lexofficeId) {
+      const { data: existing } = await supabase
+        .from("clients")
+        .select("*")
+        .eq("lexoffice_id", lexofficeId)
+        .maybeSingle();
+      if (existing) {
+        const { data: updated, error: updateError } = await supabase
+          .from("clients")
+          .update(payload)
+          .eq("id", (existing as { id: string }).id)
+          .select("*")
+          .single();
+        if (!updateError && updated) {
+          const { data: tasks } = await supabase
+            .from("tasks")
+            .select(
+              "company_name, client, expected_revenue, is_paid, credit_note_paid, is_credit_note, status, services, products, discount, tax_percentage, amount_type"
+            );
+          const ltvByCompany = buildCompanyLtvMap((tasks ?? []) as Record<string, unknown>[]);
+          return NextResponse.json({ ok: true, client: mapClientRow(updated as ClientRow, ltvByCompany) });
+        }
+      }
+    }
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
 

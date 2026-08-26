@@ -28,6 +28,12 @@ function trimString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+/** Empty / whitespace-only Lexoffice IDs must be null so unique constraints are not hit. */
+function sanitizeLexofficeId(value: unknown): string | null {
+  const trimmed = trimString(value);
+  return trimmed || null;
+}
+
 export function resolveTaskCompanyName(input: TaskClientLinkInput): string {
   return trimString(input.company_name) || trimString(input.client);
 }
@@ -50,7 +56,7 @@ function composeBillingAddress(input: TaskClientLinkInput): string | null {
 }
 
 function buildClientWritePayload(companyName: string, input: TaskClientLinkInput) {
-  const lexofficeId = trimString(input.lexoffice_contact_id) || null;
+  const lexofficeId = sanitizeLexofficeId(input.lexoffice_contact_id);
   const street = trimString(input.street) || null;
   const zipCode = trimString(input.zip_code) || null;
   const city = trimString(input.city) || null;
@@ -77,6 +83,45 @@ function buildClientWritePayload(companyName: string, input: TaskClientLinkInput
   };
 }
 
+function isLexofficeIdUniqueViolation(message: string | undefined): boolean {
+  const text = message ?? "";
+  return /clients_lexoffice_id_key|duplicate key.*lexoffice_id|unique.*lexoffice_id/i.test(text);
+}
+
+async function findClientByLexofficeId(
+  supabase: SupabaseClient,
+  lexofficeId: string
+): Promise<ClientLookupRow | null> {
+  const id = sanitizeLexofficeId(lexofficeId);
+  if (!id) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("clients")
+    .select("id, company_name")
+    .eq("lexoffice_id", id)
+    .maybeSingle();
+
+  if (error) {
+    // Older schemas may only have lexoffice_contact_id.
+    if (/lexoffice_id|column|schema|Could not find/i.test(error.message)) {
+      const retry = await supabase
+        .from("clients")
+        .select("id, company_name")
+        .eq("lexoffice_contact_id", id)
+        .maybeSingle();
+      if (retry.error) {
+        throw new Error(retry.error.message);
+      }
+      return (retry.data as ClientLookupRow | null) ?? null;
+    }
+    throw new Error(error.message);
+  }
+
+  return (data as ClientLookupRow | null) ?? null;
+}
+
 async function findClientByCompanyName(
   supabase: SupabaseClient,
   companyName: string
@@ -97,8 +142,53 @@ async function findClientByCompanyName(
   return match ?? null;
 }
 
+async function updateClientRow(
+  supabase: SupabaseClient,
+  clientId: string,
+  writePayload: ReturnType<typeof buildClientWritePayload>
+): Promise<void> {
+  const updatePayload: Record<string, unknown> = {
+    company_name: writePayload.company_name,
+    street: writePayload.street,
+    zip_code: writePayload.zip_code,
+    city: writePayload.city,
+    country: writePayload.country,
+    address_supplement: writePayload.address_supplement,
+    billing_street: writePayload.billing_street,
+    billing_postal_code: writePayload.billing_postal_code,
+    billing_city: writePayload.billing_city,
+    billing_country: writePayload.billing_country,
+    billing_address: writePayload.billing_address,
+    contact_name: writePayload.contact_name,
+    ...(writePayload.email ? { email: writePayload.email } : {}),
+    ...(writePayload.phone ? { phone: writePayload.phone } : {}),
+  };
+
+  // Only write Lexoffice IDs when non-empty. Never persist "".
+  if (writePayload.lexoffice_id) {
+    updatePayload.lexoffice_contact_id = writePayload.lexoffice_id;
+    updatePayload.lexoffice_id = writePayload.lexoffice_id;
+  }
+
+  const { error: updateError } = await supabase.from("clients").update(updatePayload).eq("id", clientId);
+  if (updateError) {
+    // Another client already owns this lexoffice_id — keep address sync, skip ID overwrite.
+    if (isLexofficeIdUniqueViolation(updateError.message) && writePayload.lexoffice_id) {
+      const withoutLex = { ...updatePayload };
+      delete withoutLex.lexoffice_id;
+      delete withoutLex.lexoffice_contact_id;
+      const { error: retryError } = await supabase.from("clients").update(withoutLex).eq("id", clientId);
+      if (retryError) {
+        throw new Error(retryError.message);
+      }
+      return;
+    }
+    throw new Error(updateError.message);
+  }
+}
+
 /**
- * Finds an existing CRM client by company/client name (case-insensitive) or creates one.
+ * Finds an existing CRM client by Lexoffice ID or company/client name, or creates one.
  * When an existing client is found, address/contact fields from the booking are written back
  * onto the `clients` row so Addresszusatz and moves persist for the next booking.
  * Returns null when no company/client label is available on the task.
@@ -118,42 +208,71 @@ export async function resolveOrCreateClientIdForTask(
   }
 
   const writePayload = buildClientWritePayload(companyName, input);
-  const existing = await findClientByCompanyName(supabase, companyName);
+
+  // Prefer Lexoffice identity when present — avoids clients_lexoffice_id_key on insert.
+  let existing: ClientLookupRow | null = null;
+  if (writePayload.lexoffice_id) {
+    existing = await findClientByLexofficeId(supabase, writePayload.lexoffice_id);
+  }
+  if (!existing) {
+    existing = await findClientByCompanyName(supabase, companyName);
+  }
+
   if (existing) {
-    const { error: updateError } = await supabase
-      .from("clients")
-      .update({
-        street: writePayload.street,
-        zip_code: writePayload.zip_code,
-        city: writePayload.city,
-        country: writePayload.country,
-        address_supplement: writePayload.address_supplement,
-        billing_street: writePayload.billing_street,
-        billing_postal_code: writePayload.billing_postal_code,
-        billing_city: writePayload.billing_city,
-        billing_country: writePayload.billing_country,
-        billing_address: writePayload.billing_address,
-        contact_name: writePayload.contact_name,
-        // Prefer booking values when provided; leave existing CRM email/phone if blank on form.
-        ...(writePayload.email ? { email: writePayload.email } : {}),
-        ...(writePayload.phone ? { phone: writePayload.phone } : {}),
-        ...(writePayload.lexoffice_contact_id
-          ? {
-              lexoffice_contact_id: writePayload.lexoffice_contact_id,
-              lexoffice_id: writePayload.lexoffice_id,
-            }
-          : {}),
-      })
-      .eq("id", existing.id);
-    if (updateError) {
-      throw new Error(updateError.message);
-    }
+    await updateClientRow(supabase, existing.id, writePayload);
     return existing.id;
   }
 
-  const { data, error } = await supabase.from("clients").insert(writePayload).select("id").single();
+  if (writePayload.lexoffice_id) {
+    const { data: upserted, error: upsertError } = await supabase
+      .from("clients")
+      .upsert(writePayload, { onConflict: "lexoffice_id" })
+      .select("id")
+      .maybeSingle();
+
+    if (!upsertError) {
+      if (typeof upserted?.id === "string") {
+        return upserted.id;
+      }
+      const byLex = await findClientByLexofficeId(supabase, writePayload.lexoffice_id);
+      if (byLex) {
+        return byLex.id;
+      }
+    }
+
+    if (upsertError && isLexofficeIdUniqueViolation(upsertError.message)) {
+      const byLex = await findClientByLexofficeId(supabase, writePayload.lexoffice_id);
+      if (byLex) {
+        await updateClientRow(supabase, byLex.id, writePayload);
+        return byLex.id;
+      }
+    }
+
+    if (upsertError) {
+      // Fall through to plain insert without lexoffice_id if upsert unsupported / schema mismatch.
+      if (!/onConflict|lexoffice_id|column|schema|Could not find/i.test(upsertError.message)) {
+        throw new Error(upsertError.message);
+      }
+    }
+  }
+
+  const insertPayload: Record<string, unknown> = { ...writePayload };
+  // Avoid inserting empty-string unique keys; keep null or omit when absent.
+  if (!writePayload.lexoffice_id) {
+    insertPayload.lexoffice_id = null;
+    insertPayload.lexoffice_contact_id = null;
+  }
+
+  const { data, error } = await supabase.from("clients").insert(insertPayload).select("id").single();
 
   if (error) {
+    if (isLexofficeIdUniqueViolation(error.message) && writePayload.lexoffice_id) {
+      const byLex = await findClientByLexofficeId(supabase, writePayload.lexoffice_id);
+      if (byLex) {
+        await updateClientRow(supabase, byLex.id, writePayload);
+        return byLex.id;
+      }
+    }
     throw new Error(error.message);
   }
 
@@ -180,12 +299,18 @@ export async function attachClientIdToTaskPayload(
     city: trimString(payload.city) || null,
     country: trimString(payload.country) || null,
     address_supplement: trimString(payload.address_supplement) || null,
-    lexoffice_contact_id: trimString(payload.lexoffice_contact_id) || null,
+    lexoffice_contact_id: sanitizeLexofficeId(payload.lexoffice_contact_id),
   };
+
+  // Also sanitize on the task payload itself so tasks never store "".
+  const sanitizedLexofficeContactId = sanitizeLexofficeId(payload.lexoffice_contact_id);
 
   const clientId = await resolveOrCreateClientIdForTask(linkInput, supabase);
   if (!clientId) {
-    return payload;
+    return {
+      ...payload,
+      lexoffice_contact_id: sanitizedLexofficeContactId,
+    };
   }
 
   const contactId = await ensureCrmContactWithEmails(supabase, {
@@ -201,6 +326,7 @@ export async function attachClientIdToTaskPayload(
   return {
     ...payload,
     client_id: clientId,
+    lexoffice_contact_id: sanitizedLexofficeContactId,
     ...(contactId ? { contact_id: contactId } : {}),
   };
 }
