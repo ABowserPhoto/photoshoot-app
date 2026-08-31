@@ -331,6 +331,44 @@ function normalizeErrorMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
+function isEditingLikeStatus(status: string | null | undefined): boolean {
+  const normalized = String(status ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized === "editing" || normalized === "processing";
+}
+
+function truncateProcessingError(message: string, maxLen = 2000): string {
+  const text = message.trim() || "Processing failed.";
+  if (text.length <= maxLen) {
+    return text;
+  }
+  return `${text.slice(0, maxLen - 1)}…`;
+}
+
+type TaskTimerRow = {
+  status?: string | null;
+  editing_started_at?: string | null;
+  total_editing_seconds?: number | null;
+};
+
+function buildEditingTimerStopPayload(currentTask: TaskTimerRow | null | undefined) {
+  const startedAt =
+    typeof currentTask?.editing_started_at === "string" && currentTask.editing_started_at.trim()
+      ? currentTask.editing_started_at.trim()
+      : null;
+  const startedAtMs = startedAt ? Date.parse(startedAt) : Number.NaN;
+  const elapsed = Number.isFinite(startedAtMs)
+    ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+    : 0;
+  const prevTotal = Number(currentTask?.total_editing_seconds ?? 0);
+  return {
+    editing_started_at: null as null,
+    total_editing_seconds: prevTotal + elapsed,
+    elapsedSeconds: elapsed,
+  };
+}
+
 type SharpConstructor = typeof import("sharp");
 
 let sharpModulePromise: Promise<SharpConstructor> | null = null;
@@ -724,6 +762,14 @@ export async function startProcessingSingleItem(
 
     await enhanceMergedPhotoInPlace(outFile);
 
+    if (!fs.existsSync(outFile)) {
+      return failedSingleItemSummary(
+        bracketIndex,
+        totalBrackets,
+        `Merged output missing after pipeline for bracket ${currentBracketIndex}: ${outBaseName}`
+      );
+    }
+
     const comfyErrors: string[] = [];
     const runComfy = shouldRunComfyForFilename(outBaseName);
     const expectedComfyJobs = runComfy ? 1 : 0;
@@ -785,12 +831,49 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
   const selectsDir = path.join(taskRoot, "2_Selects");
   const mergedDir = path.join(taskRoot, "3_Merged");
 
-  const setStatus = async (status: string) => {
+  const setStatus = async (
+    status: string,
+    extras?: { processing_error?: string | null }
+  ) => {
     if (!supabase) {
       console.warn(`[processingEngine] Supabase not configured; skip status "${status}" for task ${taskId}.`);
       return;
     }
-    const { error } = await supabase.from("tasks").update({ status }).eq("id", taskId);
+
+    const { data: currentTask, error: readError } = await supabase
+      .from("tasks")
+      .select("status, editing_started_at, total_editing_seconds")
+      .eq("id", taskId)
+      .maybeSingle();
+    if (readError) {
+      console.error(`[processingEngine] Failed to read task ${taskId} before status update:`, readError.message);
+    }
+
+    const payload: Record<string, unknown> = { status, ...(extras ?? {}) };
+    const currentStatus = typeof currentTask?.status === "string" ? currentTask.status : "";
+    const timerRunning =
+      typeof currentTask?.editing_started_at === "string" &&
+      currentTask.editing_started_at.trim().length > 0;
+
+    if (isEditingLikeStatus(status) && !isEditingLikeStatus(currentStatus)) {
+      payload.editing_started_at =
+        (timerRunning ? currentTask?.editing_started_at : null) || new Date().toISOString();
+      if (payload.total_editing_seconds == null) {
+        payload.total_editing_seconds = Number(currentTask?.total_editing_seconds ?? 0);
+      }
+      if (payload.processing_error === undefined) {
+        payload.processing_error = null;
+      }
+    } else if (!isEditingLikeStatus(status) && (isEditingLikeStatus(currentStatus) || timerRunning)) {
+      const stop = buildEditingTimerStopPayload(currentTask);
+      payload.editing_started_at = stop.editing_started_at;
+      payload.total_editing_seconds = stop.total_editing_seconds;
+      console.info(
+        `[processingEngine] Accumulating editing timer for task ${taskId}: elapsed=${stop.elapsedSeconds}s, new total=${stop.total_editing_seconds}s.`
+      );
+    }
+
+    const { error } = await supabase.from("tasks").update(payload).eq("id", taskId);
     if (error) {
       console.error(`[processingEngine] Failed to set status "${status}":`, error.message);
     }
@@ -989,6 +1072,15 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
       }
     }
 
+    const missingMerged = mergedOutputs.filter((p) => !fs.existsSync(p));
+    if (missingMerged.length > 0 || mergedOutputs.length !== brackets.length) {
+      throw new Error(
+        `Merged outputs missing after pipeline: expected ${brackets.length}, present ${
+          mergedOutputs.length - missingMerged.length
+        }. Missing: ${missingMerged.map((p) => path.basename(p)).join(", ") || "unknown"}`
+      );
+    }
+
     return {
       ok: true,
       mergedFiles: mergedOutputs.map((p) => path.basename(p)),
@@ -999,7 +1091,9 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
   } catch (error) {
     const message = error instanceof Error ? error.message : "Processing failed.";
     console.error("[processingEngine]", message);
-    await setStatus("Selection Available");
+    await setStatus("Selection Failed", {
+      processing_error: truncateProcessingError(message),
+    });
     return { ok: false, error: message };
   }
 }

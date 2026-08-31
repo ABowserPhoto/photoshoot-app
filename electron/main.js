@@ -130,6 +130,7 @@ const IPC_CHANNELS = {
   HIDE_WIDGET: "desktop-widget:hide",
   TOGGLE_WIDGET: "desktop-widget:toggle",
   FOCUS_MAIN: "desktop-widget:focus-main",
+  RESIZE_WIDGET: "desktop-widget:resize",
 };
 
 function resolveAppIconPath() {
@@ -867,10 +868,14 @@ function createFloatingWidget(loadUrl = serverUrl) {
   widgetWindow = new BrowserWindow({
     width: 320,
     height: 450,
+    minWidth: 280,
+    minHeight: 180,
+    maxWidth: 520,
+    maxHeight: 900,
     alwaysOnTop: true,
     frame: false,
     transparent: true,
-    resizable: false,
+    resizable: true,
     skipTaskbar: true,
     show: false,
     icon: appIconPath ?? undefined,
@@ -1004,12 +1009,33 @@ function setupTray() {
   return tray;
 }
 
+function resizeWidgetWindow(payload = {}) {
+  if (!widgetWindow || widgetWindow.isDestroyed()) {
+    return;
+  }
+
+  const bounds = widgetWindow.getBounds();
+  const nextWidth =
+    typeof payload.width === "number" && Number.isFinite(payload.width)
+      ? Math.round(payload.width)
+      : bounds.width;
+  const nextHeight =
+    typeof payload.height === "number" && Number.isFinite(payload.height)
+      ? Math.round(payload.height)
+      : bounds.height;
+
+  const clampedWidth = Math.min(520, Math.max(280, nextWidth));
+  const clampedHeight = Math.min(900, Math.max(180, nextHeight));
+  widgetWindow.setSize(clampedWidth, clampedHeight, true);
+}
+
 function setupWidgetIpc() {
   ipcMain.removeAllListeners(IPC_CHANNELS.REFRESH_MAIN);
   ipcMain.removeAllListeners(IPC_CHANNELS.REFRESH_WIDGET);
   ipcMain.removeAllListeners(IPC_CHANNELS.HIDE_WIDGET);
   ipcMain.removeAllListeners(IPC_CHANNELS.TOGGLE_WIDGET);
   ipcMain.removeAllListeners(IPC_CHANNELS.FOCUS_MAIN);
+  ipcMain.removeAllListeners(IPC_CHANNELS.RESIZE_WIDGET);
 
   ipcMain.on(IPC_CHANNELS.REFRESH_MAIN, () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1034,6 +1060,10 @@ function setupWidgetIpc() {
   ipcMain.on(IPC_CHANNELS.FOCUS_MAIN, () => {
     focusMainWindow();
     hideWidgetWindow();
+  });
+
+  ipcMain.on(IPC_CHANNELS.RESIZE_WIDGET, (_event, payload) => {
+    resizeWidgetWindow(payload && typeof payload === "object" ? payload : {});
   });
 }
 

@@ -28,7 +28,8 @@ type PhotoshootType =
   | "Portrait Pro"
   | "Studio Portrait"
   | "Hochzeit"
-  | "Mini Session";
+  | "Mini Session"
+  | "Event";
 type ItemType = "Service" | "Product";
 type PreviewPreference = "first" | "middle" | "last";
 
@@ -1482,6 +1483,11 @@ function HomeContent() {
     const uploadResponse = await fetch("/api/upload", {
       method: "POST",
       body: formData,
+    }).catch((err: unknown) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Drive upload request failed (${detail}). Immobilien batches with many large JPEGs often exceed the server body limit — try fewer files or upload in smaller batches.`
+      );
     });
 
     if (!uploadResponse.ok) {
@@ -2229,6 +2235,7 @@ function HomeContent() {
                         <option value="Studio Portrait">Studio Portrait</option>
                         <option value="Hochzeit">Hochzeit</option>
                         <option value="Mini Session">Mini Session</option>
+                        <option value="Event">Event</option>
                       </select>
                     </label>
                     <label className="sm:col-span-2 inline-flex items-start gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">

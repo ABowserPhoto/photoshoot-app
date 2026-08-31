@@ -193,6 +193,38 @@ function mergedOutputFileName(firstFileInGroup, bracketIndex, totalBrackets) {
   return `${withoutFrameIndex}-merged-${bracketIndex}.jpg`;
 }
 
+/**
+ * Strict FS check: every bracket must have its expected JPEG under 3_Merged/.
+ */
+function verifyMergedOutputsExist(taskRoot, brackets) {
+  const totalBrackets = brackets.length;
+  const expected = [];
+  const missing = [];
+  const mergedDir = path.join(taskRoot, "3_Merged");
+
+  for (let i = 0; i < totalBrackets; i += 1) {
+    const firstFileInGroup = brackets[i]?.[0];
+    if (!firstFileInGroup) {
+      missing.push(`bracket-${i + 1}-empty`);
+      continue;
+    }
+    const baseName = mergedOutputFileName(firstFileInGroup, i + 1, totalBrackets);
+    expected.push(baseName);
+    const outFile = path.join(mergedDir, baseName);
+    if (!fs.existsSync(outFile)) {
+      missing.push(baseName);
+    }
+  }
+
+  return {
+    ok: missing.length === 0 && expected.length === totalBrackets,
+    expected,
+    missing,
+    expectedCount: expected.length,
+    presentCount: expected.length - missing.length,
+  };
+}
+
 function isRawPreviewFile(filePath) {
   return RAW_PREVIEW_EXTENSIONS.has(path.extname(String(filePath || "")).toLowerCase());
 }
@@ -399,20 +431,72 @@ function isSelectionSyncValidationError(err) {
   return SELECTION_SYNC_VALIDATION_ERROR_PATTERNS.some((pattern) => pattern.test(message));
 }
 
+function isEditingLikeStatus(status) {
+  const normalized = String(status ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized === "editing" || normalized === "processing";
+}
+
+function truncateProcessingError(message, maxLen = 2000) {
+  const text = String(message ?? "").trim() || "Processing failed.";
+  if (text.length <= maxLen) {
+    return text;
+  }
+  return `${text.slice(0, maxLen - 1)}…`;
+}
+
+/**
+ * Stop a running editing timer regardless of whether current status still
+ * matches "Processing" exactly (status can drift to "Editing" or elsewhere).
+ */
+function buildEditingTimerStopPayload(currentTask) {
+  const startedAt =
+    typeof currentTask?.editing_started_at === "string" && currentTask.editing_started_at.trim()
+      ? currentTask.editing_started_at.trim()
+      : null;
+  const startedAtMs = startedAt ? Date.parse(startedAt) : NaN;
+  const elapsed = Number.isFinite(startedAtMs)
+    ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+    : 0;
+  const prevTotal = Number(currentTask?.total_editing_seconds ?? 0);
+  return {
+    editing_started_at: null,
+    total_editing_seconds: prevTotal + elapsed,
+    elapsedSeconds: elapsed,
+  };
+}
+
+function applyEditingTimerStopIfNeeded(updatePayload, currentTask, nextStatus) {
+  const currentStatus = typeof currentTask?.status === "string" ? currentTask.status : "";
+  const timerRunning =
+    typeof currentTask?.editing_started_at === "string" &&
+    currentTask.editing_started_at.trim().length > 0;
+  const leavingActive =
+    !isEditingLikeStatus(nextStatus) && (isEditingLikeStatus(currentStatus) || timerRunning);
+
+  if (!leavingActive) {
+    return null;
+  }
+
+  const stop = buildEditingTimerStopPayload(currentTask);
+  updatePayload.editing_started_at = stop.editing_started_at;
+  updatePayload.total_editing_seconds = stop.total_editing_seconds;
+  return stop;
+}
+
 async function resolveSelectionSyncFailure(supabase, taskId, err) {
   const validationError = isSelectionSyncValidationError(err);
   const nextStatus = validationError ? SELECTION_FAILED_STATUS : SELECTION_AVAILABLE_STATUS;
-  const actionLabel = validationError ? "mark Selection Failed" : "restore Selection Available";
+  const message = err instanceof Error ? err.message : String(err ?? "Selection sync failed.");
+  const extras = validationError
+    ? { processing_error: truncateProcessingError(`Selection sync failed: ${message}`) }
+    : {};
 
-  await withRetry(`${actionLabel} for task ${taskId}`, async () => {
-    const { error: updateError } = await supabase
-      .from("tasks")
-      .update({ status: nextStatus })
-      .eq("id", taskId);
-    if (updateError) {
-      throw new Error(updateError.message);
-    }
-  });
+  await withRetry(
+    `${validationError ? "mark Selection Failed" : "restore Selection Available"} for task ${taskId}`,
+    async () => finalizeTask(supabase, taskId, nextStatus, extras)
+  );
 
   console.warn(
     `[worker] Task ${taskId} set to ${nextStatus} after selection sync failure (${validationError ? "validation" : "transient"}).`
@@ -425,6 +509,7 @@ async function claimTaskForStatus(supabase, taskId, fromStatus, toStatus) {
   // Stamp the editing timer when the task enters the Processing (merge) phase.
   if (toStatus === ACTIVE_STATUS) {
     updatePayload.editing_started_at = new Date().toISOString();
+    updatePayload.processing_error = null;
   }
 
   const { data, error } = await withRetry(
@@ -1521,6 +1606,17 @@ async function processTaskLocally(task) {
         throw new Error(message);
       }
 
+      // Trust the API only after verifying the merged JPEG actually landed on disk.
+      if (firstFileInGroup) {
+        const expectedBaseName = mergedOutputFileName(firstFileInGroup, photoIndex + 1, totalItems);
+        const expectedOutFile = path.join(taskRoot, "3_Merged", expectedBaseName);
+        if (!fs.existsSync(expectedOutFile)) {
+          throw new Error(
+            `Merged output missing after reported success for bracket ${photoIndex + 1}: ${expectedBaseName}`
+          );
+        }
+      }
+
       processedItems += 1;
       comfyQueuedCount += Number(payload?.comfyQueuedCount) || 0;
       comfyFailedCount += Number(payload?.comfyFailedCount) || 0;
@@ -1542,6 +1638,8 @@ async function processTaskLocally(task) {
     }
   }
 
+  const mergedVerification = verifyMergedOutputsExist(taskRoot, brackets);
+
   return {
     totalItems,
     processedItems,
@@ -1551,10 +1649,11 @@ async function processTaskLocally(task) {
     comfyQueuedCount,
     comfyFailedCount,
     comfyErrors,
+    mergedVerification,
   };
 }
 
-async function finalizeTask(supabase, taskId, status) {
+async function finalizeTask(supabase, taskId, status, extras = {}) {
   // Read the current task so we can accumulate any in-progress editing timer.
   const { data: currentTask } = await supabase
     .from("tasks")
@@ -1562,25 +1661,17 @@ async function finalizeTask(supabase, taskId, status) {
     .eq("id", taskId)
     .maybeSingle();
 
-  const updatePayload = { status };
+  const updatePayload = { status, ...extras };
 
-  const currentStatus = typeof currentTask?.status === "string" ? currentTask.status.trim().toLowerCase() : "";
-  const leavingProcessing = currentStatus === ACTIVE_STATUS.toLowerCase();
-
-  if (leavingProcessing) {
-    const startedAt = typeof currentTask?.editing_started_at === "string"
-      ? currentTask.editing_started_at
-      : null;
-    const startedAtMs = startedAt ? Date.parse(startedAt) : NaN;
-    const elapsed = Number.isFinite(startedAtMs)
-      ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
-      : 0;
-    const prevTotal = Number(currentTask?.total_editing_seconds ?? 0);
-    updatePayload.editing_started_at = null;
-    updatePayload.total_editing_seconds = prevTotal + elapsed;
+  const stop = applyEditingTimerStopIfNeeded(updatePayload, currentTask, status);
+  if (stop) {
     console.info(
-      `[worker] Accumulating editing timer for task ${taskId}: elapsed=${elapsed}s, new total=${updatePayload.total_editing_seconds}s.`
+      `[worker] Accumulating editing timer for task ${taskId}: elapsed=${stop.elapsedSeconds}s, new total=${updatePayload.total_editing_seconds}s.`
     );
+  }
+
+  if (status === READY_FOR_REVIEW_STATUS && updatePayload.processing_error === undefined) {
+    updatePayload.processing_error = null;
   }
 
   const { error } = await supabase.from("tasks").update(updatePayload).eq("id", taskId);
@@ -1853,13 +1944,40 @@ async function processPendingProcessing(supabase) {
           console.error(`[worker] ${errorLine}`);
         }
       }
+
+      const mergedVerification = processingResult.mergedVerification ?? {
+        ok: false,
+        missing: ["verification-unavailable"],
+        expectedCount: processingResult.totalItems,
+        presentCount: 0,
+      };
+
       if (processingResult.failedItems > 0 || processingResult.processedItems !== processingResult.totalItems) {
-        await finalizeTask(supabase, taskId, SELECTION_AVAILABLE_STATUS);
-        console.warn(
-          `[worker] Task ${taskId} left in ${SELECTION_AVAILABLE_STATUS}; ${processingResult.failedItems} of ${processingResult.totalItems} bracket(s) failed.`
+        const failReason = truncateProcessingError(
+          `Merge failed: ${processingResult.failedItems} of ${processingResult.totalItems} bracket(s) failed` +
+            (mergedVerification.missing?.length
+              ? `; missing in 3_Merged/: ${mergedVerification.missing.join(", ")}`
+              : ".")
         );
+        console.error(`[worker] Task ${taskId} hard-fail -> ${SELECTION_FAILED_STATUS}: ${failReason}`);
+        await finalizeTask(supabase, taskId, SELECTION_FAILED_STATUS, {
+          processing_error: failReason,
+        });
         continue;
       }
+
+      if (!mergedVerification.ok) {
+        const failReason = truncateProcessingError(
+          `Merge incomplete: expected ${mergedVerification.expectedCount} file(s) in 3_Merged/, ` +
+            `found ${mergedVerification.presentCount}. Missing: ${(mergedVerification.missing || []).join(", ") || "unknown"}`
+        );
+        console.error(`[worker] Task ${taskId} hard-fail -> ${SELECTION_FAILED_STATUS}: ${failReason}`);
+        await finalizeTask(supabase, taskId, SELECTION_FAILED_STATUS, {
+          processing_error: failReason,
+        });
+        continue;
+      }
+
       const taskRoot = path.join(getShootFoldersRoot(), localFolderName);
       const expectedComfyJobs = Number(processingResult.expectedComfyJobs ?? 0);
       const queuedComfyJobs = Number(processingResult.comfyQueuedCount ?? 0);
@@ -1891,6 +2009,7 @@ async function processPendingProcessing(supabase) {
       const fullyMerged =
         processingResult.failedItems === 0 &&
         processingResult.processedItems === processingResult.totalItems &&
+        mergedVerification.ok &&
         (
           noMergeNeeded ||
           (
@@ -1902,6 +2021,22 @@ async function processPendingProcessing(supabase) {
         );
 
       if (fullyMerged) {
+        // Final gate: re-check disk before promoting to Ready for Review.
+        const finalCheck = verifyMergedOutputsExist(
+          taskRoot,
+          await buildTimestampBracketsFromDir(path.join(taskRoot, "2_Selects"))
+        );
+        if (!finalCheck.ok) {
+          const failReason = truncateProcessingError(
+            `Pre-review FS check failed: missing in 3_Merged/: ${(finalCheck.missing || []).join(", ") || "unknown"}`
+          );
+          console.error(`[worker] Task ${taskId} hard-fail -> ${SELECTION_FAILED_STATUS}: ${failReason}`);
+          await finalizeTask(supabase, taskId, SELECTION_FAILED_STATUS, {
+            processing_error: failReason,
+          });
+          continue;
+        }
+
         await uploadMergedAndFinalsForReview(supabase, localFolderName);
         await finalizeTask(supabase, taskId, READY_FOR_REVIEW_STATUS);
         console.info(`[worker] Task ${taskId} marked as ${READY_FOR_REVIEW_STATUS}.`);
@@ -1917,16 +2052,24 @@ async function processPendingProcessing(supabase) {
             ? `copied-mismatch(${Number(comfyResult.copied ?? 0)}/${expectedComfyJobs})`
             : null,
         ].filter(Boolean);
-        await finalizeTask(supabase, taskId, SELECTION_AVAILABLE_STATUS);
-        console.info(
-          `[worker] Task ${taskId} left in ${SELECTION_AVAILABLE_STATUS}; merge completion not 100% (${reasonParts.join(", ") || "unknown-reason"}).`
+        const failReason = truncateProcessingError(
+          `Merge pipeline incomplete (${reasonParts.join(", ") || "unknown-reason"}).`
         );
+        console.error(`[worker] Task ${taskId} hard-fail -> ${SELECTION_FAILED_STATUS}: ${failReason}`);
+        await finalizeTask(supabase, taskId, SELECTION_FAILED_STATUS, {
+          processing_error: failReason,
+        });
       }
     } catch (err) {
       console.error("RAW COMFY ERROR:", err);
       console.error(`[worker] Task ${taskId} failed:`, err instanceof Error ? err.message : err);
       try {
-        await finalizeTask(supabase, taskId, SELECTION_AVAILABLE_STATUS);
+        const failReason = truncateProcessingError(
+          err instanceof Error ? err.message : String(err ?? "Merge worker crashed.")
+        );
+        await finalizeTask(supabase, taskId, SELECTION_FAILED_STATUS, {
+          processing_error: failReason,
+        });
       } catch (statusErr) {
         console.error(
           `[worker] Could not set fallback status for ${taskId}:`,
@@ -2000,12 +2143,13 @@ async function recoverOrphanedWorkerTasksOnStartup(supabase) {
       if (selectedChunkIndices.length === 0) {
         continue;
       }
-      const { error } = await supabase
-        .from("tasks")
-        .update({ status: SELECTION_AVAILABLE_STATUS })
-        .eq("id", taskId);
-      if (error) {
-        console.error(`[worker] Could not recover orphaned ${SELECTION_SYNCING_STATUS} task ${taskId}:`, error.message);
+      try {
+        await finalizeTask(supabase, taskId, SELECTION_AVAILABLE_STATUS);
+      } catch (error) {
+        console.error(
+          `[worker] Could not recover orphaned ${SELECTION_SYNCING_STATUS} task ${taskId}:`,
+          error instanceof Error ? error.message : error
+        );
         continue;
       }
       console.warn(

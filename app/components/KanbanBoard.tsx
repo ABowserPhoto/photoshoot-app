@@ -68,7 +68,8 @@ export type BoardTask = {
     | "Portrait Pro"
     | "Studio Portrait"
     | "Hochzeit"
-    | "Mini Session";
+    | "Mini Session"
+    | "Event";
   shootLocation: string;
   photoshootDate: string;
   dueDate: string;
@@ -97,6 +98,8 @@ export type BoardTask = {
   linkedItemId: string | null;
   /** Full local/network path for opening the shoot in external software (e.g. Z:\Shoots\Smith). */
   localOpenPath: string;
+  /** Last merge/worker failure message (tasks.processing_error). */
+  processingError: string | null;
 };
 
 type BoardState = Record<ColumnKey, BoardTask[]>;
@@ -174,6 +177,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     invoiceEmailAddress: "",
     linkedItemId: null,
     localOpenPath: "",
+    processingError: null,
   },
   {
     id: "fallback-2",
@@ -224,6 +228,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     invoiceEmailAddress: "",
     linkedItemId: null,
     localOpenPath: "",
+    processingError: null,
   },
 ];
 
@@ -274,6 +279,7 @@ type DbTask = {
   invoice_email_address?: string | null;
   linked_item_id?: string | null;
   local_open_path?: string | null;
+  processing_error?: string | null;
 };
 
 const COLUMN_LABEL_BY_KEY: Record<ColumnKey, string> = {
@@ -634,7 +640,9 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
                     ? "Hochzeit"
                     : row.photoshoot_type === "Mini Session"
                       ? "Mini Session"
-                      : (existing?.photoshootType ?? "Immobilien"),
+                      : row.photoshoot_type === "Event"
+                        ? "Event"
+                        : (existing?.photoshootType ?? "Immobilien"),
     shootLocation: typeof row.shoot_location === "string" ? row.shoot_location : (existing?.shootLocation ?? ""),
     photoshootDate,
     dueDate,
@@ -720,6 +728,12 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
           : (existing?.linkedItemId ?? null),
     localOpenPath:
       typeof row.local_open_path === "string" ? row.local_open_path : (existing?.localOpenPath ?? ""),
+    processingError:
+      typeof row.processing_error === "string"
+        ? row.processing_error
+        : row.processing_error === null
+          ? null
+          : (existing?.processingError ?? null),
   };
 }
 
@@ -2047,6 +2061,25 @@ export default function KanbanBoard({
                           <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                             {task.formattedPhotoshootDate || "No date"}
                           </p>
+                          {column.id === "selection-available" &&
+                          (task.workflowStatus.trim().toLowerCase() === "selection failed" ||
+                            Boolean(task.processingError?.trim())) ? (
+                            <p
+                              className="mt-2 rounded-md border border-red-300/80 bg-red-50 px-2 py-1.5 text-xs font-medium text-red-800 dark:border-red-800/60 dark:bg-red-950/40 dark:text-red-200"
+                              title={task.processingError ?? "Merge failed"}
+                            >
+                              {task.workflowStatus.trim().toLowerCase() === "selection failed"
+                                ? "Merge failed"
+                                : "Processing error"}
+                              {task.processingError?.trim()
+                                ? `: ${
+                                    task.processingError.length > 160
+                                      ? `${task.processingError.slice(0, 159)}…`
+                                      : task.processingError
+                                  }`
+                                : " — retry with Merge Now after fixing the issue."}
+                            </p>
+                          ) : null}
                           {task.linkedItemId ? (() => {
                             const linkedTask = COLUMN_CONFIG.flatMap((col) => board[col.id]).find((t) => t.id === task.linkedItemId);
                             return (

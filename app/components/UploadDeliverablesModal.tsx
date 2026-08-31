@@ -276,12 +276,31 @@ export default function UploadDeliverablesModal({
         .filter((item) => socialKeys.has(item.key) && item.isImage)
         .map((item) => item.file);
 
-      // Route A first (unchanged Drive + email finalize path).
-      await onUploadToDrive(files);
+      const failures: string[] = [];
 
-      // Route B — selected social images only (optional).
+      // Social first: small selected set uploads direct to Supabase Storage.
+      // Do not gate this on Drive/finalize — Immobilien deliverable batches often exceed
+      // the /api/upload body limit and abort with "Failed to fetch" before social runs.
       if (socialFiles.length > 0) {
-        await onScheduleSocials(socialFiles);
+        try {
+          await onScheduleSocials(socialFiles);
+        } catch (err) {
+          failures.push(
+            `Social scheduler: ${err instanceof Error ? err.message : "Upload failed."}`
+          );
+        }
+      }
+
+      try {
+        await onUploadToDrive(files);
+      } catch (err) {
+        failures.push(
+          `Drive / finalize: ${err instanceof Error ? err.message : "Upload failed."}`
+        );
+      }
+
+      if (failures.length > 0) {
+        throw new Error(failures.join("\n"));
       }
 
       onComplete();

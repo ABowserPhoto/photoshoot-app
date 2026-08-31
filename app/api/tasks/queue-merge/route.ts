@@ -12,6 +12,7 @@ export const dynamic = "force-dynamic";
 
 const MERGEABLE_STATUSES = new Set([
   "Selection Available",
+  "Selection Failed",
   "pending_processing",
   "syncing_selection",
   "Processing",
@@ -135,11 +136,12 @@ export async function POST(request: Request) {
   } else if (status === "syncing_selection") {
     updates.status = hasSelects ? "pending_processing" : "Selection Available";
     nextStatus = updates.status as string;
-  } else if (status === "Selection Available" && hasSelects) {
+  } else if ((status === "Selection Available" || status === "Selection Failed") && hasSelects) {
     updates.status = "pending_processing";
+    updates.processing_error = null;
     nextStatus = "pending_processing";
-  } else if (status === "Selection Available") {
-    nextStatus = "Selection Available";
+  } else if (status === "Selection Available" || status === "Selection Failed") {
+    nextStatus = status;
   }
 
   const { error: updateError } = await supabase.from("tasks").update(updates).eq("id", taskId);
