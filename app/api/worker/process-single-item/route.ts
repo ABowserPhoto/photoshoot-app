@@ -12,6 +12,8 @@ type ProcessSingleItemBody = {
   taskId?: string;
   local_folder_name?: string;
   bracketIndex?: number;
+  bracket_size?: number;
+  forceRemerge?: boolean;
 };
 
 type SingleItemProcessingSummary = {
@@ -97,7 +99,13 @@ export async function POST(request: Request) {
   try {
     const { startProcessingSingleItem } = await import("@/app/services/processingEngine");
     const shootFolderPath = path.join(PHOTOS_ROOT, localFolderName);
-    const summary = await startProcessingSingleItem(taskId, shootFolderPath, bracketIndex);
+    const summary = await startProcessingSingleItem(taskId, shootFolderPath, bracketIndex, {
+      taskBracketSize:
+        typeof body.bracket_size === "number" && Number.isFinite(body.bracket_size)
+          ? body.bracket_size
+          : null,
+      forceRemerge: body.forceRemerge === true,
+    });
     return buildResponse(summary, { taskId, localFolderName });
   } catch (error) {
     const message = toErrorMessage(error, "Unexpected single-item processing failure.");

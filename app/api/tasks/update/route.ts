@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { attachClientIdToTaskPayload } from "@/lib/resolveTaskClientId";
 import { getAuthRole } from "@/lib/server/getAuthRole";
+import { normalizeBracketSize, parseBracketSizeForDb } from "@/lib/bracketSize";
 
 export const dynamic = "force-dynamic";
 
@@ -90,6 +91,20 @@ export async function POST(request: Request) {
   const generateGalleryRaw = updateRow.generate_gallery;
   if (generateGalleryRaw !== undefined) {
     updateRow.generate_gallery = toBool(generateGalleryRaw, true);
+  }
+
+  if (updateRow.bracket_size !== undefined) {
+    const photoshootType =
+      typeof updateRow.photoshoot_type === "string" ? updateRow.photoshoot_type : undefined;
+    const parsed = parseBracketSizeForDb(updateRow.bracket_size, {
+      photoshootType,
+      fallback: 5,
+    });
+    if (parsed == null) {
+      updateRow.bracket_size = null;
+    } else {
+      updateRow.bracket_size = normalizeBracketSize(parsed, 5);
+    }
   }
 
   updateRow.updated_at = new Date().toISOString();

@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { BracketSize } from "@/lib/bracketSize";
+import { normalizeBracketSize } from "@/lib/bracketSize";
 import type { BoardTask } from "./KanbanBoard";
 
 export type MergePromptModalProps = {
@@ -8,7 +10,7 @@ export type MergePromptModalProps = {
   isOpen: boolean;
   onDismiss: () => void;
   onSkip: () => void | Promise<void>;
-  onMerge: (bracketSize: 3 | 5) => void | Promise<void>;
+  onMerge: (bracketSize: BracketSize) => void | Promise<void>;
   isProcessing?: boolean;
   errorMessage?: string | null;
 };
@@ -22,11 +24,11 @@ export default function MergePromptModal({
   isProcessing = false,
   errorMessage = null,
 }: MergePromptModalProps) {
-  const [bracketSize, setBracketSize] = useState<3 | 5>(3);
+  const [bracketSize, setBracketSize] = useState<BracketSize>(5);
 
   useEffect(() => {
     if (task && isOpen) {
-      setBracketSize(task.bracketSize === 5 ? 5 : 3);
+      setBracketSize(normalizeBracketSize(task.bracketSize, 5));
     }
   }, [task, isOpen]);
 
@@ -68,12 +70,13 @@ export default function MergePromptModal({
             value={bracketSize}
             disabled={isProcessing}
             onChange={(event) =>
-              setBracketSize(Number(event.target.value) === 5 ? 5 : 3)
+              setBracketSize(normalizeBracketSize(Number(event.target.value), 5))
             }
             className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
           >
             <option value={3}>3 exposures</option>
             <option value={5}>5 exposures</option>
+            <option value={7}>7 exposures</option>
           </select>
         </label>
 

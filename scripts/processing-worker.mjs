@@ -149,6 +149,11 @@ const COMFY_OUTPUT_DIR =
   process.env.COMFYUI_OUTPUT_DIR?.trim() ||
   "F:\\ComfyUI_windows_portable_nvidia\\ComfyUI_windows_portable\\ComfyUI\\output";
 const COMFY_WAIT_TIMEOUT_MS = readPositiveIntEnv("COMFY_WAIT_TIMEOUT_MS", 90 * 60 * 1000);
+/** Ceiling for the whole EXIF/grouping stage so the pipeline lock is always released. */
+const BRACKET_GROUPING_TIMEOUT_MS = readPositiveIntEnv(
+  "BRACKET_GROUPING_TIMEOUT_MS",
+  10 * 60 * 1000
+);
 
 const previewSyncTimers = new Map();
 const previewSyncInFlight = new Set();
@@ -390,6 +395,26 @@ async function withRetry(label, fn, attempts = RETRY_ATTEMPTS) {
     }
   }
   throw lastError instanceof Error ? lastError : new Error(`${label} failed after ${attempts} attempts.`);
+}
+
+/**
+ * Race a promise against a wall-clock deadline. Used for stages that must never
+ * hang the merge pipeline (the underlying work may continue in the background).
+ */
+function withHardTimeout(promise, timeoutMs, label) {
+  let timer = null;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+      timeoutMs
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  });
 }
 
 async function withPreviewRetry(label, fn, attempts = PREVIEW_RETRY_ATTEMPTS) {
@@ -656,7 +681,8 @@ async function previewObjectExistsInStorage(supabase, storagePath) {
   if (error) {
     return false;
   }
-  return (data ?? []).some((entry) => entry.name === fileName);
+  const wanted = lookupBasename(fileName);
+  return (data ?? []).some((entry) => lookupBasename(entry.name) === wanted);
 }
 
 function readNaturallySortedImageFiles(dir) {
@@ -670,6 +696,45 @@ function readNaturallySortedImageFiles(dir) {
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
 }
 
+function normalizeLookupPath(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .toLowerCase();
+}
+
+function lookupBasename(value) {
+  const normalized = normalizeLookupPath(value).replace(/\/+$/, "");
+  const slash = normalized.lastIndexOf("/");
+  return slash >= 0 ? normalized.slice(slash + 1) : normalized;
+}
+
+function logWorkerSkip(filename, reason) {
+  console.log(`[Worker Skip] Skipping ${filename}: Reason = ${reason}`);
+}
+
+function buildDirBasenameLookup(dir) {
+  const map = new Map();
+  if (!fs.existsSync(dir)) {
+    return map;
+  }
+  for (const name of fs.readdirSync(dir)) {
+    const key = lookupBasename(name);
+    if (key) {
+      map.set(key, name);
+    }
+  }
+  return map;
+}
+
+function resolveNameInLookup(lookup, wanted) {
+  const key = lookupBasename(wanted);
+  if (!key) {
+    return null;
+  }
+  return lookup.get(key) ?? null;
+}
+
 function parseSelectionPayload(raw) {
   const payload = raw && typeof raw === "object" ? raw : {};
   const selectedChunkIndices = Array.from(
@@ -679,7 +744,11 @@ function parseSelectionPayload(raw) {
         .filter((value) => Number.isInteger(value) && value >= 0)
     )
   ).sort((a, b) => a - b);
-  return { selectedChunkIndices };
+  const selectedFiles = (Array.isArray(payload.selected_files) ? payload.selected_files : [])
+    .filter((value) => typeof value === "string" && value.trim())
+    .map((value) => value.trim());
+  const forceRemerge = payload.force_remerge === true || payload.forceRemerge === true;
+  return { selectedChunkIndices, selectedFiles, forceRemerge };
 }
 
 function parsePreviewItems(raw) {
@@ -790,14 +859,14 @@ async function uploadPreviewBuffer(supabase, params) {
   return { storagePath, previewUrl: getPreviewPublicUrl(supabase, storagePath) };
 }
 
-async function persistGalleryPreviews(supabase, taskId, chunks, nextItems) {
+async function persistGalleryPreviews(supabase, taskId, chunks, nextItems, bracketSize) {
   await withPreviewRetry(`persist gallery_previews for task ${taskId}`, async () => {
     const { error } = await supabase
       .from("tasks")
       .update({
         gallery_previews: {
           updated_at: new Date().toISOString(),
-          bracket_size: chunks[0]?.length ?? null,
+          bracket_size: bracketSize ?? chunks[0]?.length ?? null,
           items: nextItems,
         },
       })
@@ -898,7 +967,9 @@ async function syncTaskPreviews(supabase, taskRow) {
     return;
   }
 
-  const chunks = await buildTimestampBracketsFromDir(rawDir);
+  const chunks = await buildTimestampBracketsFromDir(rawDir, {
+    taskBracketSize: taskRow.bracket_size ?? null,
+  });
   const previewPreference = normalizePreviewPreference(taskRow.preview_preference);
   const forceGalleryPreviewDbSync = galleryPreviewsNeedsDbSync(taskRow.gallery_previews);
   const { selectedChunkIndices } = parseSelectionPayload(taskRow.gallery_selection);
@@ -917,18 +988,35 @@ async function syncTaskPreviews(supabase, taskRow) {
     );
   });
 
+  const existingPreviewItems = parsePreviewItems(taskRow.gallery_previews);
+
   for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+    const chunk = chunks[chunkIndex];
     if (selectedChunkSet.has(chunkIndex)) {
-      // Keep historical selection in gallery_selection, but never regenerate selected previews.
+      // Keep historical selection, but do not regenerate selected previews.
+      // Still persist the existing preview row so gallery_previews is not wiped.
+      const existing = existingPreviewItems.find((item) => item.chunkIndex === chunkIndex);
+      const skippedName =
+        existing?.firstFilename ||
+        resolvePreviewSourceFilename(chunk, previewPreference) ||
+        chunk?.[0] ||
+        `chunk-${chunkIndex}`;
+      logWorkerSkip(
+        skippedName,
+        `already selected (preview regen skipped, chunk ${chunkIndex}; does not skip merge)`
+      );
+      if (existing?.previewUrl) {
+        nextItems.push(existing);
+      }
       selectedSkippedCount += 1;
       continue;
     }
 
-    const chunk = chunks[chunkIndex];
     const firstFilename = resolvePreviewSourceFilename(chunk, previewPreference);
     if (!firstFilename) {
-      console.warn(
-        `[worker] Skipping chunk ${chunkIndex}: no valid source file for preview_preference="${previewPreference}".`
+      logWorkerSkip(
+        `chunk-${chunkIndex}`,
+        `no valid source file for preview_preference="${previewPreference}"`
       );
       skippedCount += 1;
       continue;
@@ -938,12 +1026,11 @@ async function syncTaskPreviews(supabase, taskRow) {
 
     try {
       if (!forceGalleryPreviewDbSync) {
-        const existingItems = parsePreviewItems(taskRow.gallery_previews);
-        const existing = existingItems.find((item) => item.chunkIndex === chunkIndex);
+        const existing = existingPreviewItems.find((item) => item.chunkIndex === chunkIndex);
         if (
           existing &&
-          existing.firstFilename === firstFilename &&
-          existing.storagePath === storagePath &&
+          lookupBasename(existing.firstFilename) === lookupBasename(firstFilename) &&
+          normalizeLookupPath(existing.storagePath) === normalizeLookupPath(storagePath) &&
           existing.previewUrl
         ) {
           const previewUrl = getPreviewPublicUrl(supabase, storagePath) || existing.previewUrl;
@@ -996,10 +1083,9 @@ async function syncTaskPreviews(supabase, taskRow) {
       processedCount += 1;
     } catch (error) {
       failedCount += 1;
-      console.warn(
-        "[worker] Skipping file due to error:",
+      logWorkerSkip(
         firstFilename,
-        error instanceof Error ? error.message : error
+        `preview render/upload error: ${error instanceof Error ? error.message : error}`
       );
     }
   }
@@ -1014,15 +1100,37 @@ async function syncTaskPreviews(supabase, taskRow) {
     return;
   }
 
-  await persistGalleryPreviews(supabase, taskRow.id, chunks, nextItems);
+  await persistGalleryPreviews(
+    supabase,
+    taskRow.id,
+    chunks,
+    nextItems,
+    taskRow.bracket_size ?? null
+  ).catch((error) => {
+    console.warn(
+      `[worker] gallery_previews persist failed for task ${taskRow.id} (folder ${localFolderName}); merge pipeline unaffected:`,
+      error instanceof Error ? error.message : error
+    );
+  });
   console.info(
-    `[worker] Folder [${localFolderName}] complete. Processed: ${processedCount} | Skipped: ${skippedCount} | SelectedSkipped: ${selectedSkippedCount} | Failed: ${failedCount} | ReusedFromStorage: ${reusedFromStorageCount} | DbItems: ${nextItems.length}`
+    `[worker] Preview sync [${localFolderName}] complete. Processed: ${processedCount} | Skipped: ${skippedCount} | SelectedSkipped: ${selectedSkippedCount} (preview regen only, merge still runs) | Failed: ${failedCount} | ReusedFromStorage: ${reusedFromStorageCount} | DbItems: ${nextItems.length}`
   );
 }
 
 async function syncPreviewsForLocalFolder(localFolderName) {
   if (previewSyncInFlight.has(localFolderName)) {
     previewSyncPending.add(localFolderName);
+    return;
+  }
+
+  // Bracket grouping is in-memory now, but preview sync still shells out to
+  // exiftool once per RAW to extract the embedded JPEG. Running that alongside
+  // a merge competes for CPU and disk, so defer and let the periodic fallback
+  // sync pick this folder up once the merge finishes.
+  if (isMergePipelineBusy()) {
+    console.info(
+      `[worker] Deferring preview sync for ${localFolderName}: merge pipeline is busy.`
+    );
     return;
   }
 
@@ -1034,7 +1142,7 @@ async function syncPreviewsForLocalFolder(localFolderName) {
       const supabase = getSupabaseClient();
       const { data, error } = await supabase
         .from("tasks")
-        .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference, photoshoot_type, generate_gallery")
+        .select("id, local_folder_name, gallery_selection, gallery_previews, cover_image_url, preview_preference, photoshoot_type, generate_gallery, bracket_size")
         .eq("local_folder_name", localFolderName)
         .order("id", { ascending: false })
         .limit(1)
@@ -1046,7 +1154,14 @@ async function syncPreviewsForLocalFolder(localFolderName) {
       if (!data) {
         return;
       }
-      await syncTaskPreviews(supabase, data);
+      try {
+        await syncTaskPreviews(supabase, data);
+      } catch (error) {
+        console.warn(
+          `[worker] Preview sync failed for folder ${localFolderName}; merge pipeline unaffected:`,
+          error instanceof Error ? error.message : error
+        );
+      }
     } while (previewSyncPending.has(localFolderName));
   } finally {
     previewSyncInFlight.delete(localFolderName);
@@ -1097,7 +1212,12 @@ async function processInitialPreviewSync(supabase) {
 
   let processed = 0;
   let failed = 0;
+  let deferred = 0;
   for (const localFolderName of folderNames) {
+    if (isMergePipelineBusy()) {
+      deferred += 1;
+      continue;
+    }
     try {
       await syncPreviewsForLocalFolder(localFolderName);
       processed += 1;
@@ -1111,7 +1231,7 @@ async function processInitialPreviewSync(supabase) {
   }
 
   console.info(
-    `[worker] Initial full preview sync finished. folders=${folderNames.size}, processed=${processed}, skipped=${skipped}, failed=${failed}`
+    `[worker] Initial full preview sync finished. folders=${folderNames.size}, processed=${processed}, skipped=${skipped}, deferred=${deferred}, failed=${failed}`
   );
 }
 
@@ -1438,9 +1558,9 @@ function startSelectsFolderWatcher() {
   );
 }
 
-async function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) {
-  const { selectedChunkIndices } = parseSelectionPayload(gallerySelection);
-  if (selectedChunkIndices.length === 0) {
+async function syncSelectedRawFilesToSelects(localFolderName, gallerySelection, taskBracketSize) {
+  const { selectedChunkIndices, selectedFiles, forceRemerge } = parseSelectionPayload(gallerySelection);
+  if (selectedChunkIndices.length === 0 && selectedFiles.length === 0) {
     throw new Error("No selected_chunk_indices in gallery_selection.");
   }
 
@@ -1449,26 +1569,83 @@ async function syncSelectedRawFilesToSelects(localFolderName, gallerySelection) 
   const selectsDir = path.join(base, "2_Selects");
   fs.mkdirSync(selectsDir, { recursive: true });
 
-  const chunks = await buildTimestampBracketsFromDir(rawDir);
+  const chunks = await buildTimestampBracketsFromDir(rawDir, { taskBracketSize });
+  const rawLookup = buildDirBasenameLookup(rawDir);
   const copiedFiles = [];
+  const copiedKeys = new Set();
+
+  const copyResolvedFile = (diskName, reasonLabel) => {
+    const sourcePath = path.join(rawDir, diskName);
+    const targetPath = path.join(selectsDir, diskName);
+    if (!fs.existsSync(sourcePath)) {
+      logWorkerSkip(diskName, `selected source missing on disk (${reasonLabel}): ${sourcePath}`);
+      return;
+    }
+    if (fs.existsSync(targetPath) && !forceRemerge) {
+      console.log(
+        `[worker] 2_Selects already has ${diskName}; keeping existing copy (set force_remerge to overwrite).`
+      );
+    } else {
+      fs.copyFileSync(sourcePath, targetPath);
+    }
+    const key = lookupBasename(diskName);
+    if (!copiedKeys.has(key)) {
+      copiedKeys.add(key);
+      copiedFiles.push(diskName);
+    }
+  };
+
+  const copyChunkFiles = (chunk, chunkIndex) => {
+    for (const fileName of chunk) {
+      const diskName = resolveNameInLookup(rawLookup, fileName);
+      if (!diskName) {
+        logWorkerSkip(
+          fileName,
+          `not found in 1_Raw after path/case normalization (chunk ${chunkIndex})`
+        );
+        continue;
+      }
+      copyResolvedFile(diskName, `chunk ${chunkIndex}`);
+    }
+  };
+
+  const selectedFileLookup = new Map();
+  for (const wanted of selectedFiles) {
+    const diskName = resolveNameInLookup(rawLookup, wanted);
+    if (diskName) {
+      selectedFileLookup.set(lookupBasename(wanted), diskName);
+    }
+  }
 
   for (const chunkIndex of selectedChunkIndices) {
     const chunk = chunks[chunkIndex];
-    if (!chunk) {
-      console.warn(`[worker] Selection chunk ${chunkIndex} not found for folder ${localFolderName}.`);
+    if (chunk?.length) {
+      copyChunkFiles(chunk, chunkIndex);
       continue;
     }
-    for (const fileName of chunk) {
-      const sourcePath = path.join(rawDir, fileName);
-      const targetPath = path.join(selectsDir, fileName);
-      if (!fs.existsSync(sourcePath)) {
-        console.warn(`[worker] Selected source file missing: ${sourcePath}`);
-        continue;
-      }
-      if (!fs.existsSync(targetPath)) {
-        fs.copyFileSync(sourcePath, targetPath);
-      }
-      copiedFiles.push(fileName);
+    logWorkerSkip(
+      `chunk-${chunkIndex}`,
+      `selected chunk index not found in current 1_Raw grouping (${chunks.length} chunk(s))`
+    );
+  }
+
+  // Copy any payload filenames that were not already included via chunk indices.
+  for (const wanted of selectedFiles) {
+    const diskName = selectedFileLookup.get(lookupBasename(wanted));
+    if (!diskName) {
+      logWorkerSkip(wanted, "selected_files entry not found in 1_Raw (path/case mismatch)");
+      continue;
+    }
+    if (copiedKeys.has(lookupBasename(diskName))) {
+      continue;
+    }
+    const matchingChunk = chunks.find((group) =>
+      group.some((name) => lookupBasename(name) === lookupBasename(diskName))
+    );
+    if (matchingChunk) {
+      copyChunkFiles(matchingChunk, "selected_files");
+    } else {
+      copyResolvedFile(diskName, "selected_files");
     }
   }
 
@@ -1535,12 +1712,37 @@ async function processTaskLocally(task) {
   const localOrigin = process.env.LOCAL_APP_ORIGIN?.trim() || "http://127.0.0.1:3000";
   const workerSecret = requiredEnv("LOCAL_WORKER_SECRET");
   const url = `${localOrigin.replace(/\/$/, "")}/api/worker/process-single-item`;
+  const forceRemerge = task.forceRemerge === true;
   console.info(
-    `[worker] Calling local process-single-item endpoint: ${url} (timeout ${LOCAL_PROCESS_TIMEOUT_MS_EFFECTIVE}ms)`
+    `[worker] Calling local process-single-item endpoint: ${url} (timeout ${LOCAL_PROCESS_TIMEOUT_MS_EFFECTIVE}ms, forceRemerge=${forceRemerge})`
   );
   const taskRoot = path.join(getShootFoldersRoot(), String(task.local_folder_name ?? "").trim());
   const selectsDir = path.join(taskRoot, "2_Selects");
-  const brackets = await buildTimestampBracketsFromDir(selectsDir);
+  const taskBracketSize = task.bracket_size ?? null;
+  console.info(
+    `[worker] Grouping ${selectsDir} into brackets (taskBracketSize=${taskBracketSize ?? "auto"})...`
+  );
+
+  let brackets;
+  const groupingStartedAtMs = Date.now();
+  try {
+    brackets = await withHardTimeout(
+      buildTimestampBracketsFromDir(selectsDir, { taskBracketSize }),
+      BRACKET_GROUPING_TIMEOUT_MS,
+      `bracket grouping for ${selectsDir}`
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[worker] Bracket grouping failed for task ${task.id} after ${Date.now() - groupingStartedAtMs}ms: ${message}`
+    );
+    throw new Error(`Bracket grouping failed for task ${task.id}: ${message}`);
+  } finally {
+    console.info(
+      `[worker] Bracket grouping stage finished for task ${task.id} in ${Date.now() - groupingStartedAtMs}ms.`
+    );
+  }
+
   const totalItems = brackets.length;
   const processingStartedAtMs = Date.now();
 
@@ -1561,12 +1763,18 @@ async function processTaskLocally(task) {
     if (firstFileInGroup) {
       const expectedBaseName = mergedOutputFileName(firstFileInGroup, photoIndex + 1, totalItems);
       const expectedOutFile = path.join(taskRoot, "3_Merged", expectedBaseName);
-      if (fs.existsSync(expectedOutFile)) {
-        console.info(
-          `[worker] Task ${task.id}: photo ${photoIndex + 1} of ${totalItems} already merged (${expectedBaseName}). Skipping.`
+      if (fs.existsSync(expectedOutFile) && !forceRemerge) {
+        logWorkerSkip(
+          expectedBaseName,
+          `output already exists in 3_Merged (resume cache). Re-queue merge to overwrite.`
         );
         processedItems += 1;
         continue;
+      }
+      if (fs.existsSync(expectedOutFile) && forceRemerge) {
+        console.log(
+          `[worker] forceRemerge: overwriting existing 3_Merged output ${expectedBaseName}`
+        );
       }
     }
     // ── End resume check ──────────────────────────────────────────────────────
@@ -1585,6 +1793,8 @@ async function processTaskLocally(task) {
             taskId: String(task.id),
             local_folder_name: task.local_folder_name,
             bracketIndex: photoIndex,
+            bracket_size: taskBracketSize,
+            forceRemerge,
           }),
         },
         LOCAL_PROCESS_TIMEOUT_MS_EFFECTIVE
@@ -1632,7 +1842,8 @@ async function processTaskLocally(task) {
         err,
         `[worker] process-single-item request failed for task ${task.id} bracket ${photoIndex}`
       );
-      console.error(message, err);
+      const cause = err instanceof Error && err.cause instanceof Error ? err.cause : err;
+      console.error(message, cause ?? err);
       // Continue with next bracket/photo set even when this one fails.
       continue;
     }
@@ -1901,7 +2112,7 @@ async function processAwaitingFolderCreation(supabase) {
 async function processPendingProcessing(supabase) {
   const { data, error } = await supabase
     .from("tasks")
-    .select("id, local_folder_name, status, gallery_selection")
+    .select("id, local_folder_name, status, gallery_selection, bracket_size")
     .eq("status", CLAIM_STATUS)
     .order("id", { ascending: true })
     .limit(20);
@@ -1935,7 +2146,12 @@ async function processPendingProcessing(supabase) {
 
       console.info(`[worker] Processing task ${taskId}...`);
       setActiveMergeContext(taskId, localFolderName, "merge");
-      const processingResult = await processTaskLocally({ id: taskId, local_folder_name: localFolderName });
+      const processingResult = await processTaskLocally({
+        id: taskId,
+        local_folder_name: localFolderName,
+        bracket_size: task.bracket_size ?? null,
+        forceRemerge: parseSelectionPayload(task.gallery_selection).forceRemerge,
+      });
       console.info(
         `[worker] Local Comfy trigger summary for task ${taskId}: queued=${processingResult.comfyQueuedCount}, failed=${processingResult.comfyFailedCount}, processed=${processingResult.processedItems}/${processingResult.totalItems}, failedItems=${processingResult.failedItems}`
       );
@@ -2024,7 +2240,9 @@ async function processPendingProcessing(supabase) {
         // Final gate: re-check disk before promoting to Ready for Review.
         const finalCheck = verifyMergedOutputsExist(
           taskRoot,
-          await buildTimestampBracketsFromDir(path.join(taskRoot, "2_Selects"))
+          await buildTimestampBracketsFromDir(path.join(taskRoot, "2_Selects"), {
+            taskBracketSize: task.bracket_size ?? null,
+          })
         );
         if (!finalCheck.ok) {
           const failReason = truncateProcessingError(
@@ -2202,7 +2420,7 @@ async function processSelectionAvailable(supabase) {
 
   const { data, error } = await supabase
     .from("tasks")
-    .select("id, local_folder_name, gallery_selection, status, photoshoot_type")
+    .select("id, local_folder_name, gallery_selection, status, photoshoot_type, bracket_size")
     .eq("status", SELECTION_AVAILABLE_STATUS)
     .order("id", { ascending: true })
     .limit(20);
@@ -2246,7 +2464,11 @@ async function processSelectionAvailable(supabase) {
     setActiveMergeContext(taskId, localFolderName, "selection-sync");
 
     try {
-      const syncResult = await syncSelectedRawFilesToSelects(localFolderName, task.gallery_selection);
+      const syncResult = await syncSelectedRawFilesToSelects(
+        localFolderName,
+        task.gallery_selection,
+        task.bracket_size ?? null
+      );
       const nextGallerySelection = {
         ...getGallerySelectionObject(task.gallery_selection),
         synced_at: new Date().toISOString(),
@@ -2335,7 +2557,8 @@ async function main() {
     `[worker] Merge timeouts: single_item_ms=${LOCAL_PROCESS_TIMEOUT_MS_EFFECTIVE}, priority_poll_ms=${PRIORITY_POLL_INTERVAL_MS}`
   );
   await logExiftoolStartupStatus();
-  await processInitialPreviewSync(getSupabaseClient()).catch((err) => {
+  console.info("[worker] Starting initial preview sync in background (does not block merge pipeline).");
+  void processInitialPreviewSync(getSupabaseClient()).catch((err) => {
     console.error("[worker] Initial full preview sync failed:", err instanceof Error ? err.message : err);
   });
   startRawFolderWatcher();

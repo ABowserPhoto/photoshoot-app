@@ -18,6 +18,12 @@ import { updateTaskStatus } from "@/app/actions/tasks";
 import { supabase } from "@/lib/supabaseClient";
 import { buildFinalizeShootPayload } from "@/lib/finalizeShootPayload";
 import { uploadSocialDeliverableFiles } from "@/lib/socialDeliverableUpload";
+import {
+  type BracketSize,
+  isImmobilienPhotoshootType,
+  normalizeBracketSize,
+  parseBracketSizeForDb,
+} from "@/lib/bracketSize";
 
 type AmountType = "Net" | "Gross";
 type PhotoshootType =
@@ -170,6 +176,7 @@ type TaskSupabasePayload = {
   credit_note_file_url: string | null;
   linked_item_id: string | null;
   local_open_path: string | null;
+  bracket_size?: number | null;
 };
 
 const selectStyles = {
@@ -327,6 +334,7 @@ function HomeContent() {
   const [taxPercentage, setTaxPercentage] = useState(19);
   const [amountType, setAmountType] = useState<AmountType>("Net");
   const [photoshootType, setPhotoshootType] = useState<PhotoshootType>("Immobilien");
+  const [bracketSize, setBracketSize] = useState<BracketSize>(5);
   const [generateGallery, setGenerateGallery] = useState(true);
   const [shootLocation, setShootLocation] = useState("");
   const [photoshootDate, setPhotoshootDate] = useState("");
@@ -860,6 +868,7 @@ function HomeContent() {
     setTaxPercentage(19);
     setAmountType("Net");
     setPhotoshootType("Immobilien");
+    setBracketSize(5);
     setGenerateGallery(true);
     setShootLocation("");
     setPhotoshootDate("");
@@ -954,6 +963,7 @@ function HomeContent() {
     setTaxPercentage(task.taxPercentage);
     setAmountType(task.amountType);
     setPhotoshootType(task.photoshootType);
+    setBracketSize(normalizeBracketSize(task.bracketSize, 5));
     setGenerateGallery(task.generateGallery ?? true);
     setShootLocation(task.shootLocation);
     setPhotoshootDate(task.photoshootDate);
@@ -1387,6 +1397,9 @@ function HomeContent() {
       credit_note_file_url: isCreditNote ? creditNoteFileUrl || null : null,
       linked_item_id: linkedItemId ?? null,
       local_open_path: localOpenPath.trim() || null,
+      ...(isImmobilienPhotoshootType(photoshootType)
+        ? { bracket_size: parseBracketSizeForDb(bracketSize, { photoshootType, fallback: 5 }) }
+        : { bracket_size: null }),
     };
 
     if (editingTaskId) {
@@ -1408,7 +1421,7 @@ function HomeContent() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ ...payload, bracket_size: 3 }),
+        body: JSON.stringify({ ...payload, bracket_size: payload.bracket_size ?? 5 }),
       });
       setIsSubmitting(false);
 
@@ -2238,6 +2251,25 @@ function HomeContent() {
                         <option value="Event">Event</option>
                       </select>
                     </label>
+                    {isImmobilienPhotoshootType(photoshootType) ? (
+                      <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Bracket Size
+                        <select
+                          value={bracketSize}
+                          onChange={(event) =>
+                            setBracketSize(normalizeBracketSize(Number(event.target.value), 5))
+                          }
+                          className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        >
+                          <option value={3}>3 exposures per bracket</option>
+                          <option value={5}>5 exposures per bracket</option>
+                          <option value={7}>7 exposures per bracket</option>
+                        </select>
+                        <span className="mt-1 block text-[11px] font-normal text-zinc-500">
+                          Used by the merge worker to cap timestamp grouping and prevent mega-brackets.
+                        </span>
+                      </label>
+                    ) : null}
                     <label className="sm:col-span-2 inline-flex items-start gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
                       <input
                         type="checkbox"

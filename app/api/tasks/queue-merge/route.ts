@@ -68,9 +68,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let body: { taskId?: string };
+  let body: { taskId?: string; forceRemerge?: boolean };
   try {
-    body = (await request.json()) as { taskId?: string };
+    body = (await request.json()) as { taskId?: string; forceRemerge?: boolean };
   } catch {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
@@ -122,6 +122,8 @@ export async function POST(request: Request) {
     ...existingSelection,
     merge_priority_at: new Date().toISOString(),
     merge_priority_by: "manual",
+    // Explicit Kanban "Merge Now" always overwrites existing 3_Merged outputs.
+    force_remerge: body.forceRemerge !== false,
   };
 
   const updates: Record<string, unknown> = {

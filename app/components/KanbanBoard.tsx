@@ -19,6 +19,8 @@ import {
 } from "@/lib/finalizeShootPayload";
 import MergePromptModal from "./MergePromptModal";
 import ReviewMergedModal from "./ReviewMergedModal";
+import type { BracketSize } from "@/lib/bracketSize";
+import { normalizeBracketSize } from "@/lib/bracketSize";
 
 type ColumnKey =
   | "awaiting-folders"
@@ -36,7 +38,7 @@ export type BoardTask = {
   /** Mirrors Google Calendar event title when synced (stored as `tasks.title`). */
   taskTitle: string;
   localFolderName: string;
-  bracketSize: 3 | 5;
+  bracketSize: BracketSize;
   previewPreference: "first" | "middle" | "last";
   companyName: string;
   lexofficeContactId: string;
@@ -574,8 +576,8 @@ function normalizePreviewPreference(value: unknown): "first" | "middle" | "last"
 }
 
 function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): BoardTask {
-  const bracketRaw = Number(row.bracket_size ?? existing?.bracketSize ?? 3);
-  const bracketSize: 3 | 5 = bracketRaw === 5 ? 5 : 3;
+  const bracketRaw = Number(row.bracket_size ?? existing?.bracketSize ?? 5);
+  const bracketSize = normalizeBracketSize(bracketRaw, 5);
   const photoshootDate = typeof row.photoshoot_date === "string" ? row.photoshoot_date : (existing?.photoshootDate ?? "");
   const dueDate = typeof row.due_date === "string" ? row.due_date : (existing?.dueDate ?? "");
   const statusValue = typeof row.status === "string" ? row.status : (existing?.status ?? "booking");
@@ -1226,7 +1228,7 @@ export default function KanbanBoard({
     }
   };
 
-  const handleMergePromptMerge = async (bracketSize: 3 | 5) => {
+  const handleMergePromptMerge = async (bracketSize: BracketSize) => {
     if (!mergePrompt) {
       return;
     }
@@ -1792,7 +1794,7 @@ export default function KanbanBoard({
       const response = await fetch("/api/tasks/queue-merge", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId: task.id }),
+        body: JSON.stringify({ taskId: task.id, forceRemerge: true }),
       });
       const payload = (await response.json().catch(() => null)) as
         | { error?: unknown; success?: boolean; message?: string }

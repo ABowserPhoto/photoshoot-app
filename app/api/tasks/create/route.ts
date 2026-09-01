@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
 import { attachClientIdToTaskPayload } from "@/lib/resolveTaskClientId";
+import { parseBracketSizeForDb } from "@/lib/bracketSize";
 
 export const dynamic = "force-dynamic";
 
@@ -35,18 +36,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  const bracketRaw = body.bracket_size;
-  const bracketSize =
-    typeof bracketRaw === "number" && Number.isFinite(bracketRaw)
-      ? bracketRaw
-      : typeof bracketRaw === "string"
-        ? Number(bracketRaw)
-        : 3;
-  const bracket_size = Number.isFinite(bracketSize) && bracketSize >= 1 && bracketSize <= 15 ? bracketSize : 3;
+  const photoshootType = typeof body.photoshoot_type === "string" ? body.photoshoot_type : "";
+  const bracket_size = parseBracketSizeForDb(body.bracket_size, {
+    photoshootType,
+    fallback: 5,
+  });
 
   const insertRow = { ...body };
   delete insertRow.bracket_size;
   delete insertRow.id;
+
+  if (bracket_size != null) {
+    insertRow.bracket_size = bracket_size;
+  } else {
+    delete insertRow.bracket_size;
+  }
 
   insertRow.status = "awaiting_folder_creation";
   insertRow.preview_preference =
@@ -97,7 +101,7 @@ export async function POST(request: Request) {
 
   let payloadWithClient: Record<string, unknown>;
   try {
-    payloadWithClient = await attachClientIdToTaskPayload({ ...insertRow, bracket_size });
+    payloadWithClient = await attachClientIdToTaskPayload(insertRow);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to resolve CRM client." },

@@ -2,11 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { exec } from "node:child_process";
-import { spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
+import { assertCliExecutableExists, spawnCliWithDiagnostics } from "@/lib/server/spawnCli";
 
 const execAsync = promisify(exec);
 
@@ -183,14 +183,21 @@ async function prepareStraightenedBracketInputs(params: {
       bracketDir,
     ];
     const constructedCommandString = `${quoteArg(rawTherapeeCli)} ${rtArgs.map(quoteArg).join(" ")}`;
-    console.log(`[processingEngine] EXECUTING RawTherapee: ${constructedCommandString}`);
-    await runCommandWithDiagnostics(rawTherapeeCli, rtArgs, {
-      stage: "rawtherapee",
-      localFolderName,
-      bracketIndex,
-      bracketDir,
-      tempStraightenedDir,
-      commandPreview: constructedCommandString,
+    console.log(
+      `[processingEngine] Starting RawTherapee CLI for bracket ${bracketIndex}: ${constructedCommandString}`
+    );
+    await spawnCliWithDiagnostics(rawTherapeeCli, rtArgs, {
+      logPrefix: "[CLI RawTherapee]",
+      envVar: "RAW_THERAPEE_CLI_PATH",
+      label: "rawtherapee-cli",
+      context: {
+        stage: "rawtherapee",
+        localFolderName,
+        bracketIndex,
+        bracketDir,
+        tempStraightenedDir,
+        commandPreview: constructedCommandString,
+      },
     });
 
     const snsInputs = bracketFileNames.map((fileName) =>
@@ -221,75 +228,6 @@ function resolveSnsPresetArg(): string {
     return presetValue;
   }
   return path.isAbsolute(presetValue) ? presetValue : path.resolve(process.cwd(), presetValue);
-}
-
-type CommandRunResult = {
-  stdout: string;
-  stderr: string;
-};
-
-async function runCommandWithDiagnostics(
-  command: string,
-  args: string[],
-  context: Record<string, unknown>
-): Promise<CommandRunResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => {
-      console.error("[processingEngine] merge command process error", {
-        ...context,
-        command,
-        args,
-        error: error.message,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-      });
-      reject(
-        new Error(
-          `Merge process failed to start: ${error.message}${
-            stderr.trim() ? ` | stderr=${stderr.trim()}` : ""
-          }`
-        )
-      );
-    });
-
-    child.on("close", (code, signal) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-        return;
-      }
-      console.error("[processingEngine] merge command non-zero exit", {
-        ...context,
-        command,
-        args,
-        exitCode: code,
-        signal,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-      });
-      reject(
-        new Error(
-          `Merge command failed (exit=${code ?? "null"}${signal ? `, signal=${signal}` : ""})${
-            stderr.trim() ? ` | stderr=${stderr.trim()}` : ""
-          }`
-        )
-      );
-    });
-  });
 }
 
 function createSupabase(): SupabaseClient | null {
@@ -386,16 +324,55 @@ async function getSharp(): Promise<SharpConstructor> {
 }
 
 async function loadTimestampBracketsFromDir(
-  dirPath: string
+  dirPath: string,
+  taskBracketSize?: number | null
 ): Promise<{ ok: true; brackets: string[][] } | { ok: false; brackets: string[][]; error: string }> {
   try {
     const { buildTimestampBracketsFromDir } = await import("@/lib/bracketGrouping.mjs");
-    const brackets = await buildTimestampBracketsFromDir(dirPath);
+    const brackets = await buildTimestampBracketsFromDir(dirPath, {
+      taskBracketSize: taskBracketSize ?? undefined,
+    });
     return { ok: true, brackets: Array.isArray(brackets) ? brackets : [] };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("[processingEngine] Failed to group brackets:", message);
     return { ok: false, brackets: [], error: message };
+  }
+}
+
+function logActiveBracketPipelineStart(params: {
+  selectsDir: string;
+  bracketIndex: number;
+  totalBrackets: number;
+  files: string[];
+  localFolderName: string;
+}) {
+  const { selectsDir, bracketIndex, totalBrackets, files, localFolderName } = params;
+  const usesRaw = bracketUsesRawFiles(files);
+  const extCounts = files.reduce<Record<string, number>>((acc, name) => {
+    const ext = path.extname(name).toLowerCase() || "(no-ext)";
+    acc[ext] = (acc[ext] ?? 0) + 1;
+    return acc;
+  }, {});
+  console.log(
+    `[processingEngine] Bracket [${bracketIndex + 1}/${totalBrackets}] contains ${files.length} files:`,
+    files
+  );
+  console.log("[processingEngine] Bracket pipeline plan", {
+    localFolderName,
+    selectsDir,
+    fileCount: files.length,
+    extensions: extCounts,
+    rawTherapeeLensCorrection: usesRaw && Boolean(RAW_THERAPEE_CLI_PATH.trim()),
+    snsHdrInputsIfRaw:
+      usesRaw && RAW_THERAPEE_CLI_PATH.trim()
+        ? `${files.length} straightened TIFF(s) from RawTherapee`
+        : `${files.length} file(s) sent directly to SNS-HDR`,
+  });
+  if (files.length > 7) {
+    console.warn(
+      `[processingEngine] Bracket [${bracketIndex + 1}] has ${files.length} inputs (>7) — expect multi-minute SNS-HDR + RawTherapee runtime.`
+    );
   }
 }
 
@@ -619,10 +596,13 @@ async function enhanceMergedPhotoInPlace(filePath: string): Promise<void> {
 export async function startProcessingSingleItem(
   taskId: string,
   shootFolderPath: string,
-  bracketIndex: number
+  bracketIndex: number,
+  options?: { taskBracketSize?: number | null; forceRemerge?: boolean }
 ): Promise<SingleItemProcessingSummary> {
   try {
     void taskId;
+    const taskBracketSize = options?.taskBracketSize ?? null;
+    const forceRemerge = options?.forceRemerge === true;
     const folderValidation = validateShootFolder(shootFolderPath);
     if (!folderValidation.ok) {
       return failedSingleItemSummary(bracketIndex, 0, folderValidation.error);
@@ -636,7 +616,7 @@ export async function startProcessingSingleItem(
     }
 
     fs.mkdirSync(mergedDir, { recursive: true });
-    const bracketResult = await loadTimestampBracketsFromDir(selectsDir);
+    const bracketResult = await loadTimestampBracketsFromDir(selectsDir, taskBracketSize);
     if (!bracketResult.ok) {
       return failedSingleItemSummary(
         bracketIndex,
@@ -664,6 +644,14 @@ export async function startProcessingSingleItem(
       return failedSingleItemSummary(bracketIndex, totalBrackets, `Bracket ${currentBracketIndex} is empty.`);
     }
 
+    logActiveBracketPipelineStart({
+      selectsDir,
+      bracketIndex,
+      totalBrackets,
+      files: group,
+      localFolderName,
+    });
+
     const snsPreset = resolveSnsPresetArg();
     const originalInputs = group.map((name) => path.join(selectsDir, name));
     const outBaseName = mergedOutputFileName(firstName, currentBracketIndex, totalBrackets);
@@ -671,11 +659,11 @@ export async function startProcessingSingleItem(
 
     // ── Resume guard ─────────────────────────────────────────────────────────
     // If this bracket was already merged (e.g. worker was interrupted mid-run),
-    // skip the expensive RawTherapee → SNS-HDR pipeline and return success.
-    // We report 0 new Comfy jobs so the caller doesn't double-queue them.
-    if (fs.existsSync(outFile)) {
-      console.info(
-        `[processingEngine] Bracket ${currentBracketIndex}/${totalBrackets} already merged: ${outBaseName}. Skipping merge pipeline.`
+    // skip the expensive RawTherapee → SNS-HDR pipeline unless the user
+    // explicitly queued a rematch (forceRemerge).
+    if (fs.existsSync(outFile) && !forceRemerge) {
+      console.log(
+        `[Worker Skip] Skipping ${outBaseName}: Reason = output already exists in 3_Merged (resume cache)`
       );
       return {
         ok: true,
@@ -687,6 +675,12 @@ export async function startProcessingSingleItem(
         comfyFailedCount: 0,
         comfyErrors: [],
       };
+    }
+    if (fs.existsSync(outFile) && forceRemerge) {
+      console.log(
+        `[processingEngine] forceRemerge: removing existing 3_Merged output ${outBaseName} before rewrite`
+      );
+      await fs.promises.unlink(outFile);
     }
     // ── End resume guard ─────────────────────────────────────────────────────
 
@@ -708,20 +702,33 @@ export async function startProcessingSingleItem(
       });
       bracketWorkDir = prepared.workDir;
       snsInputs = prepared.snsInputs;
+      console.log(
+        `[processingEngine] Bracket [${currentBracketIndex}] SNS-HDR will receive ${snsInputs.length} input file(s):`,
+        snsInputs.map((p) => path.basename(p))
+      );
+
+      assertCliExecutableExists(SNS_HDR_PATH, { envVar: "SNSHDR_PATH", label: "SNS-HDR" });
 
       const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...snsInputs];
       const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
-      console.log(`EXECUTING: ${constructedCommandString}`);
+      console.log(
+        `[processingEngine] Starting SNS-HDR CLI for bracket ${currentBracketIndex}: ${constructedCommandString}`
+      );
 
       try {
-        await runCommandWithDiagnostics(SNS_HDR_PATH, snsArgs, {
-          localFolderName,
-          bracketIndex: currentBracketIndex,
-          outFile,
-          tempOutFile,
-          inputs: snsInputs,
-          snsPreset,
-          commandPreview: constructedCommandString,
+        await spawnCliWithDiagnostics(SNS_HDR_PATH, snsArgs, {
+          logPrefix: "[CLI SNS-HDR]",
+          envVar: "SNSHDR_PATH",
+          label: "SNS-HDR",
+          context: {
+            localFolderName,
+            bracketIndex: currentBracketIndex,
+            outFile,
+            tempOutFile,
+            inputs: snsInputs,
+            snsPreset,
+            commandPreview: constructedCommandString,
+          },
         });
         if (fs.existsSync(outFile)) {
           await fs.promises.unlink(outFile);
@@ -823,6 +830,18 @@ export async function startProcessingSingleItem(
 
 export async function startProcessing(taskId: string, shootFolderPath: string): Promise<ProcessingSummary> {
   const supabase = createSupabase();
+  let taskBracketSize: number | null = null;
+  if (supabase) {
+    const { data: taskRow } = await supabase
+      .from("tasks")
+      .select("bracket_size")
+      .eq("id", taskId)
+      .maybeSingle();
+    const raw = taskRow?.bracket_size;
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      taskBracketSize = raw;
+    }
+  }
   const folderValidation = validateShootFolder(shootFolderPath);
   if (!folderValidation.ok) {
     return { ok: false, error: folderValidation.error };
@@ -888,7 +907,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
 
     fs.mkdirSync(mergedDir, { recursive: true });
 
-    const bracketResult = await loadTimestampBracketsFromDir(selectsDir);
+    const bracketResult = await loadTimestampBracketsFromDir(selectsDir, taskBracketSize);
     if (!bracketResult.ok) {
       throw new Error(`Failed to group selected photos: ${bracketResult.error}`);
     }
@@ -915,6 +934,13 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
     const totalBrackets = brackets.length;
     for (const group of brackets) {
       const currentBracketIndex = bracketIndex;
+      logActiveBracketPipelineStart({
+        selectsDir,
+        bracketIndex: currentBracketIndex - 1,
+        totalBrackets,
+        files: group,
+        localFolderName,
+      });
       const originalInputs = group.map((name) => path.join(selectsDir, name));
       const firstName = group[0]!;
       const outBaseName = mergedOutputFileName(firstName, currentBracketIndex, totalBrackets);
@@ -936,19 +962,31 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
         });
         bracketWorkDir = prepared.workDir;
         const snsInputs = prepared.snsInputs;
+        console.log(
+          `[processingEngine] Bracket [${currentBracketIndex}] SNS-HDR will receive ${snsInputs.length} input file(s):`,
+          snsInputs.map((p) => path.basename(p))
+        );
 
         const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...snsInputs];
         const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
-        console.log(`EXECUTING: ${constructedCommandString}`);
+        console.log(
+          `[processingEngine] Starting SNS-HDR CLI for bracket ${currentBracketIndex}: ${constructedCommandString}`
+        );
+        assertCliExecutableExists(SNS_HDR_PATH, { envVar: "SNSHDR_PATH", label: "SNS-HDR" });
         try {
-          await runCommandWithDiagnostics(SNS_HDR_PATH, snsArgs, {
-            localFolderName,
-            bracketIndex: currentBracketIndex,
-            outFile,
-            tempOutFile,
-            inputs: snsInputs,
-            snsPreset,
-            commandPreview: constructedCommandString,
+          await spawnCliWithDiagnostics(SNS_HDR_PATH, snsArgs, {
+            logPrefix: "[CLI SNS-HDR]",
+            envVar: "SNSHDR_PATH",
+            label: "SNS-HDR",
+            context: {
+              localFolderName,
+              bracketIndex: currentBracketIndex,
+              outFile,
+              tempOutFile,
+              inputs: snsInputs,
+              snsPreset,
+              commandPreview: constructedCommandString,
+            },
           });
         } catch (error) {
           const mergeError = error instanceof Error ? error.message : String(error);

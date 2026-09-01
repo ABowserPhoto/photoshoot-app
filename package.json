@@ -29,6 +29,7 @@
     "canvas-confetti": "^1.9.4",
     "chokidar": "^5.0.0",
     "dotenv": "^17.4.2",
+    "exifr": "^7.1.3",
     "exifreader": "^4.38.1",
     "exiftool-vendored": "^35.20.0",
     "fountain-js": "^1.2.4",

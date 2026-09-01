@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { NextResponse } from "next/server";
+import { spawnCliWithDiagnostics } from "@/lib/server/spawnCli";
 
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import { resolvePublicOrigin } from "@/lib/publicOrigin";
@@ -52,75 +52,6 @@ function resolveSnsPresetArg(): string {
     return presetValue;
   }
   return path.isAbsolute(presetValue) ? presetValue : path.resolve(process.cwd(), presetValue);
-}
-
-type CommandRunResult = {
-  stdout: string;
-  stderr: string;
-};
-
-async function runCommandWithDiagnostics(
-  command: string,
-  args: string[],
-  context: Record<string, unknown>
-): Promise<CommandRunResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => {
-      console.error("[auto-merge] merge command process error", {
-        ...context,
-        command,
-        args,
-        error: error.message,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-      });
-      reject(
-        new Error(
-          `Merge process failed to start: ${error.message}${
-            stderr.trim() ? ` | stderr=${stderr.trim()}` : ""
-          }`
-        )
-      );
-    });
-
-    child.on("close", (code, signal) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-        return;
-      }
-      console.error("[auto-merge] merge command non-zero exit", {
-        ...context,
-        command,
-        args,
-        exitCode: code,
-        signal,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-      });
-      reject(
-        new Error(
-          `Merge command failed (exit=${code ?? "null"}${signal ? `, signal=${signal}` : ""})${
-            stderr.trim() ? ` | stderr=${stderr.trim()}` : ""
-          }`
-        )
-      );
-    });
-  });
 }
 
 function chunkHasSqiInName(filenames: string[]): boolean {
@@ -201,8 +132,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "local_folder_name is required." }, { status: 400 });
     }
 
-    if (bracketSize !== 3 && bracketSize !== 5) {
-      return NextResponse.json({ error: "bracket_size must be 3 or 5." }, { status: 400 });
+    if (bracketSize !== 3 && bracketSize !== 5 && bracketSize !== 7) {
+      return NextResponse.json({ error: "bracket_size must be 3, 5, or 7." }, { status: 400 });
     }
 
     const selectsDir = path.join(PHOTOS_ROOT, localFolderName, "2_Selects");
@@ -278,10 +209,11 @@ export async function POST(request: Request) {
         const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...inputs];
         const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
         console.log(`EXECUTING: ${constructedCommandString}`);
-        await runCommandWithDiagnostics(
-          SNS_HDR_PATH,
-          snsArgs,
-          {
+        await spawnCliWithDiagnostics(SNS_HDR_PATH, snsArgs, {
+          logPrefix: "[CLI SNS-HDR]",
+          envVar: "SNSHDR_PATH",
+          label: "SNS-HDR",
+          context: {
             bracketIndex,
             localFolderName,
             outFile,
@@ -289,8 +221,8 @@ export async function POST(request: Request) {
             inputs,
             snsPreset,
             commandPreview: constructedCommandString,
-          }
-        );
+          },
+        });
         if (fs.existsSync(outFile)) {
           await fs.promises.unlink(outFile);
         }
