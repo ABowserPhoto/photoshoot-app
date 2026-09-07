@@ -1,41 +1,25 @@
 import { NextResponse } from "next/server";
 
-import { getAuthRole } from "@/lib/server/getAuthRole";
 import {
-  canViewNoteVisibility,
+  canViewNotebook,
+  canViewNote,
+  getNotesAuth,
   getNotesSupabase,
   mapNote,
   NOTE_SELECT_COLUMNS,
-  NOTE_VISIBILITIES,
+  parseNoteAccessBody,
   type NoteRow,
-  type NoteVisibility,
+  visibilityFromAccessLevel,
 } from "@/lib/server/notesSupabase";
 
 export const dynamic = "force-dynamic";
-
-function parseVisibility(
-  value: unknown,
-  isAdmin: boolean
-): { ok: true; value: NoteVisibility } | { ok: false; error: string } {
-  if (value === undefined || value === null || value === "") {
-    return { ok: true, value: "user" };
-  }
-  if (typeof value !== "string" || !NOTE_VISIBILITIES.includes(value as NoteVisibility)) {
-    return { ok: false, error: "visibility must be public, user, or admin_only." };
-  }
-  const visibility = value as NoteVisibility;
-  if (visibility === "admin_only" && !isAdmin) {
-    return { ok: false, error: "Only admins can create admin_only notes." };
-  }
-  return { ok: true, value: visibility };
-}
 
 /**
  * GET /api/notes?moodboardId=...
  * Returns the note linked to a moodboard (if visible to the current user).
  */
 export async function GET(request: Request) {
-  const auth = await getAuthRole();
+  const auth = await getNotesAuth();
   if (!auth.authenticated) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -53,18 +37,13 @@ export async function GET(request: Request) {
     );
   }
 
-  let query = supabase
+  const { data, error } = await supabase
     .from("notes")
     .select(NOTE_SELECT_COLUMNS)
     .eq("moodboard_id", moodboardId)
     .order("updated_at", { ascending: false })
-    .limit(1);
-
-  if (!auth.isAdmin) {
-    query = query.neq("visibility", "admin_only");
-  }
-
-  const { data, error } = await query.maybeSingle();
+    .limit(1)
+    .maybeSingle();
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -74,7 +53,7 @@ export async function GET(request: Request) {
   }
 
   const row = data as NoteRow;
-  if (!canViewNoteVisibility(row.visibility, auth.isAdmin)) {
+  if (!canViewNote(row, auth.userId, auth.isAdmin)) {
     return NextResponse.json({ note: null });
   }
 
@@ -83,10 +62,10 @@ export async function GET(request: Request) {
 
 /**
  * POST /api/notes
- * Body: { notebookId: string, title?: string, content?: string, visibility?: string, moodboardId?: string | null }
+ * Body: { notebookId, title?, content?, accessLevel?, assignedUserIds?, moodboardId? }
  */
 export async function POST(request: Request) {
-  const auth = await getAuthRole();
+  const auth = await getNotesAuth();
   if (!auth.authenticated) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -103,9 +82,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
+  if (typeof body !== "object" || body === null) {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
+
   const notebookId =
-    typeof body === "object" &&
-    body !== null &&
     typeof (body as { notebookId?: unknown }).notebookId === "string"
       ? (body as { notebookId: string }).notebookId.trim()
       : "";
@@ -114,35 +95,40 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "notebookId is required." }, { status: 400 });
   }
 
+  const { data: notebookRow, error: notebookError } = await supabase
+    .from("notebooks")
+    .select("id, creator_id, access_level, assigned_user_ids, is_system")
+    .eq("id", notebookId)
+    .maybeSingle();
+
+  if (notebookError) {
+    return NextResponse.json({ error: notebookError.message }, { status: 500 });
+  }
+  if (!notebookRow) {
+    return NextResponse.json({ error: "Notebook not found." }, { status: 404 });
+  }
+
+  if (!canViewNotebook(notebookRow, auth.userId, auth.isAdmin)) {
+    return NextResponse.json({ error: "Notebook not found." }, { status: 404 });
+  }
+
   const title =
-    typeof body === "object" &&
-    body !== null &&
     typeof (body as { title?: unknown }).title === "string"
       ? (body as { title: string }).title.trim() || "Untitled"
       : "Untitled";
 
   const content =
-    typeof body === "object" &&
-    body !== null &&
     typeof (body as { content?: unknown }).content === "string"
       ? (body as { content: string }).content
       : "";
 
-  const visibilityRaw =
-    typeof body === "object" && body !== null
-      ? (body as { visibility?: unknown }).visibility
-      : undefined;
-  const visibilityParsed = parseVisibility(visibilityRaw, auth.isAdmin);
-  if (!visibilityParsed.ok) {
-    return NextResponse.json({ error: visibilityParsed.error }, { status: 403 });
+  const accessParsed = parseNoteAccessBody(body as Record<string, unknown>, auth.isAdmin);
+  if (!accessParsed.ok) {
+    return NextResponse.json({ error: accessParsed.error }, { status: accessParsed.status });
   }
 
   let moodboardId: string | null = null;
-  if (
-    typeof body === "object" &&
-    body !== null &&
-    "moodboardId" in body
-  ) {
+  if ("moodboardId" in body) {
     const raw = (body as { moodboardId?: unknown }).moodboardId;
     if (raw === null || raw === "") {
       moodboardId = null;
@@ -160,7 +146,10 @@ export async function POST(request: Request) {
       notebook_id: notebookId,
       title,
       content,
-      visibility: visibilityParsed.value,
+      creator_id: auth.userId,
+      access_level: accessParsed.accessLevel,
+      assigned_user_ids: accessParsed.assignedUserIds,
+      visibility: visibilityFromAccessLevel(accessParsed.accessLevel),
       moodboard_id: moodboardId,
       created_at: now,
       updated_at: now,

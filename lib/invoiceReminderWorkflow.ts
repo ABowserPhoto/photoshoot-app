@@ -9,6 +9,7 @@ import {
   isLexofficeInvoicePaid,
   isLexofficeInvoiceReminderEligible,
 } from "@/lib/lexoffice";
+import { recordContactReminderDraft } from "@/lib/server/contactReminderDates";
 
 export type ReminderTaskRow = {
   id: string;
@@ -29,12 +30,23 @@ export type ReminderTaskRow = {
   skip_invoice: boolean | null;
   expected_revenue: number | null;
   is_credit_note: boolean | null;
+  contact_id?: string | null;
 };
 
 export type CreateReminderDraftResult =
-  | { ok: true; gmailDraftId: string; invoiceNumber: string | null; markedPaid: false }
+  | {
+      ok: true;
+      gmailDraftId: string;
+      invoiceNumber: string | null;
+      markedPaid: false;
+      crmContactId: string | null;
+      reminderDates: string[];
+    }
   | { ok: true; markedPaid: true }
   | { ok: false; error: string; code?: "missing_email" | "missing_invoice" | "not_eligible" | "already_paid" };
+
+export const REMINDER_TASK_SELECT =
+  "id, title, company_name, contact_first_name, contact_last_name, email, has_separate_invoice_email, invoice_email_address, photoshoot_type, shoot_location, photoshoot_date, lexoffice_invoice_id, lexoffice_document_file_id, invoice_date, is_paid, skip_invoice, expected_revenue, is_credit_note, contact_id";
 
 function parseDate(value: string | null | undefined): Date | null {
   if (!value?.trim()) {
@@ -229,6 +241,11 @@ export async function createInvoiceReminderDraftForTask(
     { plainTextFallback: reminder.bodyPlain }
   );
 
+  const recorded = await recordContactReminderDraft(supabase, {
+    contactId: task.contact_id,
+    email: recipient,
+  });
+
   await supabase
     .from("tasks")
     .update({
@@ -244,6 +261,8 @@ export async function createInvoiceReminderDraftForTask(
     gmailDraftId: gmailDraft.id,
     invoiceNumber: invoiceNumber === "Credit Note" ? null : invoiceNumber,
     markedPaid: false,
+    crmContactId: recorded.crmContactId,
+    reminderDates: recorded.reminderDates,
   };
 }
 
@@ -322,10 +341,17 @@ export async function createInvoiceReminderDraftForLexofficeInvoice(
     { plainTextFallback: reminder.bodyPlain }
   );
 
+  const recorded = await recordContactReminderDraft(supabase, {
+    contactId: null,
+    email: recipient,
+  });
+
   return {
     ok: true,
     gmailDraftId: gmailDraft.id,
     invoiceNumber,
     markedPaid: false,
+    crmContactId: recorded.crmContactId,
+    reminderDates: recorded.reminderDates,
   };
 }

@@ -6,31 +6,27 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { formatEuro } from "@/lib/adminStatsFormat";
+import type { UnpaidBillingItem } from "@/lib/crmUnpaidBilling";
+import { normalizeReminderDates } from "@/lib/crmReminderDates";
 import ClientManagerSection from "@/app/admin/crm/ClientManagerSection";
+import ReminderDraftedMarker from "@/app/admin/crm/ReminderDraftedMarker";
 import UserManagementSection from "@/app/admin/crm/UserManagementSection";
 import CreditNoteUploadModal from "@/app/components/CreditNoteUploadModal";
 
 type CrmTab = "billing" | "clients" | "users";
+type CrmToast = { message: string; variant: "success" | "error" };
 
-type UnpaidBillingItem = {
-  id: string;
-  type: "lexoffice" | "credit_note";
-  clientName: string;
-  companyName: string | null;
-  contactName: string | null;
-  invoiceNumber: string | null;
-  documentName: string;
-  date: string | null;
-  dateLabel: string;
-  amount: number;
-  clientEmail: string | null;
-  canSendReminder: boolean;
-  lexofficeInvoiceId: string | null;
-  taskId: string | null;
-  contactId: string | null;
-  voucherStatus: string | null;
-  linkedJobName: string | null;
-};
+const REMINDER_FETCH_TIMEOUT_MS = 110_000;
+
+function reminderFetchErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) {
+    return "Reminder request timed out. Check API keys and try again.";
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  return fallback;
+}
 
 function matchesUnpaidBillingSearch(item: UnpaidBillingItem, query: string): boolean {
   const needle = query.trim().toLowerCase();
@@ -65,7 +61,7 @@ export default function AdminCrmPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<CrmToast | null>(null);
   const [creditNoteUpload, setCreditNoteUpload] = useState<{
     taskId: string;
     label: string;
@@ -111,11 +107,15 @@ export default function AdminCrmPage() {
     }
   }, [activeTab, authLoading, isAdmin, loadUnpaid]);
 
+  const showToast = useCallback((message: string, variant: CrmToast["variant"] = "success") => {
+    setToast({ message, variant });
+  }, []);
+
   useEffect(() => {
     if (!toast) {
       return;
     }
-    const timer = window.setTimeout(() => setToast(null), 4000);
+    const timer = window.setTimeout(() => setToast(null), toast.variant === "error" ? 7000 : 4000);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -140,21 +140,48 @@ export default function AdminCrmPage() {
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(REMINDER_FETCH_TIMEOUT_MS),
       });
       const json = (await response.json().catch(() => null)) as
-        | { ok?: boolean; message?: string; error?: string; markedPaid?: boolean }
+        | {
+            ok?: boolean;
+            message?: string;
+            error?: string;
+            markedPaid?: boolean;
+            crmContactId?: string | null;
+            reminderDates?: string[];
+          }
         | null;
-      if (!response.ok) {
+      if (!response.ok || !json?.ok) {
         throw new Error(json?.error ?? `Reminder failed (${response.status})`);
       }
-      if (json?.markedPaid) {
-        setToast("Invoice already paid in Lexoffice — removed from unpaid list.");
+      if (json.markedPaid) {
+        showToast("Invoice already paid in Lexoffice — removed from unpaid list.");
         setItems((prev) => prev.filter((row) => row.id !== item.id));
       } else {
-        setToast(json?.message ?? "HTML Draft created in Gmail!");
+        const reminderDates = normalizeReminderDates(json.reminderDates);
+        const crmContactId = json.crmContactId?.trim() || item.crmContactId || null;
+        setItems((prev) =>
+          prev.map((row) =>
+            row.id === item.id
+              ? {
+                  ...row,
+                  crmContactId,
+                  reminderDates:
+                    reminderDates.length > 0
+                      ? reminderDates
+                      : normalizeReminderDates([...(row.reminderDates ?? []), new Date().toISOString()]),
+                }
+              : row
+          )
+        );
+        showToast(json.message ?? "HTML Draft created in Gmail!");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to generate reminder.");
+      console.error("[crm] generate reminder failed:", err);
+      const message = reminderFetchErrorMessage(err, "Failed to generate reminder.");
+      setError(message);
+      showToast(message, "error");
     } finally {
       setBusyItemId(null);
     }
@@ -185,11 +212,13 @@ export default function AdminCrmPage() {
         throw new Error(json?.error ?? `Invoice scan failed (${response.status})`);
       }
       const skipped = json.skippedAlreadyProcessed ?? 0;
-      setToast(
+      showToast(
         `Invoice scan complete — ${json.uploadsSucceeded ?? 0} uploaded, ${json.uploadsFailed ?? 0} failed, ${skipped} skipped (already processed).`
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Invoice scan failed.");
+      const message = err instanceof Error ? err.message : "Invoice scan failed.";
+      setError(message);
+      showToast(message, "error");
     } finally {
       setInvoiceScanBusy(false);
     }
@@ -359,7 +388,12 @@ export default function AdminCrmPage() {
                   ) : (
                     filteredItems.map((item) => (
                       <tr key={item.id} className="hover:bg-zinc-950/40">
-                        <td className="px-4 py-3 font-medium text-zinc-100">{item.clientName}</td>
+                        <td className="px-4 py-3 font-medium text-zinc-100">
+                          <span className="inline-flex items-center">
+                            {item.clientName}
+                            <ReminderDraftedMarker dates={item.reminderDates} />
+                          </span>
+                        </td>
                         <td className="px-4 py-3 text-zinc-300">
                           <div>{item.documentName}</div>
                           <div className="mt-0.5 text-xs text-zinc-500">
@@ -422,7 +456,7 @@ export default function AdminCrmPage() {
         {activeTab === "clients" ? (
           <ClientManagerSection
             active={activeTab === "clients"}
-            onToast={setToast}
+            onToast={(message) => showToast(message)}
             onError={setError}
           />
         ) : null}
@@ -430,7 +464,7 @@ export default function AdminCrmPage() {
         {activeTab === "users" && isAdmin ? (
           <UserManagementSection
             active={activeTab === "users"}
-            onToast={setToast}
+            onToast={(message) => showToast(message)}
             onError={setError}
           />
         ) : null}
@@ -450,7 +484,7 @@ export default function AdminCrmPage() {
                 (row) => !(row.type === "credit_note" && row.taskId === paidTaskId)
               )
             );
-            setToast("Credit note uploaded to Lexoffice and marked as paid.");
+            setToast({ message: "Credit note uploaded to Lexoffice and marked as paid.", variant: "success" });
           }}
         />
       ) : null}
@@ -461,8 +495,14 @@ export default function AdminCrmPage() {
           aria-live="polite"
           className="pointer-events-none fixed bottom-6 left-1/2 z-[200] w-full max-w-md -translate-x-1/2 px-4"
         >
-          <p className="rounded-xl border border-emerald-500/40 bg-emerald-950/95 px-5 py-3 text-center text-sm font-semibold text-emerald-100 shadow-2xl">
-            {toast}
+          <p
+            className={`rounded-xl px-5 py-3 text-center text-sm font-semibold shadow-2xl ${
+              toast.variant === "error"
+                ? "border border-red-500/40 bg-red-950/95 text-red-100"
+                : "border border-emerald-500/40 bg-emerald-950/95 text-emerald-100"
+            }`}
+          >
+            {toast.message}
           </p>
         </div>
       ) : null}

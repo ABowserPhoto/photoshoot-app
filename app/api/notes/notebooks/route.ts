@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   canViewNotebook,
-  canViewNoteVisibility,
+  canViewNote,
   ensureStudioChatsNotebook,
   getNotesAuth,
   getNotesSupabase,
@@ -73,24 +73,18 @@ export async function GET() {
   );
 
   const ids = notebookRows.map((n) => n.id);
-  let notesQuery = supabase
+  const { data: notes, error: notesError } = await supabase
     .from("notes")
     .select(NOTE_SELECT_COLUMNS)
     .in("notebook_id", ids)
     .order("updated_at", { ascending: false });
-
-  if (!auth.isAdmin) {
-    notesQuery = notesQuery.neq("visibility", "admin_only");
-  }
-
-  const { data: notes, error: notesError } = await notesQuery;
 
   if (notesError) {
     return NextResponse.json({ error: notesError.message }, { status: 500 });
   }
 
   const noteRows = ((notes ?? []) as NoteRow[]).filter((row) =>
-    canViewNoteVisibility(row.visibility, auth.isAdmin)
+    canViewNote(row, auth.userId, auth.isAdmin)
   );
   const byNotebook = new Map<string, NoteRow[]>();
   for (const note of noteRows) {

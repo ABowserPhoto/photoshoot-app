@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 
-import { getAuthRole } from "@/lib/server/getAuthRole";
 import {
-  canViewNoteVisibility,
+  canViewNote,
+  getNotesAuth,
   getNotesSupabase,
   mapNote,
   NOTE_SELECT_COLUMNS,
-  NOTE_VISIBILITIES,
+  parseNoteAccessBody,
   type NoteRow,
-  type NoteVisibility,
+  visibilityFromAccessLevel,
 } from "@/lib/server/notesSupabase";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +19,7 @@ type RouteContext = { params: Promise<{ id: string }> };
  * GET /api/notes/[id]
  */
 export async function GET(_request: Request, context: RouteContext) {
-  const auth = await getAuthRole();
+  const auth = await getNotesAuth();
   if (!auth.authenticated) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -48,7 +48,7 @@ export async function GET(_request: Request, context: RouteContext) {
   }
 
   const row = data as NoteRow;
-  if (!canViewNoteVisibility(row.visibility, auth.isAdmin)) {
+  if (!canViewNote(row, auth.userId, auth.isAdmin)) {
     return NextResponse.json({ error: "Note not found." }, { status: 404 });
   }
 
@@ -57,10 +57,10 @@ export async function GET(_request: Request, context: RouteContext) {
 
 /**
  * PATCH /api/notes/[id]
- * Body: { title?, content?, notebookId?, visibility?, moodboardId? }
+ * Body: { title?, content?, notebookId?, accessLevel?, assignedUserIds?, moodboardId? }
  */
 export async function PATCH(request: Request, context: RouteContext) {
-  const auth = await getAuthRole();
+  const auth = await getNotesAuth();
   if (!auth.authenticated) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -89,7 +89,7 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   const existingRow = existing as NoteRow;
-  if (!canViewNoteVisibility(existingRow.visibility, auth.isAdmin)) {
+  if (!canViewNote(existingRow, auth.userId, auth.isAdmin)) {
     return NextResponse.json({ error: "Note not found." }, { status: 404 });
   }
 
@@ -119,21 +119,28 @@ export async function PATCH(request: Request, context: RouteContext) {
     if (notebookId) patch.notebook_id = notebookId;
   }
 
-  if ("visibility" in body) {
-    const raw = (body as { visibility?: unknown }).visibility;
-    if (typeof raw !== "string" || !NOTE_VISIBILITIES.includes(raw as NoteVisibility)) {
-      return NextResponse.json(
-        { error: "visibility must be public, user, or admin_only." },
-        { status: 400 }
-      );
+  if ("accessLevel" in body || "assignedUserIds" in body || "visibility" in body) {
+    const merged = {
+      accessLevel:
+        "accessLevel" in body
+          ? (body as { accessLevel?: unknown }).accessLevel
+          : existingRow.access_level,
+      assignedUserIds:
+        "assignedUserIds" in body
+          ? (body as { assignedUserIds?: unknown }).assignedUserIds
+          : existingRow.assigned_user_ids,
+      visibility:
+        "visibility" in body
+          ? (body as { visibility?: unknown }).visibility
+          : existingRow.visibility,
+    };
+    const accessParsed = parseNoteAccessBody(merged, auth.isAdmin);
+    if (!accessParsed.ok) {
+      return NextResponse.json({ error: accessParsed.error }, { status: accessParsed.status });
     }
-    if (raw === "admin_only" && !auth.isAdmin) {
-      return NextResponse.json(
-        { error: "Only admins can set admin_only visibility." },
-        { status: 403 }
-      );
-    }
-    patch.visibility = raw;
+    patch.access_level = accessParsed.accessLevel;
+    patch.assigned_user_ids = accessParsed.assignedUserIds;
+    patch.visibility = visibilityFromAccessLevel(accessParsed.accessLevel);
   }
 
   if ("moodboardId" in body) {
@@ -174,7 +181,7 @@ export async function PATCH(request: Request, context: RouteContext) {
  * DELETE /api/notes/[id]
  */
 export async function DELETE(_request: Request, context: RouteContext) {
-  const auth = await getAuthRole();
+  const auth = await getNotesAuth();
   if (!auth.authenticated) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -191,7 +198,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
   const { data: existing, error: existingError } = await supabase
     .from("notes")
-    .select("id, visibility")
+    .select(NOTE_SELECT_COLUMNS)
     .eq("id", id)
     .maybeSingle();
 
@@ -201,12 +208,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
   if (!existing) {
     return NextResponse.json({ error: "Note not found." }, { status: 404 });
   }
-  if (
-    !canViewNoteVisibility(
-      (existing as { visibility?: string }).visibility ?? "user",
-      auth.isAdmin
-    )
-  ) {
+  if (!canViewNote(existing as NoteRow, auth.userId, auth.isAdmin)) {
     return NextResponse.json({ error: "Note not found." }, { status: 404 });
   }
 

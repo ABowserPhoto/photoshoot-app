@@ -1,6 +1,17 @@
 "use client";
 
 import Image from "next/image";
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
 import { AlertCircle, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
@@ -10,6 +21,7 @@ import { deleteSchedulerPost, updateSchedulerPostPublishStatus } from "@/app/act
 import { generateHashtagsAction } from "@/app/actions/generate-hashtags";
 import { publishToInstagram } from "@/app/actions/publish-instagram";
 import { publishToTikTok } from "@/app/actions/publish-tiktok";
+import SchedulerFeedSlot from "@/app/components/SchedulerFeedSlot";
 import SocialConnectionsModal from "@/app/components/SocialConnectionsModal";
 import type { SchedulerSocialProfileRow } from "@/lib/schedulerSocialProfile";
 import {
@@ -465,6 +477,8 @@ export default function SchedulerPage() {
   const [newProfileHandle, setNewProfileHandle] = useState("");
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
+  const [mobileConfigOpen, setMobileConfigOpen] = useState(false);
+  const [continuityOpen, setContinuityOpen] = useState(false);
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const syncingFromDbRef = useRef(false);
 
@@ -1131,6 +1145,44 @@ export default function SchedulerPage() {
     });
   };
 
+  const reorderSlot = (sourceIndex: number, targetIndex: number) => {
+    if (!activeProfileId) {
+      return;
+    }
+    if (
+      Number.isNaN(sourceIndex) ||
+      Number.isNaN(targetIndex) ||
+      sourceIndex < 0 ||
+      targetIndex < 0 ||
+      sourceIndex >= slots.length ||
+      targetIndex >= slots.length ||
+      sourceIndex === targetIndex
+    ) {
+      return;
+    }
+
+    let nextSlotsSnapshot: Slot[] = [];
+    updateActiveData((data) => {
+      const moved = data.slots[sourceIndex];
+      if (!moved) {
+        return data;
+      }
+      const compact = data.slots.filter((_, slotIndex) => slotIndex !== sourceIndex);
+      compact.splice(targetIndex, 0, moved);
+      nextSlotsSnapshot = scheduleSlots(compact, data.rules);
+      return {
+        ...data,
+        slots: nextSlotsSnapshot,
+      };
+    });
+    if (nextSlotsSnapshot.length > 0) {
+      void syncPostIndexesAndSchedules(nextSlotsSnapshot).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Unknown error";
+        setPersistenceError(`Could not sync reordered posts: ${message}`);
+      });
+    }
+  };
+
   const handleDrop = (localIndex: number, event: DragEvent<HTMLDivElement>) => {
     if (!activeProfileId) {
       return;
@@ -1143,28 +1195,7 @@ export default function SchedulerPage() {
     const sourceIndexRaw = event.dataTransfer.getData("sourceIndex");
     if (sourceIndexRaw) {
       const sourceIndex = Number.parseInt(sourceIndexRaw, 10);
-      if (!Number.isNaN(sourceIndex) && sourceIndex >= 0 && sourceIndex < slots.length && sourceIndex !== index) {
-        let nextSlotsSnapshot: Slot[] = [];
-        updateActiveData((data) => {
-          const moved = data.slots[sourceIndex];
-          if (!moved) {
-            return data;
-          }
-          const compact = data.slots.filter((_, slotIndex) => slotIndex !== sourceIndex);
-          compact.splice(index, 0, moved);
-          nextSlotsSnapshot = scheduleSlots(compact, data.rules);
-          return {
-            ...data,
-            slots: nextSlotsSnapshot,
-          };
-        });
-        if (nextSlotsSnapshot.length > 0) {
-          void syncPostIndexesAndSchedules(nextSlotsSnapshot).catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : "Unknown error";
-            setPersistenceError(`Could not sync reordered posts: ${message}`);
-          });
-        }
-      }
+      reorderSlot(sourceIndex, index);
       return;
     }
 
@@ -1651,9 +1682,264 @@ export default function SchedulerPage() {
     }
   };
 
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { delay: 250, tolerance: 5 },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 250, tolerance: 5 },
+    })
+  );
+
+  const handleDragStart = (event: DragStartEvent) => {
+    const index = event.active.data.current?.absoluteIndex;
+    if (typeof index === "number") {
+      setDraggingSlot(index);
+    }
+  };
+
+  const handleDragOver = (event: DragOverEvent) => {
+    const index = event.over?.data.current?.absoluteIndex;
+    if (typeof index === "number") {
+      setHoveredSlot(index);
+    }
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    setDraggingSlot(null);
+    setHoveredSlot(null);
+    const sourceIndex = event.active.data.current?.absoluteIndex;
+    const targetIndex = event.over?.data.current?.absoluteIndex;
+    if (typeof sourceIndex !== "number" || typeof targetIndex !== "number") {
+      return;
+    }
+    reorderSlot(sourceIndex, targetIndex);
+  };
+
+  const activeDragSlot = draggingSlot !== null ? slots[draggingSlot] : null;
+
+  const renderConfigPanel = () => (
+    <>
+      <p className="text-xs text-zinc-400">Plan visual posts with drag-and-drop layouting.</p>
+      {persistenceError ? (
+        <div className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-200">
+          {persistenceError}
+        </div>
+      ) : null}
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Client</p>
+          <button
+            type="button"
+            onClick={handleCreateClient}
+            className="rounded border border-zinc-700 px-2 py-1 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800"
+          >
+            + New Client
+          </button>
+        </div>
+        <select
+          value={activeClientId}
+          onChange={(event) => {
+            setActiveClientId(event.target.value);
+            setCurrentBoardIndex(0);
+          }}
+          className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 outline-none ring-zinc-500 focus:ring-2"
+        >
+          {clients.map((client) => (
+            <option key={client.id} value={client.id}>
+              {client.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Profiles</p>
+          <button
+            type="button"
+            onClick={handleAddProfile}
+            className="rounded border border-zinc-700 px-2 py-1 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800"
+          >
+            + Add Account
+          </button>
+        </div>
+        <div className="mt-2 space-y-2">
+          {profiles.length > 0 ? (
+            profiles.map((profile) => {
+              const handle = profile.handle ?? "@unknown";
+              const isActive = profile.id === activeProfileId;
+              return (
+                <div key={profile.id} className="flex items-stretch gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveProfileId(profile.id);
+                      setCurrentBoardIndex(0);
+                    }}
+                    className={`min-w-0 flex-1 rounded-md border px-3 py-2 text-left text-xs font-semibold transition ${
+                      isActive
+                        ? "border-zinc-200 bg-zinc-100 text-zinc-900"
+                        : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      {getPlatformIcon(profile.platform)}
+                      <span className="truncate">{handle}</span>
+                    </span>
+                  </button>
+                  {supabase ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteProfile(profile.id);
+                      }}
+                      className="shrink-0 rounded-md border border-red-500/35 bg-zinc-900 px-2 text-red-400/90 transition hover:border-red-500/60 hover:bg-red-500/10 hover:text-red-300"
+                      title="Delete profile"
+                      aria-label={`Delete profile ${handle}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })
+          ) : (
+            <p className="text-xs text-zinc-500">No profiles yet. Add an account.</p>
+          )}
+        </div>
+        {supabase && activeProfileId && activeProfile ? (
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => setSocialConnectionsOpen(true)}
+              className="flex w-full items-center justify-center gap-2 rounded-md border border-violet-500/45 bg-violet-500/10 px-3 py-2 text-xs font-semibold text-violet-100 transition hover:bg-violet-500/15"
+            >
+              <span aria-hidden>🔗</span> Manage Connections
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+        <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Scheduling Rules</p>
+
+        <div className="mt-3">
+          <p className="text-[11px] uppercase tracking-wide text-zinc-500">Valid Days</p>
+          <div className="mt-2 grid grid-cols-7 gap-1">
+            {DAY_OPTIONS.map((day) => {
+              const enabled = rules.validDays.includes(day.key);
+              return (
+                <button
+                  key={day.key}
+                  type="button"
+                  onClick={() => toggleDay(day.key)}
+                  className={`rounded border px-1 py-1 text-[10px] font-semibold transition ${
+                    enabled
+                      ? "border-zinc-200 bg-zinc-100 text-zinc-900"
+                      : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800"
+                  }`}
+                >
+                  {day.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <label className="mt-3 block text-[11px] uppercase tracking-wide text-zinc-500">
+          Start Date
+          <input
+            type="date"
+            value={rules.startDate}
+            min={getTodayDateInput()}
+            onChange={(event) =>
+              updateRules((currentRules) => ({
+                ...currentRules,
+                startDate: event.target.value,
+              }))
+            }
+            className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
+          />
+        </label>
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <label className="text-[11px] uppercase tracking-wide text-zinc-500">
+            Start Time
+            <input
+              type="time"
+              value={rules.startTime}
+              onChange={(event) =>
+                updateRules((currentRules) => ({
+                  ...currentRules,
+                  startTime: event.target.value,
+                }))
+              }
+              className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
+            />
+          </label>
+          <label className="text-[11px] uppercase tracking-wide text-zinc-500">
+            End Time
+            <input
+              type="time"
+              value={rules.endTime}
+              onChange={(event) =>
+                updateRules((currentRules) => ({
+                  ...currentRules,
+                  endTime: event.target.value,
+                }))
+              }
+              className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
+            />
+          </label>
+        </div>
+
+        <label className="mt-3 block text-[11px] uppercase tracking-wide text-zinc-500">
+          Posts Per Week
+          <input
+            type="number"
+            min={1}
+            max={Math.max(1, rules.validDays.length)}
+            value={rules.postsPerWeek}
+            onChange={(event) => {
+              const parsed = Number.parseInt(event.target.value, 10);
+              const bounded = Number.isNaN(parsed)
+                ? 3
+                : Math.max(1, Math.min(parsed, Math.max(1, rules.validDays.length)));
+              updateRules((currentRules) => ({
+                ...currentRules,
+                postsPerWeek: bounded,
+              }));
+            }}
+            className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
+          />
+        </label>
+
+        <label className="mt-3 block text-[11px] uppercase tracking-wide text-zinc-500">
+          Minimum Interval (Hours)
+          <input
+            type="number"
+            min={1}
+            value={rules.minIntervalHours}
+            onChange={(event) => {
+              const parsed = Number.parseInt(event.target.value, 10);
+              updateRules((currentRules) => ({
+                ...currentRules,
+                minIntervalHours: Number.isNaN(parsed) ? 24 : Math.max(1, parsed),
+              }));
+            }}
+            className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
+          />
+        </label>
+      </div>
+    </>
+  );
+
   return (
-    <div className="flex h-screen overflow-hidden bg-background text-zinc-100">
-      <aside className="flex w-80 flex-col border-r border-white/10 bg-zinc-900/80">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background text-zinc-100 md:flex-row">
+      <aside className="hidden w-80 shrink-0 flex-col border-r border-white/10 bg-zinc-900/80 md:flex">
         <div className="p-6">
           <div className="flex items-start gap-3">
             <Image
@@ -1668,231 +1954,33 @@ export default function SchedulerPage() {
           </div>
         </div>
 
-        <div className="flex-1 space-y-4 overflow-y-auto p-6">
-          <p className="text-xs text-zinc-400">Plan visual posts with drag-and-drop layouting.</p>
-          {persistenceError ? (
-            <div className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-200">
-              {persistenceError}
-            </div>
-          ) : null}
-
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Client</p>
-              <button
-                type="button"
-                onClick={handleCreateClient}
-                className="rounded border border-zinc-700 px-2 py-1 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800"
-              >
-                + New Client
-              </button>
-            </div>
-            <select
-              value={activeClientId}
-              onChange={(event) => {
-                setActiveClientId(event.target.value);
-                setCurrentBoardIndex(0);
-              }}
-              className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 outline-none ring-zinc-500 focus:ring-2"
-            >
-              {clients.map((client) => (
-                <option key={client.id} value={client.id}>
-                  {client.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Profiles</p>
-              <button
-                type="button"
-                onClick={handleAddProfile}
-                className="rounded border border-zinc-700 px-2 py-1 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800"
-              >
-                + Add Account
-              </button>
-            </div>
-            <div className="mt-2 space-y-2">
-              {profiles.length > 0 ? (
-                profiles.map((profile) => {
-                  const handle = profile.handle ?? "@unknown";
-                  const isActive = profile.id === activeProfileId;
-                  return (
-                    <div key={profile.id} className="flex items-stretch gap-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setActiveProfileId(profile.id);
-                          setCurrentBoardIndex(0);
-                        }}
-                        className={`min-w-0 flex-1 rounded-md border px-3 py-2 text-left text-xs font-semibold transition ${
-                          isActive
-                            ? "border-zinc-200 bg-zinc-100 text-zinc-900"
-                            : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
-                        }`}
-                      >
-                        <span className="inline-flex items-center gap-2">
-                          {getPlatformIcon(profile.platform)}
-                          <span className="truncate">{handle}</span>
-                        </span>
-                      </button>
-                      {supabase ? (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteProfile(profile.id);
-                          }}
-                          className="shrink-0 rounded-md border border-red-500/35 bg-zinc-900 px-2 text-red-400/90 transition hover:border-red-500/60 hover:bg-red-500/10 hover:text-red-300"
-                          title="Delete profile"
-                          aria-label={`Delete profile ${handle}`}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
-                        </button>
-                      ) : null}
-                    </div>
-                  );
-                })
-              ) : (
-                <p className="text-xs text-zinc-500">No profiles yet. Add an account.</p>
-              )}
-            </div>
-            {supabase && activeProfileId && activeProfile ? (
-              <div className="mt-3">
-                <button
-                  type="button"
-                  onClick={() => setSocialConnectionsOpen(true)}
-                  className="flex w-full items-center justify-center gap-2 rounded-md border border-violet-500/45 bg-violet-500/10 px-3 py-2 text-xs font-semibold text-violet-100 transition hover:bg-violet-500/15"
-                >
-                  <span aria-hidden>🔗</span> Manage Connections
-                </button>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Scheduling Rules</p>
-
-            <div className="mt-3">
-              <p className="text-[11px] uppercase tracking-wide text-zinc-500">Valid Days</p>
-              <div className="mt-2 grid grid-cols-7 gap-1">
-                {DAY_OPTIONS.map((day) => {
-                  const enabled = rules.validDays.includes(day.key);
-                  return (
-                    <button
-                      key={day.key}
-                      type="button"
-                      onClick={() => toggleDay(day.key)}
-                      className={`rounded border px-1 py-1 text-[10px] font-semibold transition ${
-                        enabled
-                          ? "border-zinc-200 bg-zinc-100 text-zinc-900"
-                          : "border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800"
-                      }`}
-                    >
-                      {day.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <label className="mt-3 block text-[11px] uppercase tracking-wide text-zinc-500">
-              Start Date
-              <input
-                type="date"
-                value={rules.startDate}
-                min={getTodayDateInput()}
-                onChange={(event) =>
-                  updateRules((currentRules) => ({
-                    ...currentRules,
-                    startDate: event.target.value,
-                  }))
-                }
-                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
-              />
-            </label>
-
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <label className="text-[11px] uppercase tracking-wide text-zinc-500">
-                Start Time
-                <input
-                  type="time"
-                  value={rules.startTime}
-                  onChange={(event) =>
-                    updateRules((currentRules) => ({
-                      ...currentRules,
-                      startTime: event.target.value,
-                    }))
-                  }
-                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
-                />
-              </label>
-              <label className="text-[11px] uppercase tracking-wide text-zinc-500">
-                End Time
-                <input
-                  type="time"
-                  value={rules.endTime}
-                  onChange={(event) =>
-                    updateRules((currentRules) => ({
-                      ...currentRules,
-                      endTime: event.target.value,
-                    }))
-                  }
-                  className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
-                />
-              </label>
-            </div>
-
-            <label className="mt-3 block text-[11px] uppercase tracking-wide text-zinc-500">
-              Posts Per Week
-              <input
-                type="number"
-                min={1}
-                max={Math.max(1, rules.validDays.length)}
-                value={rules.postsPerWeek}
-                onChange={(event) => {
-                  const parsed = Number.parseInt(event.target.value, 10);
-                  const bounded = Number.isNaN(parsed)
-                    ? 3
-                    : Math.max(1, Math.min(parsed, Math.max(1, rules.validDays.length)));
-                  updateRules((currentRules) => ({
-                    ...currentRules,
-                    postsPerWeek: bounded,
-                  }));
-                }}
-                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
-              />
-            </label>
-
-            <label className="mt-3 block text-[11px] uppercase tracking-wide text-zinc-500">
-              Minimum Interval (Hours)
-              <input
-                type="number"
-                min={1}
-                value={rules.minIntervalHours}
-                onChange={(event) => {
-                  const parsed = Number.parseInt(event.target.value, 10);
-                  updateRules((currentRules) => ({
-                    ...currentRules,
-                    minIntervalHours: Number.isNaN(parsed) ? 24 : Math.max(1, parsed),
-                  }));
-                }}
-                className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none ring-zinc-500 focus:ring-2"
-              />
-            </label>
-          </div>
-        </div>
+        <div className="flex-1 space-y-4 overflow-y-auto p-6">{renderConfigPanel()}</div>
       </aside>
 
-      <section className="flex-1 overflow-y-auto p-6 lg:p-8">
-        <div className="relative mx-auto mt-8 flex h-[85vh] w-full items-center justify-center">
+      <section className="flex w-full min-w-0 flex-1 flex-col overflow-y-auto p-4 sm:p-6 lg:p-8">
+        <div className="mb-4 md:hidden">
+          <button
+            type="button"
+            onClick={() => setMobileConfigOpen((open) => !open)}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-zinc-100 transition hover:bg-zinc-800"
+            aria-expanded={mobileConfigOpen}
+          >
+            <span aria-hidden>⚙️</span>
+            {mobileConfigOpen ? "Hide Scheduler Settings" : "Configure Scheduler"}
+          </button>
+          {mobileConfigOpen ? (
+            <div className="mt-3 space-y-4 rounded-lg border border-white/10 bg-zinc-900/80 p-4">
+              {renderConfigPanel()}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="relative mx-auto flex w-full max-w-full flex-col items-stretch justify-start py-2 md:mt-8 md:h-[85vh] md:items-center md:justify-center">
           <button
             type="button"
             onClick={() => setCurrentBoardIndex((prev) => Math.max(0, prev - 1))}
             disabled={currentBoardIndex === 0}
-            className={`absolute left-2 z-20 flex h-12 w-12 items-center justify-center rounded-full border text-2xl transition ${
+            className={`absolute left-2 z-20 hidden h-12 w-12 items-center justify-center rounded-full border text-2xl transition md:flex ${
               currentBoardIndex === 0
                 ? "cursor-not-allowed opacity-50 border-zinc-800 bg-zinc-900/50 text-zinc-700"
                 : "border-zinc-700 bg-zinc-900/80 text-zinc-200 hover:bg-zinc-800"
@@ -1909,16 +1997,16 @@ export default function SchedulerPage() {
               ensureBoardExists(nextBoard);
               setCurrentBoardIndex(nextBoard);
             }}
-            className="absolute right-2 z-20 flex h-12 w-12 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900/80 text-2xl text-zinc-200 transition hover:bg-zinc-800"
+            className="absolute right-2 z-20 hidden h-12 w-12 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900/80 text-2xl text-zinc-200 transition hover:bg-zinc-800 md:flex"
             aria-label="Next board"
           >
             &gt;
           </button>
 
-          <div className="relative mx-4 flex w-full max-w-sm flex-col md:max-w-lg">
-            <div className="mb-4 flex items-center justify-between">
+          <div className="relative mx-auto flex w-full max-w-full flex-col px-1 sm:px-4 md:max-w-lg">
+            <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-sm font-semibold tracking-wide text-zinc-400">
-                <span className="inline-flex items-center gap-2">
+                <span className="inline-flex flex-wrap items-center gap-2">
                   <span>{activeClientName} -</span>
                   <span className="inline-flex items-center gap-1">
                     {getPlatformIcon(activeProfile?.platform)}
@@ -1929,7 +2017,28 @@ export default function SchedulerPage() {
                   <span>- {currentBoardIndex + 1}</span>
                 </span>
               </h2>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                {currentBoardIndex > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setCurrentBoardIndex((prev) => Math.max(0, prev - 1))}
+                    disabled={currentBoardIndex === 0}
+                    className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs font-semibold text-zinc-200 hover:bg-zinc-800 md:hidden"
+                  >
+                    Previous board
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextBoard = currentBoardIndex + 1;
+                    ensureBoardExists(nextBoard);
+                    setCurrentBoardIndex(nextBoard);
+                  }}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs font-semibold text-zinc-200 hover:bg-zinc-800 md:hidden"
+                >
+                  Next board
+                </button>
                 <button
                   type="button"
                   onClick={calculateSchedule}
@@ -1942,14 +2051,28 @@ export default function SchedulerPage() {
 
             {currentBoardIndex > 0 ? (
               <div className="group mb-[5px]">
-                <div className="w-full cursor-pointer bg-white/5 py-1 text-center text-xs text-gray-400">
-                  Hover for Continuity Check <span className="text-gray-500">v</span>
-                </div>
-                <div className="mt-[5px] hidden w-full grid-cols-3 gap-[5px] border border-white/10 bg-background p-2 shadow-2xl group-hover:grid">
+                <button
+                  type="button"
+                  className="w-full bg-white/5 py-1 text-center text-xs text-gray-400 md:cursor-default"
+                  onClick={() => setContinuityOpen((open) => !open)}
+                >
+                  <span className="md:hidden">
+                    {continuityOpen ? "Hide" : "Show"} Continuity Check{" "}
+                    <span className="text-gray-500">{continuityOpen ? "^" : "v"}</span>
+                  </span>
+                  <span className="hidden md:inline">
+                    Hover for Continuity Check <span className="text-gray-500">v</span>
+                  </span>
+                </button>
+                <div
+                  className={`mt-[5px] w-full grid-cols-3 gap-[5px] border border-white/10 bg-background p-2 shadow-2xl ${
+                    continuityOpen ? "grid" : "hidden md:group-hover:grid"
+                  }`}
+                >
                   {previousBoardBottomRow.map((slot, continuityIndex) => (
                     <div
                       key={`continuity-${continuityIndex}`}
-                      className="relative aspect-[4/5] overflow-hidden rounded-md border border-zinc-800 bg-zinc-900 opacity-50"
+                      className="relative aspect-square overflow-hidden rounded-md border border-zinc-800 bg-zinc-900 opacity-50 md:aspect-[4/5]"
                     >
                       {slot ? (
                         <img
@@ -1968,119 +2091,54 @@ export default function SchedulerPage() {
               </div>
             ) : null}
 
-            <div className="grid grid-cols-3 gap-[5px]">
-              {currentSlots.map((slot, localIndex) => {
-                const absoluteIndex = boardStart + localIndex;
-                const isHovered = hoveredSlot === absoluteIndex;
-                const isEmpty = slot === null;
-                return (
-                  <div
-                    key={`slot-${absoluteIndex}`}
-                    draggable={!isEmpty}
-                    onDragStart={
-                      !isEmpty
-                        ? (event) => {
-                            event.dataTransfer.setData("sourceIndex", absoluteIndex.toString());
-                            event.dataTransfer.effectAllowed = "move";
-                            setDraggingSlot(absoluteIndex);
-                          }
-                        : undefined
-                    }
-                    onDragEnd={() => {
-                      setDraggingSlot(null);
-                      setHoveredSlot(null);
-                    }}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      setHoveredSlot(absoluteIndex);
-                    }}
-                    onDragLeave={() => {
-                      setHoveredSlot((current) => (current === absoluteIndex ? null : current));
-                    }}
-                    onDrop={(event) => handleDrop(localIndex, event)}
-                    onClick={
-                      !isEmpty
-                        ? () => {
-                            if (draggingSlot !== null) {
-                              return;
-                            }
-                            setEditingSlotIndex(absoluteIndex);
-                          }
-                        : undefined
-                    }
-                    className={`group relative aspect-[4/5] overflow-hidden rounded-md transition ${
-                      isEmpty
-                        ? `border border-dashed ${
-                            isHovered
-                              ? "border-zinc-300 bg-zinc-800/80 shadow-[0_0_0_1px_rgba(244,244,245,0.5)]"
-                              : "border-zinc-700 bg-zinc-900/70"
-                          }`
-                        : "cursor-pointer border border-zinc-800 bg-zinc-900 ring-white/20 group-hover:ring-2"
-                    } ${draggingSlot === absoluteIndex ? "opacity-50" : ""}`}
-                  >
-                    {slot ? (
-                      <>
-                        <img
-                          src={slot.fileUrl}
-                          alt={`Scheduled slot ${absoluteIndex + 1}`}
-                          className="h-full w-full object-cover"
-                        />
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleDeleteScheduledPost(absoluteIndex);
-                          }}
-                          className="absolute left-2 top-2 z-10 rounded-md bg-black/70 p-1 text-zinc-200 opacity-0 transition hover:bg-red-600/90 hover:text-white group-hover:opacity-100"
-                          title="Delete post"
-                          aria-label={`Delete post in slot ${absoluteIndex + 1}`}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
-                        </button>
-                        {slot.status === "published" ? (
-                          <span
-                            className="absolute right-2 top-2 z-10 rounded-full bg-black/70 p-1 text-pink-300"
-                            title="Published to Instagram"
-                          >
-                            {getPlatformIcon("instagram", "h-3.5 w-3.5")}
-                          </span>
-                        ) : slot.status === "scheduled_with_meta" ? (
-                          <span
-                            className="absolute right-2 top-2 z-10 rounded-full bg-emerald-900/80 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-200"
-                            title={
-                              slot.metaCreationId
-                                ? `Scheduled with Meta (creation_id ${slot.metaCreationId})`
-                                : "Scheduled with Instagram / Meta"
-                            }
-                          >
-                            Meta
-                          </span>
-                        ) : slot.status === "failed" ? (
-                          <span
-                            className="absolute right-2 top-2 z-10 rounded-full bg-black/70 p-1"
-                            title={slot.publishError?.trim() || "Publish failed"}
-                          >
-                            <AlertCircle className="h-3.5 w-3.5 text-red-500" aria-hidden />
-                          </span>
-                        ) : null}
-                        <span className="absolute bottom-2 left-2 right-2 rounded bg-black/70 px-2 py-0.5 text-[10px] font-medium leading-snug text-zinc-100">
-                          {slot.postType && slot.postType !== "FEED"
-                            ? `${slot.postType === "REEL" ? "Reel" : "Story"} · `
-                            : ""}
-                          {slot.scheduledAt
-                            ? `${slot.isCustomSchedule ? "Custom · " : ""}${badgeFormatter.format(slot.scheduledAt)}`
-                            : "Pending"}
-                        </span>
-                      </>
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-center text-[11px] text-zinc-500">
-                        Drop image
-                      </div>
-                    )}
+            <DndContext
+              sensors={sensors}
+              onDragStart={handleDragStart}
+              onDragOver={handleDragOver}
+              onDragEnd={handleDragEnd}
+            >
+              <div className="grid w-full grid-cols-3 gap-[5px]">
+                {currentSlots.map((slot, localIndex) => {
+                  const absoluteIndex = boardStart + localIndex;
+                  const scheduledLabel =
+                    slot?.postType && slot.postType !== "FEED"
+                      ? `${slot.postType === "REEL" ? "Reel" : "Story"} · `
+                      : "";
+                  const label =
+                    slot?.scheduledAt
+                      ? `${scheduledLabel}${slot.isCustomSchedule ? "Custom · " : ""}${badgeFormatter.format(slot.scheduledAt)}`
+                      : `${scheduledLabel}Pending`;
+
+                  return (
+                    <SchedulerFeedSlot
+                      key={`slot-${absoluteIndex}`}
+                      slot={slot}
+                      absoluteIndex={absoluteIndex}
+                      localIndex={localIndex}
+                      isHovered={hoveredSlot === absoluteIndex}
+                      isDragging={draggingSlot === absoluteIndex}
+                      draggingSlot={draggingSlot}
+                      scheduledLabel={label}
+                      onDelete={handleDeleteScheduledPost}
+                      onEdit={setEditingSlotIndex}
+                      onNativeDrop={handleDrop}
+                      platformIcon={getPlatformIcon}
+                    />
+                  );
+                })}
+              </div>
+              <DragOverlay>
+                {activeDragSlot ? (
+                  <div className="aspect-square w-24 overflow-hidden rounded-md border border-zinc-200 bg-zinc-900 shadow-2xl md:aspect-[4/5] md:w-28">
+                    <img
+                      src={activeDragSlot.fileUrl}
+                      alt="Dragging post"
+                      className="h-full w-full object-cover"
+                    />
                   </div>
-                );
-              })}
-            </div>
+                ) : null}
+              </DragOverlay>
+            </DndContext>
           </div>
         </div>
       </section>

@@ -1,10 +1,15 @@
 "use server";
 
 import { createServerClient } from "@supabase/ssr";
-import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
+import {
+  closeStaleOpenShiftsInternal,
+  getShiftServiceSupabase,
+  persistOpenShiftClose,
+} from "@/lib/server/closeStaleShifts";
 import { getAuthRole } from "@/lib/server/getAuthRole";
+import { durationMinutesFromRange } from "@/lib/shiftCaps";
 
 /**
  * Expected Supabase table:
@@ -19,51 +24,10 @@ import { getAuthRole } from "@/lib/server/getAuthRole";
  * )
  */
 
-function serviceSupabase() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
-  const key = serviceKey || anonKey;
-  if (!url || !key) {
-    return null;
-  }
-  return createClient(url, key, { auth: { persistSession: false } });
-}
-
-function durationMinutes(clockInAt: string, clockOutAt: Date): number {
-  const inMs = new Date(clockInAt).getTime();
-  const outMs = clockOutAt.getTime();
-  if (!Number.isFinite(inMs) || !Number.isFinite(outMs) || outMs <= inMs) {
-    return 0;
-  }
-  return Math.round((outMs - inMs) / 60_000);
-}
-
-const ORPHAN_SHIFT_CAP_MINUTES = 720;
-const ORPHAN_SHIFT_CAP_MS = ORPHAN_SHIFT_CAP_MINUTES * 60_000;
-
-function resolveOrphanShiftClose(
-  clockInAt: string,
-  now: Date
-): { clockOutAt: Date; durationMinutes: number } {
-  const clockInMs = new Date(clockInAt).getTime();
-  if (!Number.isFinite(clockInMs)) {
-    return { clockOutAt: now, durationMinutes: 0 };
-  }
-
-  const elapsedMs = now.getTime() - clockInMs;
-  if (elapsedMs > ORPHAN_SHIFT_CAP_MS) {
-    return {
-      clockOutAt: new Date(clockInMs + ORPHAN_SHIFT_CAP_MS),
-      durationMinutes: ORPHAN_SHIFT_CAP_MINUTES,
-    };
-  }
-
-  return {
-    clockOutAt: now,
-    durationMinutes: durationMinutes(clockInAt, now),
-  };
-}
+type ShiftUpdateRow = {
+  id: string;
+  clock_in_at: string;
+};
 
 async function getSessionUserId(): Promise<string | null> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
@@ -112,6 +76,26 @@ async function assertUserMatchesSession(userId: string): Promise<{ ok: true } | 
   return { ok: true };
 }
 
+async function assertAdmin(): Promise<{ ok: true } | { ok: false; error: string }> {
+  const auth = await getAuthRole();
+  if (!auth.authenticated || !auth.isAdmin) {
+    return { ok: false, error: "Forbidden" };
+  }
+  return { ok: true };
+}
+
+export async function syncOwnOpenShift(): Promise<{ ok: true; closed: number } | { ok: false; error: string }> {
+  const auth = await getAuthRole();
+  if (!auth.authenticated) {
+    return { ok: false, error: "Unauthorized" };
+  }
+  const sessionUserId = await getSessionUserId();
+  if (!sessionUserId) {
+    return { ok: true, closed: 0 };
+  }
+  return closeStaleOpenShiftsInternal({ userId: sessionUserId });
+}
+
 export async function handleClockIn(
   userId: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -120,7 +104,7 @@ export async function handleClockIn(
     return authCheck;
   }
 
-  const sb = serviceSupabase();
+  const sb = getShiftServiceSupabase();
   if (!sb) {
     return { ok: false, error: "Database is not configured." };
   }
@@ -139,20 +123,11 @@ export async function handleClockIn(
     return { ok: false, error: openErr.message };
   }
 
-  for (const shift of openShifts ?? []) {
-    const clockInAt = String(shift.clock_in_at ?? "");
-    const orphanClose = resolveOrphanShiftClose(clockInAt, now);
-    const { error: closeErr } = await sb
-      .from("user_shifts")
-      .update({
-        clock_out_at: orphanClose.clockOutAt.toISOString(),
-        duration_minutes: orphanClose.durationMinutes,
-      })
-      .eq("id", shift.id);
-
-    if (closeErr) {
-      console.error("[handleClockIn close orphan]", closeErr);
-      return { ok: false, error: closeErr.message };
+  for (const shift of (openShifts ?? []) as ShiftUpdateRow[]) {
+    const persisted = await persistOpenShiftClose(sb, shift.id, String(shift.clock_in_at ?? ""), now);
+    if (!persisted.ok) {
+      console.error("[handleClockIn close orphan]", persisted.error);
+      return persisted;
     }
   }
 
@@ -177,7 +152,7 @@ export async function handleClockOut(
     return authCheck;
   }
 
-  const sb = serviceSupabase();
+  const sb = getShiftServiceSupabase();
   if (!sb) {
     return { ok: false, error: "Database is not configured." };
   }
@@ -203,19 +178,105 @@ export async function handleClockOut(
     return { ok: true };
   }
 
-  const clockInAt = String(activeShift.clock_in_at ?? "");
-  const { error: updateErr } = await sb
-    .from("user_shifts")
-    .update({
-      clock_out_at: now.toISOString(),
-      duration_minutes: durationMinutes(clockInAt, now),
-    })
-    .eq("id", activeShift.id);
-
-  if (updateErr) {
-    console.error("[handleClockOut update]", updateErr);
-    return { ok: false, error: updateErr.message };
+  const persisted = await persistOpenShiftClose(
+    sb,
+    String(activeShift.id),
+    String(activeShift.clock_in_at ?? ""),
+    now,
+    "user"
+  );
+  if (!persisted.ok) {
+    console.error("[handleClockOut update]", persisted.error);
+    return persisted;
   }
 
   return { ok: true };
+}
+
+function parseIsoTimestamp(value: string): Date | null {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed;
+}
+
+export async function adminUpdateShift(
+  shiftId: string,
+  clockInAt: string,
+  clockOutAt: string | null
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const admin = await assertAdmin();
+  if (!admin.ok) {
+    return admin;
+  }
+
+  const id = shiftId.trim();
+  if (!id) {
+    return { ok: false, error: "Shift id is required." };
+  }
+
+  const clockIn = parseIsoTimestamp(clockInAt);
+  if (!clockIn) {
+    return { ok: false, error: "Invalid clock-in time." };
+  }
+
+  let clockOut: Date | null = null;
+  if (clockOutAt != null && clockOutAt.trim() !== "") {
+    clockOut = parseIsoTimestamp(clockOutAt);
+    if (!clockOut) {
+      return { ok: false, error: "Invalid clock-out time." };
+    }
+    if (clockOut.getTime() <= clockIn.getTime()) {
+      return { ok: false, error: "Clock-out must be after clock-in." };
+    }
+  }
+
+  const sb = getShiftServiceSupabase();
+  if (!sb) {
+    return { ok: false, error: "Database is not configured." };
+  }
+
+  const { error } = await sb
+    .from("user_shifts")
+    .update({
+      clock_in_at: clockIn.toISOString(),
+      clock_out_at: clockOut ? clockOut.toISOString() : null,
+      duration_minutes: clockOut ? durationMinutesFromRange(clockIn.toISOString(), clockOut) : null,
+    })
+    .eq("id", id);
+
+  if (error) {
+    console.error("[adminUpdateShift]", error);
+    return { ok: false, error: error.message };
+  }
+
+  return { ok: true };
+}
+
+export async function adminDeleteShifts(
+  shiftIds: string[]
+): Promise<{ ok: true; deleted: number } | { ok: false; error: string }> {
+  const admin = await assertAdmin();
+  if (!admin.ok) {
+    return admin;
+  }
+
+  const ids = [...new Set(shiftIds.map((id) => id.trim()).filter(Boolean))];
+  if (ids.length === 0) {
+    return { ok: false, error: "No shifts selected." };
+  }
+
+  const sb = getShiftServiceSupabase();
+  if (!sb) {
+    return { ok: false, error: "Database is not configured." };
+  }
+
+  const { data, error } = await sb.from("user_shifts").delete().in("id", ids).select("id");
+  if (error) {
+    console.error("[adminDeleteShifts]", error);
+    return { ok: false, error: error.message };
+  }
+
+  return { ok: true, deleted: data?.length ?? 0 };
 }

@@ -3,12 +3,14 @@
 import { createClient } from "@supabase/supabase-js";
 
 import { canAccessModule } from "@/lib/appModules";
+import { closeStaleOpenShiftsInternal } from "@/lib/server/closeStaleShifts";
 import { getAuthRole } from "@/lib/server/getAuthRole";
 import {
   isDateWithinReportingRange,
   resolveReportingRange,
   type ReportingPeriodInput,
 } from "@/lib/reportingPeriod";
+import { resolveOpenShiftClose, zonedDateKey } from "@/lib/shiftCaps";
 import { isTestTaskRow } from "@/lib/testTaskFilter";
 
 export type ProductivityTimeframe = "day" | "month" | "year" | "custom";
@@ -33,7 +35,7 @@ export type ProductivitySummary = {
   averageTaskDuration: number;
 };
 
-export type ProductivityDailyLog = {
+export type ProductivityShiftLog = {
   id: string;
   date: string;
   userId: string;
@@ -44,6 +46,11 @@ export type ProductivityDailyLog = {
   tasksCompleted: number;
   studioTasksCompleted: number;
   taskMinutes: number;
+};
+
+export type ProductivityDailyLog = ProductivityShiftLog & {
+  shiftCount: number;
+  shifts: ProductivityShiftLog[];
 };
 
 export type ProductivityTeamUser = {
@@ -149,7 +156,10 @@ function studioEditorId(row: StudioTaskRow): string | null {
   return typeof legacy === "string" && legacy.trim() ? legacy.trim() : null;
 }
 
-function shiftDurationMinutes(row: ShiftRow): number {
+function shiftDurationMinutes(row: ShiftRow, now = new Date()): number {
+  if (!row.clock_out_at) {
+    return resolveOpenShiftClose(row.clock_in_at, now).durationMinutes;
+  }
   if (row.duration_minutes !== null && row.duration_minutes !== undefined) {
     const n = Number(row.duration_minutes);
     if (Number.isFinite(n) && n >= 0) {
@@ -157,11 +167,26 @@ function shiftDurationMinutes(row: ShiftRow): number {
     }
   }
   const start = parseDate(row.clock_in_at);
-  const end = parseDate(row.clock_out_at) ?? new Date();
-  if (!start) {
+  const end = parseDate(row.clock_out_at);
+  if (!start || !end) {
     return 0;
   }
   return Math.max(0, Math.round((end.getTime() - start.getTime()) / 60_000));
+}
+
+function applyOpenShiftCap(row: ShiftRow, now = new Date()): ShiftRow {
+  if (row.clock_out_at) {
+    return row;
+  }
+  const close = resolveOpenShiftClose(row.clock_in_at, now);
+  if (!close.isStale) {
+    return row;
+  }
+  return {
+    ...row,
+    clock_out_at: close.clockOutAt.toISOString(),
+    duration_minutes: close.durationMinutes,
+  };
 }
 
 function utilizationRate(taskMinutes: number, clockedMinutes: number): number {
@@ -339,12 +364,12 @@ function isWithinRange(at: Date | null, start: Date, end: Date): at is Date {
   return Boolean(at && at >= start && at <= end);
 }
 
-function isWithinShift(at: Date | null, shift: ShiftRow): at is Date {
+function isWithinShift(at: Date | null, shift: ShiftRow, now = new Date()): at is Date {
   const start = parseDate(shift.clock_in_at);
   if (!start || !at) {
     return false;
   }
-  const end = parseDate(shift.clock_out_at) ?? new Date();
+  const end = parseDate(shift.clock_out_at) ?? now;
   return at >= start && at <= end;
 }
 
@@ -471,6 +496,11 @@ export async function getProductivityStats(
 
   const filterUserId = userId?.trim() || null;
 
+  const staleClose = await closeStaleOpenShiftsInternal();
+  if (!staleClose.ok) {
+    console.warn("[getProductivityStats] stale shift close failed:", staleClose.error);
+  }
+
   let shiftsQuery = sb
     .from("user_shifts")
     .select("id, user_id, clock_in_at, clock_out_at, duration_minutes")
@@ -515,7 +545,8 @@ export async function getProductivityStats(
     return { ok: false, error: studioRes.error.message };
   }
 
-  const shifts = (shiftsRes.data ?? []) as ShiftRow[];
+  const now = new Date();
+  const shifts = ((shiftsRes.data ?? []) as ShiftRow[]).map((shift) => applyOpenShiftCap(shift, now));
   const kanbanTasks = ((tasksRes.data ?? []) as TaskRow[]).filter((row) => isKanbanTaskCompleted(row.status));
   const studioTasks = (studioRes.data ?? []) as StudioTaskRow[];
 
@@ -549,7 +580,7 @@ export async function getProductivityStats(
     if (!bucket) {
       continue;
     }
-    bucket.totalClockedInMinutes += shiftDurationMinutes(shift);
+    bucket.totalClockedInMinutes += shiftDurationMinutes(shift, now);
   }
 
   for (const row of kanbanTasks) {
@@ -624,62 +655,105 @@ export async function getProductivityStats(
   const allTaskDurations = [...bucketTaskDurations.values()].flat();
   summary.averageTaskDuration = average(allTaskDurations);
 
-  const dailyLogs: ProductivityDailyLog[] = shifts
-    .map((shift) => {
-      const userIdValue = String(shift.user_id ?? "").trim();
-      const profile = profileMap.get(userIdValue);
-      const shiftStart = parseDate(shift.clock_in_at);
-      const shiftEnd = parseDate(shift.clock_out_at);
+  const shiftLogs: ProductivityShiftLog[] = shifts.map((shift) => {
+    const userIdValue = String(shift.user_id ?? "").trim();
+    const profile = profileMap.get(userIdValue);
+    const shiftStart = parseDate(shift.clock_in_at);
 
-      let tasksCompleted = 0;
-      let studioTasksCompleted = 0;
-      let taskMinutes = 0;
+    let tasksCompleted = 0;
+    let studioTasksCompleted = 0;
+    let taskMinutes = 0;
 
-      for (const row of kanbanTasks) {
-        const completedAt = taskCompletedAt(row);
-        const editor = taskEditorId(row);
-        if (!isWithinShift(completedAt, shift)) {
-          continue;
-        }
-        if (editor && editor !== userIdValue) {
-          continue;
-        }
-        if (!editor && filterUserId && filterUserId !== userIdValue) {
-          continue;
-        }
-        tasksCompleted += 1;
-        taskMinutes += kanbanTaskEditMinutes(row);
+    for (const row of kanbanTasks) {
+      const completedAt = taskCompletedAt(row);
+      const editor = taskEditorId(row);
+      if (!isWithinShift(completedAt, shift, now)) {
+        continue;
       }
-
-      for (const row of studioTasks) {
-        const completedAt = studioTaskCompletedAt(row);
-        const editor = studioEditorId(row);
-        if (!isWithinShift(completedAt, shift)) {
-          continue;
-        }
-        if (editor && editor !== userIdValue) {
-          continue;
-        }
-        if (!editor && filterUserId && filterUserId !== userIdValue) {
-          continue;
-        }
-        studioTasksCompleted += 1;
-        taskMinutes += studioTaskEditMinutes(row);
+      if (editor && editor !== userIdValue) {
+        continue;
       }
+      if (!editor && filterUserId && filterUserId !== userIdValue) {
+        continue;
+      }
+      tasksCompleted += 1;
+      taskMinutes += kanbanTaskEditMinutes(row);
+    }
+
+    for (const row of studioTasks) {
+      const completedAt = studioTaskCompletedAt(row);
+      const editor = studioEditorId(row);
+      if (!isWithinShift(completedAt, shift, now)) {
+        continue;
+      }
+      if (editor && editor !== userIdValue) {
+        continue;
+      }
+      if (!editor && filterUserId && filterUserId !== userIdValue) {
+        continue;
+      }
+      studioTasksCompleted += 1;
+      taskMinutes += studioTaskEditMinutes(row);
+    }
+
+    return {
+      id: shift.id,
+      date: shiftStart ? zonedDateKey(shiftStart) : "",
+      userId: userIdValue,
+      userName: profile?.name ?? (userIdValue.slice(0, 8) || "Unknown"),
+      clockInAt: shift.clock_in_at ?? null,
+      clockOutAt: shift.clock_out_at ?? null,
+      shiftDurationMinutes: shiftDurationMinutes(shift, now),
+      tasksCompleted,
+      studioTasksCompleted,
+      taskMinutes: Math.round(taskMinutes * 10) / 10,
+    };
+  });
+
+  const grouped = new Map<string, ProductivityShiftLog[]>();
+  for (const log of shiftLogs) {
+    const key = `${log.userId}:${log.date}`;
+    const existing = grouped.get(key) ?? [];
+    existing.push(log);
+    grouped.set(key, existing);
+  }
+
+  const dailyLogs: ProductivityDailyLog[] = [...grouped.entries()]
+    .map(([key, groupShifts]) => {
+      const shiftsForDay = [...groupShifts].sort((a, b) => {
+        const aTime = parseDate(a.clockInAt)?.getTime() ?? 0;
+        const bTime = parseDate(b.clockInAt)?.getTime() ?? 0;
+        return aTime - bTime;
+      });
+      const first = shiftsForDay[0];
+      if (!first) {
+        return null;
+      }
+      const lastClosed = [...shiftsForDay]
+        .filter((shift) => shift.clockOutAt)
+        .sort((a, b) => {
+          const aTime = parseDate(a.clockOutAt)?.getTime() ?? 0;
+          const bTime = parseDate(b.clockOutAt)?.getTime() ?? 0;
+          return bTime - aTime;
+        })[0];
+      const hasOpenShift = shiftsForDay.some((shift) => !shift.clockOutAt);
 
       return {
-        id: shift.id,
-        date: shiftStart ? dateKey(shiftStart) : "",
-        userId: userIdValue,
-        userName: profile?.name ?? (userIdValue.slice(0, 8) || "Unknown"),
-        clockInAt: shift.clock_in_at ?? null,
-        clockOutAt: shift.clock_out_at ?? null,
-        shiftDurationMinutes: shiftDurationMinutes(shift),
-        tasksCompleted,
-        studioTasksCompleted,
-        taskMinutes: Math.round(taskMinutes * 10) / 10,
+        id: key,
+        date: first.date,
+        userId: first.userId,
+        userName: first.userName,
+        clockInAt: first.clockInAt,
+        clockOutAt: hasOpenShift ? null : (lastClosed?.clockOutAt ?? null),
+        shiftDurationMinutes: shiftsForDay.reduce((sum, shift) => sum + shift.shiftDurationMinutes, 0),
+        tasksCompleted: shiftsForDay.reduce((sum, shift) => sum + shift.tasksCompleted, 0),
+        studioTasksCompleted: shiftsForDay.reduce((sum, shift) => sum + shift.studioTasksCompleted, 0),
+        taskMinutes: Math.round(shiftsForDay.reduce((sum, shift) => sum + shift.taskMinutes, 0) * 10) / 10,
+        shiftCount: shiftsForDay.length,
+        shifts: shiftsForDay,
       };
     })
+    .filter((row): row is ProductivityDailyLog => row !== null)
     .sort((a, b) => {
       const aTime = parseDate(a.clockInAt)?.getTime() ?? 0;
       const bTime = parseDate(b.clockInAt)?.getTime() ?? 0;

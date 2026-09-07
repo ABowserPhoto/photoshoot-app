@@ -56,6 +56,13 @@ export default function AutoLogout() {
     }
 
     const markActive = () => {
+      if (loggingOutRef.current) {
+        return;
+      }
+      if (isIdleExpired()) {
+        void forceLogout();
+        return;
+      }
       const now = Date.now();
       if (now - lastActivityWriteRef.current < ACTIVITY_THROTTLE_MS) {
         return;
@@ -64,20 +71,28 @@ export default function AutoLogout() {
       writeLastActiveTime(now);
     };
 
-    for (const event of ACTIVITY_EVENTS) {
-      window.addEventListener(event, markActive, { passive: true });
-    }
-
-    const intervalId = window.setInterval(() => {
+    const checkIdle = () => {
       if (isIdleExpired()) {
         void forceLogout();
       }
-    }, CHECK_INTERVAL_MS);
+    };
+
+    for (const event of ACTIVITY_EVENTS) {
+      window.addEventListener(event, markActive, { passive: true });
+    }
+    window.addEventListener("focus", checkIdle);
+    document.addEventListener("visibilitychange", checkIdle);
+    window.addEventListener("pageshow", checkIdle);
+
+    const intervalId = window.setInterval(checkIdle, CHECK_INTERVAL_MS);
 
     return () => {
       for (const event of ACTIVITY_EVENTS) {
         window.removeEventListener(event, markActive);
       }
+      window.removeEventListener("focus", checkIdle);
+      document.removeEventListener("visibilitychange", checkIdle);
+      window.removeEventListener("pageshow", checkIdle);
       window.clearInterval(intervalId);
     };
   }, [authenticated, isLoading, logout]);

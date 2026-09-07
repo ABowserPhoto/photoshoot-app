@@ -22,12 +22,13 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useSearchParams } from "next/navigation";
 
 import { getAllMoodboards, type MoodboardSummary } from "@/app/actions/moodboard";
+import NoteAccessControlFields from "@/app/components/NoteAccessControlFields";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import type {
   NotebookAccessLevel,
   NotebookWithNotes,
+  NoteRecord,
   NoteSummary,
-  NoteVisibility,
 } from "@/lib/server/notesSupabase";
 
 type RecipientOption = {
@@ -51,16 +52,7 @@ const RichTextEditor = dynamic(() => import("@/app/components/RichTextEditor"), 
   ),
 });
 
-type FullNote = {
-  id: string;
-  notebookId: string;
-  title: string;
-  content: string;
-  visibility: NoteVisibility;
-  moodboardId: string | null;
-  updatedAt: string;
-  createdAt: string;
-};
+type FullNote = NoteRecord;
 
 function toErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message.trim()) return error.message;
@@ -251,7 +243,8 @@ function NotesPageContent() {
       patch: {
         title?: string;
         content?: string;
-        visibility?: NoteVisibility;
+        accessLevel?: NotebookAccessLevel;
+        assignedUserIds?: string[];
         moodboardId?: string | null;
       }
     ) => {
@@ -286,6 +279,8 @@ function NotesPageContent() {
               notebookId: payload.note!.notebookId,
               title: payload.note!.title,
               visibility: payload.note!.visibility,
+              accessLevel: payload.note!.accessLevel,
+              assignedUserIds: payload.note!.assignedUserIds,
               moodboardId: payload.note!.moodboardId,
               updatedAt: payload.note!.updatedAt,
               createdAt: payload.note!.createdAt,
@@ -357,6 +352,52 @@ function NotesPageContent() {
     });
   }, []);
 
+  const updateActiveNoteAccess = useCallback(
+    (next: { accessLevel: NotebookAccessLevel; assignedUserIds: string[] }) => {
+      if (!activeNote) return;
+
+      // Always update local UI so the Specific Users checklist can appear even
+      // before any checkboxes are selected. Persist only when the selection is valid.
+      setActiveNote((prev) =>
+        prev
+          ? {
+              ...prev,
+              accessLevel: next.accessLevel,
+              assignedUserIds: [...next.assignedUserIds],
+            }
+          : prev
+      );
+
+      if (next.accessLevel === "specific" && next.assignedUserIds.length === 0) {
+        setSaveError("Select at least one user for Specific Users access.");
+        return;
+      }
+
+      setSaveError(null);
+      void persistNote(activeNote.id, {
+        accessLevel: next.accessLevel,
+        assignedUserIds:
+          next.accessLevel === "specific" ? next.assignedUserIds : [],
+      });
+    },
+    [activeNote, persistNote]
+  );
+
+  const toggleActiveNoteAssignedUser = useCallback(
+    (userId: string) => {
+      if (!activeNote) return;
+      const has = activeNote.assignedUserIds.includes(userId);
+      const assignedUserIds = has
+        ? activeNote.assignedUserIds.filter((id) => id !== userId)
+        : [...activeNote.assignedUserIds, userId];
+      updateActiveNoteAccess({
+        accessLevel: "specific",
+        assignedUserIds,
+      });
+    },
+    [activeNote, updateActiveNoteAccess]
+  );
+
   const saveNotebook = useCallback(async () => {
     const name = notebookForm.name.trim();
     if (!name || savingNotebook) return;
@@ -424,7 +465,7 @@ function NotesPageContent() {
         const response = await fetch("/api/notes", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ notebookId, title: "Untitled", visibility: "user" }),
+          body: JSON.stringify({ notebookId, title: "Untitled", accessLevel: "all" }),
         });
         const payload = (await response.json().catch(() => null)) as
           | { note?: FullNote; error?: string }
@@ -438,6 +479,8 @@ function NotesPageContent() {
           notebookId: note.notebookId,
           title: note.title,
           visibility: note.visibility,
+          accessLevel: note.accessLevel,
+          assignedUserIds: note.assignedUserIds,
           moodboardId: note.moodboardId,
           updatedAt: note.updatedAt,
           createdAt: note.createdAt,
@@ -519,17 +562,6 @@ function NotesPageContent() {
 
   const selectedNotebookName = selectedNotebook?.name ?? null;
   const canSendStickyMessage = selectedNotebook?.isSystem === true;
-
-  const visibilityOptions = useMemo(() => {
-    const base: Array<{ value: NoteVisibility; label: string }> = [
-      { value: "public", label: "Public" },
-      { value: "user", label: "Users" },
-    ];
-    if (isAdmin) {
-      base.push({ value: "admin_only", label: "Admin only" });
-    }
-    return base;
-  }, [isAdmin]);
 
   return (
     <main className="relative mx-auto flex h-[calc(100vh-10rem)] w-full max-w-[1800px] min-h-[480px] gap-0 px-3 py-3 sm:px-4">
@@ -668,10 +700,15 @@ function NotesPageContent() {
                                 >
                                   <FileText className="h-3.5 w-3.5 shrink-0 opacity-70" />
                                   <span className="truncate">{note.title || "Untitled"}</span>
-                                  {note.visibility === "admin_only" ? (
+                                  {note.accessLevel === "admin_only" ? (
                                     <Shield
                                       className="h-3 w-3 shrink-0 text-amber-400/80"
                                       aria-label="Admin only"
+                                    />
+                                  ) : note.accessLevel === "specific" ? (
+                                    <Lock
+                                      className="h-3 w-3 shrink-0 text-zinc-500"
+                                      aria-label="Specific users"
                                     />
                                   ) : null}
                                 </button>
@@ -773,24 +810,24 @@ function NotesPageContent() {
                   className="w-full bg-transparent text-xl font-semibold text-zinc-50 outline-none placeholder:text-zinc-600"
                 />
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <label className="flex items-center gap-1.5 text-[11px] text-zinc-500">
-                    Access
-                    <select
-                      value={activeNote.visibility}
-                      onChange={(event) => {
-                        const visibility = event.target.value as NoteVisibility;
-                        setActiveNote((prev) => (prev ? { ...prev, visibility } : prev));
-                        void persistNote(activeNote.id, { visibility });
-                      }}
-                      className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200 outline-none"
-                    >
-                      {visibilityOptions.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <NoteAccessControlFields
+                    compact
+                    inline
+                    accessLevel={activeNote.accessLevel}
+                    assignedUserIds={activeNote.assignedUserIds}
+                    recipients={recipients}
+                    isAdmin={isAdmin}
+                    onAccessLevelChange={(accessLevel) =>
+                      updateActiveNoteAccess({
+                        accessLevel,
+                        assignedUserIds:
+                          accessLevel === "specific"
+                            ? activeNote.assignedUserIds
+                            : [],
+                      })
+                    }
+                    onToggleUser={toggleActiveNoteAssignedUser}
+                  />
                   <label className="flex min-w-0 items-center gap-1.5 text-[11px] text-zinc-500">
                     Moodboard
                     <select
@@ -919,54 +956,16 @@ function NotesPageContent() {
               />
             </label>
 
-            <label className="mt-3 block text-xs text-zinc-400">
-              Access
-              <select
-                value={notebookForm.accessLevel}
-                onChange={(event) =>
-                  setNotebookForm((prev) => ({
-                    ...prev,
-                    accessLevel: event.target.value as NotebookAccessLevel,
-                  }))
-                }
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none"
-              >
-                <option value="all">All Team</option>
-                {isAdmin ? <option value="admin_only">Admin Only</option> : null}
-                <option value="specific">Specific Users</option>
-              </select>
-            </label>
-
-            {notebookForm.accessLevel === "specific" ? (
-              <div className="mt-3 max-h-40 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
-                <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
-                  Grant access to
-                </p>
-                {recipients.length === 0 ? (
-                  <p className="px-1 py-2 text-xs text-zinc-500">No active users found.</p>
-                ) : (
-                  <ul className="space-y-1">
-                    {recipients.map((user) => {
-                      const checked = notebookForm.assignedUserIds.includes(user.id);
-                      const label = user.full_name?.trim() || user.email?.trim() || user.id;
-                      return (
-                        <li key={user.id}>
-                          <label className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-sm text-zinc-200 hover:bg-zinc-800">
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleAssignedUser(user.id)}
-                              className="rounded border-zinc-600"
-                            />
-                            <span className="truncate">{label}</span>
-                          </label>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </div>
-            ) : null}
+            <NoteAccessControlFields
+              accessLevel={notebookForm.accessLevel}
+              assignedUserIds={notebookForm.assignedUserIds}
+              recipients={recipients}
+              isAdmin={isAdmin}
+              onAccessLevelChange={(accessLevel) =>
+                setNotebookForm((prev) => ({ ...prev, accessLevel }))
+              }
+              onToggleUser={toggleAssignedUser}
+            />
 
             <div className="mt-4 flex justify-end gap-2">
               <button

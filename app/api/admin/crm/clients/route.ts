@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { buildCompanyLtvMap, normalizeCompanyKey } from "@/lib/crmClientLtv";
 import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
+import { loadReminderDatesByCompanyId } from "@/lib/server/contactReminderDates";
 import { pushClientToLexoffice, type ContactPerson } from "@/lib/server/lexofficeContacts";
 
 export const dynamic = "force-dynamic";
@@ -32,6 +33,7 @@ export type CrmClientRecord = {
   lexofficeId: string;
   contactPersons: ContactPerson[];
   lifetimeRevenue: number;
+  reminderDates: string[];
 };
 
 function serviceSupabase() {
@@ -75,7 +77,11 @@ function safeContactPersons(value: unknown): ContactPerson[] {
     .filter((item): item is ContactPerson => item !== null && item.name.trim() !== "");
 }
 
-function mapClientRow(row: ClientRow, ltvByCompany: Map<string, number>): CrmClientRecord {
+function mapClientRow(
+  row: ClientRow,
+  ltvByCompany: Map<string, number>,
+  reminderDatesByCompany: Map<string, string[]> = new Map()
+): CrmClientRecord {
   const companyName = row.company_name?.trim() ?? "";
   const companyKey = normalizeCompanyKey(companyName);
   return {
@@ -88,6 +94,7 @@ function mapClientRow(row: ClientRow, ltvByCompany: Map<string, number>): CrmCli
     lexofficeId: row.lexoffice_id?.trim() || row.lexoffice_contact_id?.trim() || "",
     contactPersons: safeContactPersons(row.contact_persons),
     lifetimeRevenue: companyKey ? (ltvByCompany.get(companyKey) ?? 0) : 0,
+    reminderDates: reminderDatesByCompany.get(row.id) ?? [],
   };
 }
 
@@ -122,8 +129,9 @@ export async function GET() {
   }
 
   const ltvByCompany = buildCompanyLtvMap((tasksRes.data ?? []) as Record<string, unknown>[]);
+  const reminderDatesByCompany = await loadReminderDatesByCompanyId(supabase);
   const clients = ((clientsRes.data ?? []) as ClientRow[])
-    .map((row) => mapClientRow(row, ltvByCompany))
+    .map((row) => mapClientRow(row, ltvByCompany, reminderDatesByCompany))
     .sort((a, b) => a.companyName.localeCompare(b.companyName, "en"));
 
   return NextResponse.json({ ok: true, clients });

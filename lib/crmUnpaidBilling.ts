@@ -23,6 +23,8 @@ export type UnpaidBillingItem = {
   lexofficeInvoiceId: string | null;
   taskId: string | null;
   contactId: string | null;
+  crmContactId: string | null;
+  reminderDates: string[];
   voucherStatus: string | null;
   linkedJobName: string | null;
 };
@@ -30,6 +32,7 @@ export type UnpaidBillingItem = {
 type CreditNoteTaskRow = ReminderTaskRow & {
   client?: string | null;
   photoshoot_date?: string | null;
+  contact_id?: string | null;
 };
 
 export function formatCrmBillingDateLabel(value: string | null | undefined): string {
@@ -101,6 +104,8 @@ export function mapLexofficeInvoiceToUnpaidBillingItem(
     lexofficeInvoiceId: item.id,
     taskId: linkedTask?.id ?? null,
     contactId,
+    crmContactId: linkedTask?.contact_id?.trim() || null,
+    reminderDates: [],
     voucherStatus: item.voucherStatus || null,
     linkedJobName: linkedTask ? resolveReminderShootName(linkedTask) : null,
   };
@@ -141,6 +146,8 @@ export function mapCreditNoteTaskToUnpaidBillingItem(row: CreditNoteTaskRow): Un
     lexofficeInvoiceId: invoiceNumber,
     taskId: row.id,
     contactId: null,
+    crmContactId: row.contact_id?.trim() || null,
+    reminderDates: [],
     voucherStatus: null,
     linkedJobName: null,
   };

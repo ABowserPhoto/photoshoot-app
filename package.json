@@ -16,6 +16,7 @@
     "build:desktop": "node scripts/clean-dist-desktop.mjs && set CSC_IDENTITY_AUTO_DISCOVERY=false && npm run prepare:desktop-env && next build && node scripts/prepare-electron-standalone.mjs && electron-builder"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
     "@google/generative-ai": "^0.24.1",
     "@hello-pangea/dnd": "^18.0.1",
     "@supabase/ssr": "^0.10.2",
@@ -23,6 +24,8 @@
     "@tiptap/extension-horizontal-rule": "^3.29.0",
     "@tiptap/extension-task-item": "^3.29.0",
     "@tiptap/extension-task-list": "^3.29.0",
+    "@tiptap/extension-text-align": "^3.29.0",
+    "@tiptap/extension-underline": "^3.29.0",
     "@tiptap/pm": "^3.29.0",
     "@tiptap/react": "^3.29.0",
     "@tiptap/starter-kit": "^3.29.0",

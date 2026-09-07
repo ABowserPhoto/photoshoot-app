@@ -3,6 +3,7 @@
 import { GitMerge, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import ReminderDraftedMarker from "@/app/admin/crm/ReminderDraftedMarker";
 import { formatEuro } from "@/lib/adminStatsFormat";
 
 export type ContactPerson = {
@@ -23,6 +24,7 @@ export type CrmClient = {
   lexofficeId: string;
   contactPersons: ContactPerson[];
   lifetimeRevenue: number;
+  reminderDates?: string[];
 };
 
 type ClientFormState = {
@@ -422,7 +424,12 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
               ) : (
                 filteredClients.map((client) => (
                   <tr key={client.id} className="hover:bg-zinc-950/40">
-                    <td className="px-4 py-3 font-medium text-zinc-100">{client.companyName}</td>
+                    <td className="px-4 py-3 font-medium text-zinc-100">
+                      <span className="inline-flex items-center">
+                        {client.companyName}
+                        <ReminderDraftedMarker dates={client.reminderDates} />
+                      </span>
+                    </td>
                     <td className="px-4 py-3 text-zinc-300">
                       {client.contactPersons.length > 0 ? (
                         <ul className="space-y-0.5">

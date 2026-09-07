@@ -2390,10 +2390,10 @@ export default function PlannerPage() {
             </div>
           </div>
           {!authLoading && authenticated ? (
-            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 sm:max-w-[780px] sm:justify-end">
+            <div className="flex w-full shrink-0 items-center justify-end sm:max-w-[780px]">
               <Suspense fallback={null}>
                 <GlobalNavButtons
-                  className="flex flex-wrap items-center justify-end gap-2"
+                  className="relative flex w-full items-center justify-end gap-2 md:w-auto md:justify-end"
                   secondaryMiddle={<JibbleClockToggle />}
                 >
                   <GlobalLogoutControl />

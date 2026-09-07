@@ -1,5 +1,6 @@
 import { createBrowserClient } from "@supabase/ssr";
 
+import { INACTIVITY_TIMEOUT_MS } from "@/lib/shiftCaps";
 import { getSupabasePublicEnv } from "@/lib/supabaseEnv";
 
 const { url: supabaseUrl, anonKey: supabaseAnonKey } = getSupabasePublicEnv();
@@ -8,7 +9,7 @@ const { url: supabaseUrl, anonKey: supabaseAnonKey } = getSupabasePublicEnv();
 export const LAST_ACTIVE_STORAGE_KEY = "workflow_last_active_time";
 
 /** 30 minutes — employees must re-authenticate after this idle period. */
-export const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+export { INACTIVITY_TIMEOUT_MS };
 
 export function readLastActiveTime(): number | null {
   if (typeof window === "undefined") {

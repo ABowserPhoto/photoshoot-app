@@ -12,6 +12,7 @@ import {
 import type { ReminderTaskRow } from "@/lib/invoiceReminderWorkflow";
 import { listLexofficeUnpaidSalesInvoices } from "@/lib/lexoffice";
 import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
+import { loadReminderDatesForBillingItems } from "@/lib/server/contactReminderDates";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -49,7 +50,7 @@ export async function GET() {
     supabase
       .from("tasks")
       .select(
-        "id, title, client, company_name, contact_first_name, contact_last_name, photoshoot_date, expected_revenue, lexoffice_invoice_id, email, has_separate_invoice_email, invoice_email_address, is_paid, credit_note_paid, credit_note_file_url, invoice_date, photoshoot_type, shoot_location, lexoffice_document_file_id, skip_invoice, is_credit_note"
+        "id, title, client, company_name, contact_first_name, contact_last_name, photoshoot_date, expected_revenue, lexoffice_invoice_id, email, has_separate_invoice_email, invoice_email_address, is_paid, credit_note_paid, credit_note_file_url, invoice_date, photoshoot_type, shoot_location, lexoffice_document_file_id, skip_invoice, is_credit_note, contact_id"
       )
       .or("is_paid.is.null,is_paid.eq.false")
       .or("credit_note_paid.is.null,credit_note_paid.eq.false")
@@ -58,7 +59,7 @@ export async function GET() {
     supabase
       .from("tasks")
       .select(
-        "id, title, client, company_name, contact_first_name, contact_last_name, photoshoot_date, expected_revenue, lexoffice_invoice_id, email, has_separate_invoice_email, invoice_email_address, is_paid, invoice_date, photoshoot_type, shoot_location, lexoffice_document_file_id, skip_invoice, is_credit_note"
+        "id, title, client, company_name, contact_first_name, contact_last_name, photoshoot_date, expected_revenue, lexoffice_invoice_id, email, has_separate_invoice_email, invoice_email_address, is_paid, invoice_date, photoshoot_type, shoot_location, lexoffice_document_file_id, skip_invoice, is_credit_note, contact_id"
       )
       .not("lexoffice_invoice_id", "is", null),
   ]);
@@ -100,7 +101,13 @@ export async function GET() {
     .map((row) => mapCreditNoteTaskToUnpaidBillingItem(row))
     .filter((item): item is UnpaidBillingItem => item !== null);
 
-  const items = mergeAndSortUnpaidBillingItems([...lexofficeItems, ...creditNoteItems]);
+  const merged = mergeAndSortUnpaidBillingItems([...lexofficeItems, ...creditNoteItems]);
+  let items = merged;
+  try {
+    items = await loadReminderDatesForBillingItems(supabase, merged);
+  } catch (error) {
+    console.error("[unpaid-billing] reminder_dates attach failed:", error);
+  }
 
   return NextResponse.json({ ok: true, items });
 }

@@ -96,6 +96,9 @@ export type NoteRow = {
   content: string;
   visibility: NoteVisibility | string;
   moodboard_id: string | null;
+  creator_id?: string | null;
+  access_level?: string | null;
+  assigned_user_ids?: string[] | null;
   created_at: string;
   updated_at: string;
 };
@@ -105,9 +108,49 @@ export type NoteSummary = {
   notebookId: string;
   title: string;
   visibility: NoteVisibility;
+  accessLevel: NotebookAccessLevel;
+  assignedUserIds: string[];
   moodboardId: string | null;
   updatedAt: string;
   createdAt: string;
+};
+
+export type NoteRecord = {
+  id: string;
+  notebookId: string;
+  title: string;
+  content: string;
+  visibility: NoteVisibility;
+  accessLevel: NotebookAccessLevel;
+  assignedUserIds: string[];
+  creatorId: string | null;
+  moodboardId: string | null;
+  updatedAt: string;
+  createdAt: string;
+};
+
+/** Payload for creating a note via POST /api/notes */
+export type CreateNotePayload = {
+  notebookId: string;
+  title?: string;
+  content?: string;
+  accessLevel?: NotebookAccessLevel;
+  assignedUserIds?: string[];
+  moodboardId?: string | null;
+  /** @deprecated Use accessLevel instead */
+  visibility?: NoteVisibility;
+};
+
+/** Partial payload for PATCH /api/notes/[id] */
+export type UpdateNotePayload = {
+  title?: string;
+  content?: string;
+  notebookId?: string;
+  accessLevel?: NotebookAccessLevel;
+  assignedUserIds?: string[];
+  moodboardId?: string | null;
+  /** @deprecated Use accessLevel instead */
+  visibility?: NoteVisibility;
 };
 
 export type NotebookWithNotes = {
@@ -125,7 +168,7 @@ export type NotebookWithNotes = {
 };
 
 export const NOTE_SELECT_COLUMNS =
-  "id, notebook_id, title, content, visibility, moodboard_id, created_at, updated_at";
+  "id, notebook_id, title, content, visibility, moodboard_id, creator_id, access_level, assigned_user_ids, created_at, updated_at";
 
 export function normalizeVisibility(value: unknown): NoteVisibility {
   if (value === "public" || value === "user" || value === "admin_only") {
@@ -146,7 +189,7 @@ export function normalizeUuidArray(value: unknown): string[] {
   return value.filter((id): id is string => typeof id === "string" && id.trim().length > 0);
 }
 
-/** Non-admins never see admin_only notes. */
+/** Non-admins never see admin_only notes (legacy visibility column). */
 export function canViewNoteVisibility(
   visibility: NoteVisibility | string,
   isAdmin: boolean
@@ -155,6 +198,82 @@ export function canViewNoteVisibility(
     return isAdmin;
   }
   return true;
+}
+
+export function visibilityFromAccessLevel(level: NotebookAccessLevel): NoteVisibility {
+  return level === "admin_only" ? "admin_only" : "user";
+}
+
+export function canViewNote(
+  row: Pick<
+    NoteRow,
+    "access_level" | "assigned_user_ids" | "creator_id" | "visibility"
+  >,
+  userId: string | null,
+  isAdmin: boolean
+): boolean {
+  if (isAdmin) return true;
+  if (userId && row.creator_id === userId) return true;
+
+  const level = normalizeAccessLevel(row.access_level);
+  if (level === "all") return true;
+  if (level === "admin_only") return false;
+  if (level === "specific") {
+    if (!userId) return false;
+    return normalizeUuidArray(row.assigned_user_ids).includes(userId);
+  }
+
+  return canViewNoteVisibility(row.visibility, isAdmin);
+}
+
+export type ParsedNoteAccess =
+  | { ok: true; accessLevel: NotebookAccessLevel; assignedUserIds: string[] }
+  | { ok: false; error: string; status: number };
+
+/** Parse accessLevel + assignedUserIds from a create/update body (notebook parity). */
+export function parseNoteAccessBody(
+  body: { accessLevel?: unknown; assignedUserIds?: unknown; visibility?: unknown },
+  isAdmin: boolean
+): ParsedNoteAccess {
+  let accessLevel: NotebookAccessLevel = normalizeAccessLevel(body.accessLevel);
+
+  if (
+    body.accessLevel === undefined &&
+    body.visibility !== undefined &&
+    body.visibility !== null &&
+    body.visibility !== ""
+  ) {
+    const vis = body.visibility;
+    if (vis === "admin_only") {
+      accessLevel = "admin_only";
+    } else {
+      accessLevel = "all";
+    }
+  }
+
+  if (
+    typeof body.accessLevel === "string" &&
+    !NOTEBOOK_ACCESS_LEVELS.includes(body.accessLevel as NotebookAccessLevel)
+  ) {
+    return { ok: false, error: "Invalid accessLevel.", status: 400 };
+  }
+
+  if (accessLevel === "admin_only" && !isAdmin) {
+    accessLevel = "all";
+  }
+
+  let assignedUserIds =
+    accessLevel === "specific" ? normalizeUuidArray(body.assignedUserIds) : [];
+
+  if (accessLevel === "specific" && assignedUserIds.length === 0) {
+    return {
+      ok: false,
+      error: "Select at least one user for Specific Users access.",
+      status: 400,
+    };
+  }
+
+  return { ok: true, accessLevel, assignedUserIds };
 }
 
 export function canViewNotebook(
@@ -223,24 +342,31 @@ export function mapNotebook(
 }
 
 export function mapNoteSummary(row: NoteRow): NoteSummary {
+  const accessLevel = normalizeAccessLevel(row.access_level);
   return {
     id: row.id,
     notebookId: row.notebook_id,
     title: row.title,
     visibility: normalizeVisibility(row.visibility),
+    accessLevel,
+    assignedUserIds: normalizeUuidArray(row.assigned_user_ids),
     moodboardId: typeof row.moodboard_id === "string" ? row.moodboard_id : null,
     updatedAt: row.updated_at,
     createdAt: row.created_at,
   };
 }
 
-export function mapNote(row: NoteRow) {
+export function mapNote(row: NoteRow): NoteRecord {
+  const accessLevel = normalizeAccessLevel(row.access_level);
   return {
     id: row.id,
     notebookId: row.notebook_id,
     title: row.title,
     content: row.content ?? "",
     visibility: normalizeVisibility(row.visibility),
+    accessLevel,
+    assignedUserIds: normalizeUuidArray(row.assigned_user_ids),
+    creatorId: typeof row.creator_id === "string" ? row.creator_id : null,
     moodboardId: typeof row.moodboard_id === "string" ? row.moodboard_id : null,
     updatedAt: row.updated_at,
     createdAt: row.created_at,
@@ -322,6 +448,8 @@ export async function createStudioChatNote(
       title: title.slice(0, 120),
       content: plainTextToNoteHtml(opts.contentPlain),
       visibility: opts.visibility ?? "user",
+      access_level: "all",
+      assigned_user_ids: [],
       created_at: now,
       updated_at: now,
     })

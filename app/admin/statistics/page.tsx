@@ -21,6 +21,7 @@ import {
   type ProductivityTimeframe,
 } from "@/app/actions/statistics";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
+import DailyShiftLogs from "@/app/components/statistics/DailyShiftLogs";
 import { formatDurationLong, formatEuro } from "@/lib/adminStatsFormat";
 import {
   buildAdminStatsQuery,
@@ -67,16 +68,6 @@ function shiftMonthValue(value: string, delta: number): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-type SortKey =
-  | "date"
-  | "userName"
-  | "clockInAt"
-  | "clockOutAt"
-  | "shiftDurationMinutes"
-  | "tasksCompleted"
-  | "studioTasksCompleted"
-  | "taskMinutes";
-
 function formatMinutesShort(totalMinutes: number): string {
   const safe = Math.max(0, Math.round(totalMinutes));
   const hours = Math.floor(safe / 60);
@@ -85,22 +76,6 @@ function formatMinutesShort(totalMinutes: number): string {
     return `${minutes}m`;
   }
   return `${hours}h ${minutes}m`;
-}
-
-function formatDateTime(value: string | null): string {
-  if (!value) {
-    return "—";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "—";
-  }
-  return new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
 }
 
 function KpiCard({
@@ -171,7 +146,7 @@ const dateInputClassName =
   "h-10 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-violet-500 [color-scheme:dark]";
 
 export default function AdminStatisticsPage() {
-  const { authenticated, canAccess, isLoading: authLoading } = useAuthRole();
+  const { authenticated, canAccess, isAdmin, isLoading: authLoading } = useAuthRole();
   const canViewStatistics = canAccess("statistics");
   const [timeframe, setTimeframe] = useState<ProductivityTimeframe>("month");
   const [selectedUserId, setSelectedUserId] = useState("");
@@ -198,8 +173,6 @@ export default function AdminStatisticsPage() {
     }>
   >([]);
   const [dailyLogs, setDailyLogs] = useState<ProductivityDailyLog[]>([]);
-  const [sortKey, setSortKey] = useState<SortKey>("clockInAt");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [selectedMonthValue, setSelectedMonthValue] = useState(currentMonthValue);
   const [businessStats, setBusinessStats] = useState<BusinessStatsResponse | null>(null);
   const [businessLoading, setBusinessLoading] = useState(true);
@@ -298,53 +271,6 @@ export default function AdminStatisticsPage() {
     }
     void loadStats();
   }, [authLoading, authenticated, canViewStatistics, loadStats]);
-
-  const sortedLogs = useMemo(() => {
-    const rows = [...dailyLogs];
-    rows.sort((a, b) => {
-      const pick = (row: ProductivityDailyLog): string | number => {
-        switch (sortKey) {
-          case "date":
-            return row.date;
-          case "userName":
-            return row.userName.toLowerCase();
-          case "clockInAt":
-            return row.clockInAt ? new Date(row.clockInAt).getTime() : 0;
-          case "clockOutAt":
-            return row.clockOutAt ? new Date(row.clockOutAt).getTime() : 0;
-          case "shiftDurationMinutes":
-            return row.shiftDurationMinutes;
-          case "tasksCompleted":
-            return row.tasksCompleted;
-          case "studioTasksCompleted":
-            return row.studioTasksCompleted;
-          case "taskMinutes":
-            return row.taskMinutes;
-          default:
-            return 0;
-        }
-      };
-      const av = pick(a);
-      const bv = pick(b);
-      if (av === bv) {
-        return 0;
-      }
-      if (av < bv) {
-        return sortDir === "asc" ? -1 : 1;
-      }
-      return sortDir === "asc" ? 1 : -1;
-    });
-    return rows;
-  }, [dailyLogs, sortDir, sortKey]);
-
-  const toggleSort = (key: SortKey) => {
-    if (sortKey === key) {
-      setSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
-      return;
-    }
-    setSortKey(key);
-    setSortDir("desc");
-  };
 
   if (authLoading) {
     return (
@@ -680,65 +606,13 @@ export default function AdminStatisticsPage() {
           </div>
         </section>
 
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
-          <h2 className="text-sm font-semibold text-zinc-100">Daily shift logs</h2>
-          <p className="mt-1 text-xs text-zinc-500">
-            Shift records with task completions for {reportingPeriodLabel}
-          </p>
-          <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full border-collapse text-left text-sm">
-              <thead>
-                <tr className="border-b border-zinc-800 text-xs uppercase tracking-wide text-zinc-500">
-                  {(
-                    [
-                      ["date", "Date"],
-                      ["userName", "User"],
-                      ["clockInAt", "Clock in"],
-                      ["clockOutAt", "Clock out"],
-                      ["shiftDurationMinutes", "Shift"],
-                      ["tasksCompleted", "Tasks"],
-                      ["studioTasksCompleted", "Studio"],
-                      ["taskMinutes", "Task min"],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <th key={key} className="px-3 py-2 font-semibold">
-                      <button
-                        type="button"
-                        onClick={() => toggleSort(key)}
-                        className="inline-flex items-center gap-1 hover:text-zinc-200"
-                      >
-                        {label}
-                        {sortKey === key ? (sortDir === "asc" ? " ↑" : " ↓") : null}
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedLogs.length === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="px-3 py-8 text-center text-zinc-500">
-                      {loading ? "Loading shift logs…" : "No shift logs in this timeframe."}
-                    </td>
-                  </tr>
-                ) : (
-                  sortedLogs.map((row) => (
-                    <tr key={row.id} className="border-b border-zinc-800/80 text-zinc-200">
-                      <td className="px-3 py-2">{row.date || "—"}</td>
-                      <td className="px-3 py-2">{row.userName}</td>
-                      <td className="px-3 py-2">{formatDateTime(row.clockInAt)}</td>
-                      <td className="px-3 py-2">{formatDateTime(row.clockOutAt)}</td>
-                      <td className="px-3 py-2">{formatMinutesShort(row.shiftDurationMinutes)}</td>
-                      <td className="px-3 py-2">{row.tasksCompleted}</td>
-                      <td className="px-3 py-2">{row.studioTasksCompleted}</td>
-                      <td className="px-3 py-2">{formatMinutesShort(row.taskMinutes)}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <DailyShiftLogs
+          dailyLogs={dailyLogs}
+          loading={loading}
+          isAdmin={isAdmin}
+          reportingPeriodLabel={reportingPeriodLabel}
+          onChanged={() => void loadStats()}
+        />
       </div>
     </main>
   );
