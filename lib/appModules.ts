@@ -10,6 +10,7 @@ export const APP_MODULES = [
   "moodboard",
   "notes",
   "scripts",
+  "knowledge",
   "booking",
   "statistics",
   "crm",
@@ -25,6 +26,7 @@ export const APP_MODULE_LABELS: Record<AppModule, string> = {
   moodboard: "Moodboard",
   notes: "Notes",
   scripts: "Scripts",
+  knowledge: "Knowledge",
   booking: "Booking",
   statistics: "Statistics",
   crm: "CRM",
@@ -83,6 +85,7 @@ const MODULE_HOME_PRIORITY: AppModule[] = [
   "moodboard",
   "notes",
   "scripts",
+  "knowledge",
   "statistics",
   "crm",
 ];
@@ -103,6 +106,8 @@ export function hrefForModule(module: AppModule): string {
       return "/notes";
     case "scripts":
       return "/scripts";
+    case "knowledge":
+      return "/knowledge";
     case "booking":
       return "/?booking=1";
     case "statistics":
@@ -160,6 +165,9 @@ export function moduleForPathname(pathname: string, search = ""): AppModule | nu
   if (pathname === "/ai-studio" || pathname.startsWith("/ai-studio/")) {
     return "ai_studio";
   }
+  if (pathname === "/ai" || pathname.startsWith("/ai/")) {
+    return "knowledge";
+  }
   if (pathname === "/moodboard" || pathname.startsWith("/moodboard/")) {
     return "moodboard";
   }
@@ -168,6 +176,9 @@ export function moduleForPathname(pathname: string, search = ""): AppModule | nu
   }
   if (pathname === "/scripts" || pathname.startsWith("/scripts/")) {
     return "scripts";
+  }
+  if (pathname === "/knowledge" || pathname.startsWith("/knowledge/")) {
+    return "knowledge";
   }
   if (pathname === "/admin/statistics" || pathname.startsWith("/admin/statistics/")) {
     return "statistics";

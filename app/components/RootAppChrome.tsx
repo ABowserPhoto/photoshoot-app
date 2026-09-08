@@ -6,6 +6,7 @@ import { Suspense, type ReactNode } from "react";
 
 import AutoLogout from "@/app/components/AutoLogout";
 import ClientPlannerShell from "@/app/ClientPlannerShell";
+import CommandPalette from "@/app/components/CommandPalette";
 import GlobalAppHeader from "@/app/components/GlobalAppHeader";
 import GlobalMessagePopup from "@/app/components/GlobalMessagePopup";
 import ModuleAccessGuard from "@/app/components/ModuleAccessGuard";
@@ -29,6 +30,7 @@ export default function RootAppChrome({ children }: { children: ReactNode }) {
           <GlobalAppHeader />
         </Suspense>
         <GlobalMessagePopup />
+        <CommandPalette />
         <div className="flex min-h-0 flex-1 flex-col">
           <Suspense
             fallback={
