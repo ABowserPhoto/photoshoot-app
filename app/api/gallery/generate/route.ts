@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 import { DEFAULT_BRACKET_SIZE, parseBracketSize } from "@/app/api/gallery/_shared";
+import { normalizeBracketSize } from "@/lib/bracketSize";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,7 +79,7 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
 
   const { data, error } = await supabase
     .from("tasks")
-    .select("local_folder_name, gallery_previews, gallery_selection, status, photoshoot_type")
+    .select("local_folder_name, gallery_previews, gallery_selection, status, photoshoot_type, bracket_size")
     .eq("id", shootId)
     .maybeSingle();
   if (error) {
@@ -87,6 +88,7 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
 
   const photoshootType =
     typeof data?.photoshoot_type === "string" ? data.photoshoot_type.trim() : "";
+  const resolvedBracketSize = normalizeBracketSize(data?.bracket_size ?? bracketSize, DEFAULT_BRACKET_SIZE);
 
   const items: unknown[] = Array.isArray(data?.gallery_previews?.items) ? data.gallery_previews.items : [];
   const { selectedChunkIndices } = parseSelectionPayload(data?.gallery_selection);
@@ -157,7 +159,7 @@ async function generateGalleryFromSupabase(shootId: string, bracketSize: number)
     localFolderName: data?.local_folder_name ?? "",
     status: typeof data?.status === "string" ? data.status : "",
     photoshootType,
-    bracketSize,
+    bracketSize: resolvedBracketSize,
     totalChunks: gallery.length,
     gallery,
     selectedGallery,

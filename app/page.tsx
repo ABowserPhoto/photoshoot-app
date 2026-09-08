@@ -2237,7 +2237,13 @@ function HomeContent() {
                       Type of Photoshoot
                       <select
                         value={photoshootType}
-                        onChange={(event) => setPhotoshootType(event.target.value as PhotoshootType)}
+                        onChange={(event) => {
+                          const next = event.target.value as PhotoshootType;
+                          setPhotoshootType(next);
+                          if (isImmobilienPhotoshootType(next)) {
+                            setBracketSize((prev) => normalizeBracketSize(prev, 5));
+                          }
+                        }}
                         className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                       >
                         <option value="Immobilien">Immobilien</option>
@@ -2256,6 +2262,7 @@ function HomeContent() {
                         Bracket Size
                         <select
                           value={bracketSize}
+                          name="bracket_size"
                           onChange={(event) =>
                             setBracketSize(normalizeBracketSize(Number(event.target.value), 5))
                           }
@@ -2266,7 +2273,8 @@ function HomeContent() {
                           <option value={7}>7 exposures per bracket</option>
                         </select>
                         <span className="mt-1 block text-[11px] font-normal text-zinc-500">
-                          Used by the merge worker to cap timestamp grouping and prevent mega-brackets.
+                          Default is 5 exposures. This value is saved on the task and used by the
+                          merge worker — check it before creating the booking.
                         </span>
                       </label>
                     ) : null}

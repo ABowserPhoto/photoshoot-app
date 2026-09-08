@@ -5,7 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 import { buildLocalFolderNameFromTask } from "@/lib/localFolderName";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
-export const DEFAULT_BRACKET_SIZE = 3;
+export const DEFAULT_BRACKET_SIZE = 5;
 
 const IMAGE_EXT = new Set([
   ".jpg",

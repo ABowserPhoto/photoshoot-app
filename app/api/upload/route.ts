@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import { isDeliverableFileName } from "@/lib/deliverableFiles";
+import { normalizeBracketSize } from "@/lib/bracketSize";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 
 export const runtime = "nodejs";
@@ -145,7 +146,7 @@ export async function POST(request: Request) {
     let dbTaxPercentage = 19;
     let dbAmountType = "Net";
     let dbDiscount = 0;
-    let dbBracketSize = 3;
+    let dbBracketSize = 5;
     let dbLexofficeContactId = "";
     let dbLocalFolderName = "";
     let dbSkipInvoice = false;
@@ -203,7 +204,7 @@ export async function POST(request: Request) {
         dbPhotoshootDate = row.photoshoot_date ?? "";
         dbDueDate = row.due_date ?? "";
         dbLocalFolderName = row.local_folder_name ?? "";
-        dbBracketSize = Number(row.bracket_size ?? 3) === 5 ? 5 : 3;
+        dbBracketSize = normalizeBracketSize(row.bracket_size, 5);
         dbSkipInvoice = Boolean(row.skip_invoice);
 
         if (dbLexofficeContactId) {

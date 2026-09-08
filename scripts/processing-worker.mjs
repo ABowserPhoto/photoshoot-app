@@ -13,7 +13,7 @@ import { buildWatermarkedPreviewFile, assertReadableWatermark } from "../app/api
 import { fetchWithTimeout, toFetchErrorMessage } from "../lib/server/fetchWithTimeout.mjs";
 
 import { buildLocalFolderNameFromTask } from "./localFolderName.mjs";
-import { buildTimestampBracketsFromDir } from "../lib/bracketGrouping.mjs";
+import { buildTimestampBracketsFromDir, normalizeTaskBracketSize } from "../lib/bracketGrouping.mjs";
 import { sanitizeStoragePath } from "../lib/sanitizeStoragePath.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -733,6 +733,35 @@ function resolveNameInLookup(lookup, wanted) {
     return null;
   }
   return lookup.get(key) ?? null;
+}
+
+/**
+ * When a booking/gallery saved bracket_size=3, timestamp grouping still sees 5-frame
+ * cycles (gap + EV). Warn instead of silently copying only 3 files per scene.
+ * Grouping with 7 still splits true 3-brackets on gap/EV, so genuine 3-shot work is unchanged.
+ */
+function groupingSizeForCopy(taskBracketSize) {
+  const booked = normalizeTaskBracketSize(taskBracketSize);
+  return booked === 3 ? 7 : taskBracketSize;
+}
+
+function warnIfBookedBracketMismatch(taskBracketSize, chunks, contextLabel) {
+  const booked = normalizeTaskBracketSize(taskBracketSize);
+  if (booked !== 3) {
+    return;
+  }
+  const fiveCount = chunks.filter((chunk) => chunk.length === 5).length;
+  const sevenCount = chunks.filter((chunk) => chunk.length === 7).length;
+  if (fiveCount === 0 && sevenCount === 0) {
+    return;
+  }
+  console.warn(
+    `[worker] BRACKET SIZE MISMATCH in ${contextLabel}: task.bracket_size=3 but grouping detected ` +
+      `${fiveCount} five-frame chunk(s)` +
+      (sevenCount ? ` and ${sevenCount} seven-frame chunk(s)` : "") +
+      `. This shoot was likely captured as 5-bracket while the gallery/booking stored 3. ` +
+      `Copy/merge will keep the detected full chunks so frames are not dropped. Update tasks.bracket_size to 5.`
+  );
 }
 
 function parseSelectionPayload(raw) {
@@ -1569,7 +1598,10 @@ async function syncSelectedRawFilesToSelects(localFolderName, gallerySelection, 
   const selectsDir = path.join(base, "2_Selects");
   fs.mkdirSync(selectsDir, { recursive: true });
 
-  const chunks = await buildTimestampBracketsFromDir(rawDir, { taskBracketSize });
+  const chunks = await buildTimestampBracketsFromDir(rawDir, {
+    taskBracketSize: groupingSizeForCopy(taskBracketSize),
+  });
+  warnIfBookedBracketMismatch(taskBracketSize, chunks, `1_Raw (${localFolderName})`);
   const rawLookup = buildDirBasenameLookup(rawDir);
   const copiedFiles = [];
   const copiedKeys = new Set();
@@ -1719,15 +1751,16 @@ async function processTaskLocally(task) {
   const taskRoot = path.join(getShootFoldersRoot(), String(task.local_folder_name ?? "").trim());
   const selectsDir = path.join(taskRoot, "2_Selects");
   const taskBracketSize = task.bracket_size ?? null;
+  const groupingSize = groupingSizeForCopy(taskBracketSize);
   console.info(
-    `[worker] Grouping ${selectsDir} into brackets (taskBracketSize=${taskBracketSize ?? "auto"})...`
+    `[worker] Grouping ${selectsDir} into brackets (taskBracketSize=${taskBracketSize ?? "auto"}, groupingSize=${groupingSize ?? "auto"})...`
   );
 
   let brackets;
   const groupingStartedAtMs = Date.now();
   try {
     brackets = await withHardTimeout(
-      buildTimestampBracketsFromDir(selectsDir, { taskBracketSize }),
+      buildTimestampBracketsFromDir(selectsDir, { taskBracketSize: groupingSize }),
       BRACKET_GROUPING_TIMEOUT_MS,
       `bracket grouping for ${selectsDir}`
     );
@@ -1742,6 +1775,8 @@ async function processTaskLocally(task) {
       `[worker] Bracket grouping stage finished for task ${task.id} in ${Date.now() - groupingStartedAtMs}ms.`
     );
   }
+
+  warnIfBookedBracketMismatch(taskBracketSize, brackets, `2_Selects (${task.local_folder_name})`);
 
   const totalItems = brackets.length;
   const processingStartedAtMs = Date.now();
@@ -2241,7 +2276,7 @@ async function processPendingProcessing(supabase) {
         const finalCheck = verifyMergedOutputsExist(
           taskRoot,
           await buildTimestampBracketsFromDir(path.join(taskRoot, "2_Selects"), {
-            taskBracketSize: task.bracket_size ?? null,
+            taskBracketSize: groupingSizeForCopy(task.bracket_size ?? null),
           })
         );
         if (!finalCheck.ok) {

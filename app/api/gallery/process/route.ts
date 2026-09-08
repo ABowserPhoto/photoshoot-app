@@ -9,6 +9,7 @@ import {
   resolveLocalFolderName,
   resolveTaskDir,
 } from "@/app/api/gallery/_shared";
+import { normalizeBracketSize } from "@/lib/bracketSize";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,7 +78,7 @@ export async function POST(request: Request) {
       shootId: typeof body.shootId === "string" ? body.shootId : "",
       localFolderName: typeof body.local_folder_name === "string" ? body.local_folder_name : "",
     });
-    const bracketSize = parseBracketSize(body.bracketSize ?? DEFAULT_BRACKET_SIZE);
+    const requestedBracketSize = parseBracketSize(body.bracketSize ?? DEFAULT_BRACKET_SIZE);
 
     const rawSelectedIndices = Array.isArray(body.selectedChunkIndices)
       ? body.selectedChunkIndices
@@ -106,14 +107,6 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-
-    // Local disk is optional (cloud gallery hosts often have no 1_Raw). Worker resolves
-    // files from selected_chunk_indices + local RAW brackets; filenames are best-effort.
-    const rawDir = resolveTaskDir(localFolderName, "1_Raw");
-    const sortedFiles = readNaturallySortedImageFiles(rawDir);
-    const chunks = chunkFiles(sortedFiles, bracketSize);
-    let selectedFiles = selectedIndices.flatMap((chunkIndex) => chunks[chunkIndex] ?? []);
-    const skippedIndices = selectedIndices.filter((chunkIndex) => !chunks[chunkIndex]);
 
     const shootId = typeof body.shootId === "string" ? body.shootId.trim() : "";
     let taskStatusUpdated = false;
@@ -149,7 +142,7 @@ export async function POST(request: Request) {
 
     const { data: taskRow, error: taskLoadError } = await supabase
       .from("tasks")
-      .select("photoshoot_type, gallery_previews")
+      .select("photoshoot_type, gallery_previews, bracket_size")
       .eq("id", shootId)
       .maybeSingle();
 
@@ -175,6 +168,19 @@ export async function POST(request: Request) {
         { status: 404 }
       );
     }
+
+    const bracketSize = normalizeBracketSize(
+      taskRow.bracket_size ?? requestedBracketSize,
+      DEFAULT_BRACKET_SIZE
+    );
+
+    // Local disk is optional (cloud gallery hosts often have no 1_Raw). Worker resolves
+    // files from selected_chunk_indices + local RAW brackets; filenames are best-effort.
+    const rawDir = resolveTaskDir(localFolderName, "1_Raw");
+    const sortedFiles = readNaturallySortedImageFiles(rawDir);
+    const chunks = chunkFiles(sortedFiles, bracketSize);
+    let selectedFiles = selectedIndices.flatMap((chunkIndex) => chunks[chunkIndex] ?? []);
+    const skippedIndices = selectedIndices.filter((chunkIndex) => !chunks[chunkIndex]);
 
     if (selectedFiles.length === 0) {
       selectedFiles = filenamesFromGalleryPreviews(taskRow.gallery_previews, selectedIndices);

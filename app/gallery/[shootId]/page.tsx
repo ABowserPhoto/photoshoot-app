@@ -72,7 +72,7 @@ export default function GalleryPage() {
   const searchParams = useSearchParams();
   const routeParams = useParams<{ shootId: string }>();
   const shootId = typeof routeParams?.shootId === "string" ? routeParams.shootId : "";
-  const bracketSizeFromUrl = searchParams.get("bracketSize") ?? "3";
+  const bracketSizeFromUrl = searchParams.get("bracketSize");
   const selectionStorageKey = useMemo(
     () => (shootId.trim() ? `gallery_selection_${shootId.trim()}` : ""),
     [shootId]
@@ -81,6 +81,7 @@ export default function GalleryPage() {
   const [localFolderName, setLocalFolderName] = useState("");
   const [taskStatus, setTaskStatus] = useState<string | null>(null);
   const [photoshootType, setPhotoshootType] = useState("");
+  const [bracketSize, setBracketSize] = useState(5);
   const [gallery, setGallery] = useState<GalleryItem[]>([]);
   const [selectedChunks, setSelectedChunks] = useState<Set<number>>(new Set());
   const [ratingsByChunk, setRatingsByChunk] = useState<Record<number, number>>({});
@@ -217,7 +218,7 @@ export default function GalleryPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           shootId: targetShootId,
-          bracketSize: Number(bracketSizeFromUrl) || 3,
+          bracketSize: Number(bracketSizeFromUrl) || 5,
         }),
       });
       const payload = (await response.json().catch(() => null)) as GalleryResponse | null;
@@ -231,6 +232,7 @@ export default function GalleryPage() {
       setLocalFolderName(payload?.localFolderName ?? "");
       setTaskStatus(typeof payload?.status === "string" ? payload.status : "");
       setPhotoshootType(typeof payload?.photoshootType === "string" ? payload.photoshootType : "");
+      setBracketSize(Number(payload?.bracketSize) || Number(bracketSizeFromUrl) || 5);
 
       const serverSelectedIndices = Array.from(
         new Set(
@@ -341,7 +343,7 @@ export default function GalleryPage() {
         body: JSON.stringify({
           shootId: shootId.trim(),
           local_folder_name: localFolderName.trim(),
-          bracketSize: Number(bracketSizeFromUrl) || 3,
+          bracketSize,
           selectedChunkIndices: selectedIndices,
         }),
       });

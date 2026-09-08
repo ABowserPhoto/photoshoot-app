@@ -134,7 +134,7 @@ const FALLBACK_TASKS: BoardTask[] = [
     id: "fallback-1",
     taskTitle: "",
     localFolderName: "",
-    bracketSize: 3,
+    bracketSize: 5,
     previewPreference: "first",
     companyName: "Nike",
     lexofficeContactId: "",
