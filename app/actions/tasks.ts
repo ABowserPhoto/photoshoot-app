@@ -5,6 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
+import { MAX_DURATION_SECONDS } from "@/lib/parseDuration";
 
 const KANBAN_COMPLETION_STATUSES = new Set(["edited", "send email", "invoice sent", "completed"]);
 
@@ -218,10 +219,11 @@ export async function adjustTaskEditingDuration(
     return { ok: false, error: "Missing task id." };
   }
 
-  const nextTotal = Math.max(0, Math.floor(Number(totalEditingSeconds)));
-  if (!Number.isFinite(nextTotal)) {
+  const rawSeconds = Number(totalEditingSeconds);
+  if (!Number.isFinite(rawSeconds)) {
     return { ok: false, error: "Invalid duration." };
   }
+  const nextTotal = Math.max(0, Math.min(MAX_DURATION_SECONDS, Math.floor(rawSeconds)));
 
   const { data: row, error: fetchError } = await sb
     .from("tasks")

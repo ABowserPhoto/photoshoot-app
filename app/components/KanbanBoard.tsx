@@ -1,16 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Camera, Gem, Home, Pencil, User } from "lucide-react";
+import { Camera, Gem, Home, User } from "lucide-react";
 import {
   celebrateTaskCompletion,
   buildRandomDailyCompletionMessage,
 } from "@/lib/taskCompletionCelebration";
 import { countTodayCompletions } from "@/lib/kanbanDailyStreak";
 import DailyStreakBadge from "@/app/components/DailyStreakBadge";
-import EditDurationModal from "@/app/components/EditDurationModal";
+import KanbanTaskTimer from "@/app/components/KanbanTaskTimer";
 import { syncKanbanPhotoshootStatus } from "@/app/actions/agency-sync";
-import { adjustTaskEditingDuration, updateTaskStatus } from "@/app/actions/tasks";
+import { updateTaskStatus } from "@/app/actions/tasks";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { supabase } from "@/lib/supabaseClient";
 import {
@@ -425,14 +425,6 @@ function sanitizeBoardState(board: BoardState): BoardState {
   return next;
 }
 
-function formatDuration(totalSeconds: number): string {
-  const safe = Math.max(0, Math.floor(totalSeconds));
-  const hours = Math.floor(safe / 3600);
-  const minutes = Math.floor((safe % 3600) / 60);
-  const seconds = safe % 60;
-  return [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
-}
-
 function liveEditingSeconds(task: BoardTask, nowMs: number): number {
   let total = Math.max(0, task.totalEditingSeconds);
   if (!task.editingStartedAt) {
@@ -775,10 +767,6 @@ export default function KanbanBoard({
     variant: "loading" | "success" | "error";
   } | null>(null);
   const { isAdmin, isLoading: authRoleLoading } = useAuthRole();
-  const [durationEditTaskId, setDurationEditTaskId] = useState<string | null>(null);
-  const [durationEditInitialSeconds, setDurationEditInitialSeconds] = useState(0);
-  const [isSavingDuration, setIsSavingDuration] = useState(false);
-  const [durationEditError, setDurationEditError] = useState<string | null>(null);
   const boardRef = useRef(board);
   const archivedTasksRef = useRef(archivedTasks);
   const mergePrevColumnRef = useRef<Map<string, ColumnKey>>(new Map());
@@ -2099,28 +2087,40 @@ export default function KanbanBoard({
                             );
                           })() : null}
                           {liveEditingSeconds(task, clockMs) > 0 || task.editingStartedAt ? (
-                            <div className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-500">
-                              <p>
-                                {task.editingStartedAt ? "Editing: " : "Total Edit Time: "}
-                                {formatDuration(liveEditingSeconds(task, clockMs))}
-                              </p>
-                              {!authRoleLoading && isAdmin ? (
-                                <button
-                                  type="button"
-                                  title="Edit duration"
-                                  aria-label="Edit duration"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    setDurationEditTaskId(task.id);
-                                    setDurationEditInitialSeconds(liveEditingSeconds(task, clockMs));
-                                    setDurationEditError(null);
-                                  }}
-                                  className="rounded p-0.5 text-zinc-400 opacity-0 transition hover:bg-zinc-200 hover:text-zinc-700 group-hover:opacity-100 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
-                                >
-                                  <Pencil className="h-3 w-3" strokeWidth={2} />
-                                </button>
-                              ) : null}
-                            </div>
+                            <KanbanTaskTimer
+                              taskId={task.id}
+                              liveSeconds={liveEditingSeconds(task, clockMs)}
+                              isRunning={Boolean(task.editingStartedAt)}
+                              isAdmin={!authRoleLoading && isAdmin}
+                              onUpdated={(update) => {
+                                setBoard((prev) => {
+                                  const next = { ...prev };
+                                  for (const col of COLUMN_CONFIG) {
+                                    next[col.id] = next[col.id].map((item) =>
+                                      item.id === update.taskId
+                                        ? {
+                                            ...item,
+                                            totalEditingSeconds: update.totalEditingSeconds,
+                                            editingStartedAt: update.editingStartedAt,
+                                          }
+                                        : item
+                                    );
+                                  }
+                                  return next;
+                                });
+                                setArchivedTasks((prev) =>
+                                  prev.map((item) =>
+                                    item.id === update.taskId
+                                      ? {
+                                          ...item,
+                                          totalEditingSeconds: update.totalEditingSeconds,
+                                          editingStartedAt: update.editingStartedAt,
+                                        }
+                                      : item
+                                  )
+                                );
+                              }}
+                            />
                           ) : null}
                           {task.localFolderName?.trim() ? (
                             <button
@@ -2232,65 +2232,6 @@ export default function KanbanBoard({
         task={reviewMergedTask}
         isOpen={reviewMergedTask !== null}
         onClose={() => setReviewMergedTask(null)}
-      />
-      <EditDurationModal
-        isOpen={durationEditTaskId !== null}
-        title="Edit Duration"
-        initialSeconds={durationEditInitialSeconds}
-        isSaving={isSavingDuration}
-        error={durationEditError}
-        onCancel={() => {
-          if (!isSavingDuration) {
-            setDurationEditTaskId(null);
-            setDurationEditError(null);
-          }
-        }}
-        onSave={(seconds) => {
-          void (async () => {
-            if (!durationEditTaskId || isSavingDuration) return;
-            setIsSavingDuration(true);
-            setDurationEditError(null);
-            try {
-              const res = await adjustTaskEditingDuration(durationEditTaskId, seconds);
-              if (!res.ok) {
-                throw new Error(res.error);
-              }
-              setBoard((prev) => {
-                const next = { ...prev };
-                for (const column of COLUMN_CONFIG) {
-                  next[column.id] = next[column.id].map((t) =>
-                    t.id === durationEditTaskId
-                      ? {
-                          ...t,
-                          totalEditingSeconds: res.totalEditingSeconds,
-                          editingStartedAt: res.editingStartedAt,
-                        }
-                      : t
-                  );
-                }
-                return next;
-              });
-              setArchivedTasks((prev) =>
-                prev.map((t) =>
-                  t.id === durationEditTaskId
-                    ? {
-                        ...t,
-                        totalEditingSeconds: res.totalEditingSeconds,
-                        editingStartedAt: res.editingStartedAt,
-                      }
-                    : t
-                )
-              );
-              setDurationEditTaskId(null);
-            } catch (err) {
-              setDurationEditError(
-                err instanceof Error ? err.message : "Could not save duration."
-              );
-            } finally {
-              setIsSavingDuration(false);
-            }
-          })();
-        }}
       />
     </div>
   );

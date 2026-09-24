@@ -156,7 +156,16 @@ export async function middleware(request: NextRequest) {
     }
   }
 
+  const isDesktopWidget =
+    pathname === "/desktop-widget" || pathname.startsWith("/desktop-widget/");
+
   if (!authedUserId && gateIsAdmin === null) {
+    // The Electron floating widget shares the main-window session. Never bounce
+    // that tiny window to /login — the client shows a signed-out state instead.
+    if (isDesktopWidget) {
+      return supabaseResponse;
+    }
+
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = "/login";
     loginUrl.searchParams.set("redirect", `${pathname}${request.nextUrl.search}`);
@@ -179,7 +188,7 @@ export async function middleware(request: NextRequest) {
   }
 
   // Clock widget stays available even when Staff have zero module grants.
-  if (pathname === "/desktop-widget" || pathname.startsWith("/desktop-widget/")) {
+  if (isDesktopWidget) {
     return supabaseResponse;
   }
 

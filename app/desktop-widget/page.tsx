@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
+import { ELECTRON_IPC, getIpcRenderer } from "@/lib/electronIpc";
 import { formatPlannerDuration, getPlannerElapsedSeconds } from "@/lib/plannerTimerUtils";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -44,33 +45,12 @@ type ApiTaskRow = {
   assigned_to?: string | null;
 };
 
-const IPC_CHANNELS = {
-  REFRESH_MAIN: "desktop-widget:refresh-main",
-  REFRESH_EVENT: "desktop-widget:refresh",
-  HIDE_WIDGET: "desktop-widget:hide",
-  FOCUS_MAIN: "desktop-widget:focus-main",
-  RESIZE_WIDGET: "desktop-widget:resize",
-} as const;
-
 const WIDGET_PAD_PX = 16;
 const WIDGET_COLLAPSED_HEIGHT = 260;
 const WIDGET_EXPANDED_HEIGHT = 450;
-
-function getIpcRenderer():
-  | {
-      on: (channel: string, listener: (...args: unknown[]) => void) => void;
-      removeListener: (channel: string, listener: (...args: unknown[]) => void) => void;
-      send: (channel: string, payload?: unknown) => void;
-    }
-  | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  const electron = (window as typeof window & { require?: (name: string) => unknown }).require?.(
-    "electron"
-  ) as { ipcRenderer?: ReturnType<typeof getIpcRenderer> } | undefined;
-  return electron?.ipcRenderer ?? null;
-}
+const WIDGET_HEARTBEAT_MS = 30_000;
+const WIDGET_ACTIVITY_THROTTLE_MS = 15_000;
+const WIDGET_ACTIVITY_EVENTS = ["mousemove", "keydown", "click", "scroll", "touchstart"] as const;
 
 function normalizeStudioStatus(value: string | null | undefined): StudioTaskStatus {
   const normalized = (value ?? "").trim().toLowerCase();
@@ -138,14 +118,14 @@ export default function DesktopWidgetPage() {
 
   const notifyMainRefresh = useCallback(() => {
     const ipc = getIpcRenderer();
-    ipc?.send(IPC_CHANNELS.REFRESH_MAIN);
+    ipc?.send(ELECTRON_IPC.REFRESH_MAIN);
   }, []);
 
   const resizeNativeWindow = useCallback((height: number, width?: number) => {
     const nextHeight = Math.max(180, Math.min(900, Math.ceil(height)));
     const ipc = getIpcRenderer();
     if (ipc) {
-      ipc.send(IPC_CHANNELS.RESIZE_WIDGET, {
+      ipc.send(ELECTRON_IPC.RESIZE_WIDGET, {
         height: nextHeight,
         ...(typeof width === "number" ? { width: Math.round(width) } : {}),
       });
@@ -269,6 +249,9 @@ export default function DesktopWidgetPage() {
     }
 
     const handleFocus = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
       refreshAuthRole();
     };
 
@@ -287,10 +270,12 @@ export default function DesktopWidgetPage() {
 
     window.addEventListener("focus", handleFocus);
     window.addEventListener("storage", handleStorage);
+    document.addEventListener("visibilitychange", handleFocus);
     return () => {
       subscription.unsubscribe();
       window.removeEventListener("focus", handleFocus);
       window.removeEventListener("storage", handleStorage);
+      document.removeEventListener("visibilitychange", handleFocus);
     };
   }, [refreshAuthRole]);
 
@@ -329,11 +314,71 @@ export default function DesktopWidgetPage() {
       }
       void loadWidgetState();
     };
-    ipc.on(IPC_CHANNELS.REFRESH_EVENT, listener);
+    ipc.on(ELECTRON_IPC.REFRESH_EVENT, listener);
     return () => {
-      ipc.removeListener(IPC_CHANNELS.REFRESH_EVENT, listener);
+      ipc.removeListener(ELECTRON_IPC.REFRESH_EVENT, listener);
     };
   }, [authLoading, authenticated, loadWidgetState]);
+
+  const timerRunning = Boolean(activeTask && isTaskActivelyRunning(activeTask, viewMode));
+
+  useEffect(() => {
+    const ipc = getIpcRenderer();
+    ipc?.send(ELECTRON_IPC.TIMER_RUNNING, timerRunning);
+  }, [timerRunning]);
+
+  useEffect(() => {
+    return () => {
+      getIpcRenderer()?.send(ELECTRON_IPC.TIMER_RUNNING, false);
+    };
+  }, []);
+
+  useEffect(() => {
+    const ipc = getIpcRenderer();
+    const syncVisible = () => {
+      ipc?.send(ELECTRON_IPC.WIDGET_ACTIVE, document.visibilityState === "visible");
+    };
+    syncVisible();
+    document.addEventListener("visibilitychange", syncVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", syncVisible);
+    };
+  }, []);
+
+  useEffect(() => {
+    const ipc = getIpcRenderer();
+    let lastSent = 0;
+
+    const sendHeartbeat = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastSent < WIDGET_ACTIVITY_THROTTLE_MS) {
+        return;
+      }
+      lastSent = now;
+      ipc?.send(ELECTRON_IPC.HEARTBEAT);
+    };
+
+    const maybeHeartbeat = (force = false) => {
+      const visible = document.visibilityState === "visible";
+      if (visible || timerRunning) {
+        sendHeartbeat(force);
+      }
+    };
+
+    maybeHeartbeat(true);
+    const intervalId = window.setInterval(() => maybeHeartbeat(), WIDGET_HEARTBEAT_MS);
+    const onActivity = () => maybeHeartbeat();
+    for (const event of WIDGET_ACTIVITY_EVENTS) {
+      window.addEventListener(event, onActivity, { passive: true });
+    }
+
+    return () => {
+      window.clearInterval(intervalId);
+      for (const event of WIDGET_ACTIVITY_EVENTS) {
+        window.removeEventListener(event, onActivity);
+      }
+    };
+  }, [timerRunning]);
 
   const activeElapsed = useMemo(() => {
     if (!activeTask) {
@@ -577,12 +622,12 @@ export default function DesktopWidgetPage() {
 
   const handleHideWidget = () => {
     const ipc = getIpcRenderer();
-    ipc?.send(IPC_CHANNELS.HIDE_WIDGET);
+    ipc?.send(ELECTRON_IPC.HIDE_WIDGET);
   };
 
   const handleOpenMainApp = () => {
     const ipc = getIpcRenderer();
-    ipc?.send(IPC_CHANNELS.FOCUS_MAIN);
+    ipc?.send(ELECTRON_IPC.FOCUS_MAIN);
   };
 
   const toggleViewMode = () => {

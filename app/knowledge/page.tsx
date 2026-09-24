@@ -1,8 +1,8 @@
 "use client";
 
-import { BookOpen, Loader2, Trash2 } from "lucide-react";
+import { BookOpen, FileUp, Loader2, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   DEFAULT_KNOWLEDGE_CATEGORY,
@@ -13,12 +13,15 @@ import {
 
 type KnowledgeDocument = {
   id: string;
+  documentGroupId?: string;
   title: string;
   category: string;
   createdAt: string;
+  chunkCount?: number;
 };
 
 type CategoryFilter = "all" | KnowledgeCategory;
+type IngestMode = "text" | "pdf";
 
 function formatCreatedAt(value: string): string {
   const parsed = new Date(value);
@@ -44,9 +47,14 @@ export default function KnowledgePage() {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [saving, setSaving] = useState(false);
+  const [ingestMode, setIngestMode] = useState<IngestMode>("text");
+  const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
 
-  const loadDocuments = useCallback(async () => {
-    setError(null);
+  const loadDocuments = useCallback(async (options?: { keepMessages?: boolean }) => {
+    if (!options?.keepMessages) {
+      setError(null);
+    }
     try {
       const res = await fetch("/api/knowledge", { cache: "no-store", credentials: "include" });
       const json = (await res.json().catch(() => null)) as
@@ -57,8 +65,10 @@ export default function KnowledgePage() {
       }
       setDocuments(json?.documents ?? []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load knowledge documents.");
-      setDocuments([]);
+      if (!options?.keepMessages) {
+        setError(e instanceof Error ? e.message : "Failed to load knowledge documents.");
+        setDocuments([]);
+      }
     } finally {
       setLoading(false);
     }
@@ -116,15 +126,79 @@ export default function KnowledgePage() {
     }
   };
 
-  const handleDelete = async (document: KnowledgeDocument) => {
-    if (!window.confirm(`Delete “${document.title}”? This cannot be undone.`)) {
+  const handlePdfIngest = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!pdfFile) {
+      setError("Please choose a PDF file.");
       return;
     }
-    setDeletingId(document.id);
+    if (pdfFile.type && pdfFile.type !== "application/pdf" && !pdfFile.name.toLowerCase().endsWith(".pdf")) {
+      setError("Only PDF files are supported.");
+      return;
+    }
+
+    setSaving(true);
     setError(null);
     setSuccess(null);
     try {
-      const res = await fetch(`/api/knowledge/${document.id}`, {
+      const formData = new FormData();
+      formData.append("file", pdfFile);
+      formData.append("category", category);
+
+      const res = await fetch("/api/knowledge/ingest-pdf", {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+      const json = (await res.json().catch(() => null)) as
+        | {
+            document?: KnowledgeDocument;
+            documents?: KnowledgeDocument[];
+            chunkCount?: number;
+            filename?: string;
+            error?: string;
+            savedCount?: number;
+            totalChunks?: number;
+          }
+        | null;
+
+      if (!res.ok) {
+        await loadDocuments({ keepMessages: true });
+        throw new Error(json?.error ?? "Failed to process PDF.");
+      }
+
+      const chunkCount = json?.chunkCount ?? json?.document?.chunkCount ?? 0;
+      const filename = json?.filename || pdfFile.name;
+      setPdfFile(null);
+      if (pdfInputRef.current) pdfInputRef.current.value = "";
+      if (categoryFilter !== "all" && category !== categoryFilter) {
+        setCategoryFilter(category);
+      }
+      await loadDocuments({ keepMessages: true });
+      setSuccess(
+        `Saved ${chunkCount} part${chunkCount === 1 ? "" : "s"} from “${filename}” in ${category}.`
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to process PDF.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (document: KnowledgeDocument) => {
+    const groupId = document.documentGroupId || document.id;
+    const partLabel =
+      (document.chunkCount ?? 1) > 1
+        ? ` (${document.chunkCount} parts)`
+        : "";
+    if (!window.confirm(`Delete “${document.title}”${partLabel}? This cannot be undone.`)) {
+      return;
+    }
+    setDeletingId(groupId);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await fetch(`/api/knowledge/${groupId}`, {
         method: "DELETE",
         credentials: "include",
       });
@@ -132,7 +206,9 @@ export default function KnowledgePage() {
       if (!res.ok) {
         throw new Error(json?.error ?? "Failed to delete document.");
       }
-      setDocuments((prev) => prev.filter((doc) => doc.id !== document.id));
+      setDocuments((prev) =>
+        prev.filter((doc) => (doc.documentGroupId || doc.id) !== groupId)
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete document.");
     } finally {
@@ -244,10 +320,20 @@ export default function KnowledgePage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleDocuments.map((document) => (
-                      <tr key={document.id} className="border-b border-zinc-800/80 last:border-0">
+                    {visibleDocuments.map((document) => {
+                      const groupId = document.documentGroupId || document.id;
+                      const chunkCount = document.chunkCount ?? 1;
+                      return (
+                      <tr key={groupId} className="border-b border-zinc-800/80 last:border-0">
                         <td className="max-w-[28rem] px-3 py-3 font-medium text-zinc-100">
-                          <span className="line-clamp-2">{document.title}</span>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="line-clamp-2">{document.title}</span>
+                            {chunkCount > 1 ? (
+                              <span className="shrink-0 rounded-md border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-400">
+                                {chunkCount} parts
+                              </span>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="px-3 py-3">
                           <span
@@ -263,10 +349,10 @@ export default function KnowledgePage() {
                           <button
                             type="button"
                             onClick={() => void handleDelete(document)}
-                            disabled={deletingId === document.id}
+                            disabled={deletingId === groupId}
                             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs font-semibold text-zinc-300 hover:border-red-800 hover:bg-red-950/40 hover:text-red-200 disabled:opacity-50"
                           >
-                            {deletingId === document.id ? (
+                            {deletingId === groupId ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
                             ) : (
                               <Trash2 className="h-3.5 w-3.5" aria-hidden />
@@ -275,7 +361,8 @@ export default function KnowledgePage() {
                           </button>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -285,68 +372,168 @@ export default function KnowledgePage() {
           <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 sm:p-6">
             <h2 className="text-lg font-semibold text-white">Add new document</h2>
             <p className="mt-1 text-xs text-zinc-500">
-              Choose a knowledge base, then paste an SOP or guideline. The raw text is stored and
-              embedded for later retrieval.
+              Choose a knowledge base, then paste an SOP or upload a PDF. Text is stored and embedded
+              for later retrieval. PDFs are split into searchable chunks.
             </p>
 
-            <form className="mt-5 space-y-4" onSubmit={(event) => void handleIngest(event)}>
-              <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                Category
-                <select
-                  value={category}
-                  onChange={(event) => setCategory(event.target.value as KnowledgeCategory)}
-                  className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-normal text-zinc-100 outline-none focus:border-violet-500"
-                >
-                  {KNOWLEDGE_CATEGORIES.map((item) => (
-                    <option key={item} value={item}>
-                      {item}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                Title
-                <input
-                  type="text"
-                  value={title}
-                  onChange={(event) => setTitle(event.target.value)}
-                  maxLength={200}
-                  required
-                  placeholder="e.g. Client gallery delivery SOP"
-                  className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-normal text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-violet-500"
-                />
-              </label>
-
-              <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                Content
-                <textarea
-                  value={content}
-                  onChange={(event) => setContent(event.target.value)}
-                  required
-                  rows={16}
-                  maxLength={20000}
-                  placeholder="Paste the full SOP or guideline here…"
-                  className="mt-2 min-h-[20rem] w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-normal leading-6 text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-violet-500"
-                />
-              </label>
-              <p className="text-right text-[11px] text-zinc-500">{content.length.toLocaleString()} / 20,000</p>
-
+            <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Document input method">
               <button
-                type="submit"
-                disabled={saving || !title.trim() || !content.trim()}
-                className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+                type="button"
+                role="tab"
+                aria-selected={ingestMode === "text"}
+                id="ingest-tab-text"
+                onClick={() => setIngestMode("text")}
+                disabled={saving}
+                className={filterButtonClass(ingestMode === "text")}
               >
-                {saving ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                    Embedding & saving…
-                  </>
-                ) : (
-                  "Save document"
-                )}
+                Text Input
               </button>
-            </form>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={ingestMode === "pdf"}
+                id="ingest-tab-pdf"
+                onClick={() => setIngestMode("pdf")}
+                disabled={saving}
+                className={filterButtonClass(ingestMode === "pdf")}
+              >
+                PDF Upload
+              </button>
+            </div>
+
+            {ingestMode === "text" ? (
+              <form
+                className="mt-5 space-y-4"
+                role="tabpanel"
+                aria-labelledby="ingest-tab-text"
+                onSubmit={(event) => void handleIngest(event)}
+              >
+                <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Category
+                  <select
+                    value={category}
+                    onChange={(event) => setCategory(event.target.value as KnowledgeCategory)}
+                    className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-normal text-zinc-100 outline-none focus:border-violet-500"
+                  >
+                    {KNOWLEDGE_CATEGORIES.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Title
+                  <input
+                    type="text"
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                    maxLength={200}
+                    required
+                    placeholder="e.g. Client gallery delivery SOP"
+                    className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-normal text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-violet-500"
+                  />
+                </label>
+
+                <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Content
+                  <textarea
+                    value={content}
+                    onChange={(event) => setContent(event.target.value)}
+                    required
+                    rows={16}
+                    maxLength={20000}
+                    placeholder="Paste the full SOP or guideline here…"
+                    className="mt-2 min-h-[20rem] w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-normal leading-6 text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-violet-500"
+                  />
+                </label>
+                <p className="text-right text-[11px] text-zinc-500">{content.length.toLocaleString()} / 20,000</p>
+
+                <button
+                  type="submit"
+                  disabled={saving || !title.trim() || !content.trim()}
+                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+                >
+                  {saving ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                      Embedding & saving…
+                    </>
+                  ) : (
+                    "Save document"
+                  )}
+                </button>
+              </form>
+            ) : (
+              <form
+                className="mt-5 space-y-4"
+                role="tabpanel"
+                aria-labelledby="ingest-tab-pdf"
+                onSubmit={(event) => void handlePdfIngest(event)}
+              >
+                <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Category
+                  <select
+                    value={category}
+                    onChange={(event) => setCategory(event.target.value as KnowledgeCategory)}
+                    className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-normal text-zinc-100 outline-none focus:border-violet-500"
+                  >
+                    {KNOWLEDGE_CATEGORIES.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  PDF file
+                  <input
+                    ref={pdfInputRef}
+                    type="file"
+                    accept="application/pdf"
+                    disabled={saving}
+                    onChange={(event) => setPdfFile(event.target.files?.[0] ?? null)}
+                    className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-normal text-zinc-100 file:mr-3 file:rounded-md file:border-0 file:bg-violet-600 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-white hover:file:bg-violet-500 outline-none focus:border-violet-500"
+                  />
+                </label>
+                {pdfFile ? (
+                  <p className="flex items-center gap-2 text-xs text-zinc-400">
+                    <FileUp className="h-3.5 w-3.5 text-violet-300" aria-hidden />
+                    {pdfFile.name} ({pdfFile.size < 1024 * 1024
+                      ? `${Math.max(1, Math.round(pdfFile.size / 1024))} KB`
+                      : `${(pdfFile.size / (1024 * 1024)).toFixed(1)} MB`}
+                    )
+                  </p>
+                ) : (
+                  <p className="text-xs text-zinc-500">
+                    Books and long manuals are split into ~1,000–1,500 character chunks and embedded
+                    one part at a time.
+                  </p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={saving || !pdfFile}
+                  className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+                >
+                  {saving ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                      Processing PDF…
+                    </>
+                  ) : (
+                    "Upload & embed PDF"
+                  )}
+                </button>
+                {saving ? (
+                  <p className="text-center text-[11px] text-zinc-500">
+                    Extracting text, chunking, and embedding can take a minute for long manuals.
+                  </p>
+                ) : null}
+              </form>
+            )}
           </section>
         </div>
       </div>

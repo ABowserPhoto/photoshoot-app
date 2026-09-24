@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell, dialog } = require("electron");
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell, dialog, session } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -131,7 +131,114 @@ const IPC_CHANNELS = {
   TOGGLE_WIDGET: "desktop-widget:toggle",
   FOCUS_MAIN: "desktop-widget:focus-main",
   RESIZE_WIDGET: "desktop-widget:resize",
+  SESSION_READY: "desktop-widget:session-ready",
+  WIDGET_ACTIVE: "desktop-widget:active",
+  TIMER_RUNNING: "desktop-widget:timer-running",
+  HEARTBEAT: "desktop-widget:heartbeat",
+  KEEP_ALIVE_STATUS: "desktop-widget:keep-alive-status",
 };
+
+const KEEP_ALIVE_HEARTBEAT_MS = 30_000;
+
+const widgetKeepAlive = {
+  visible: false,
+  timerRunning: false,
+  lastHeartbeatAt: 0,
+};
+
+let keepAliveIntervalId = null;
+
+function getAppSession() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return mainWindow.webContents.session;
+  }
+  return session.defaultSession;
+}
+
+function getSharedWebPreferences() {
+  return {
+    nodeIntegration: true,
+    contextIsolation: false,
+    devTools: isDev,
+    // Share cookies, localStorage, and Supabase auth with every app window.
+    session: getAppSession(),
+  };
+}
+
+function snapshotKeepAlive() {
+  return {
+    visible: widgetKeepAlive.visible,
+    timerRunning: widgetKeepAlive.timerRunning,
+    lastHeartbeatAt: widgetKeepAlive.lastHeartbeatAt,
+  };
+}
+
+function broadcastKeepAliveHeartbeat() {
+  widgetKeepAlive.lastHeartbeatAt = Date.now();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.HEARTBEAT, snapshotKeepAlive());
+  }
+}
+
+function syncKeepAliveInterval() {
+  const shouldRun = widgetKeepAlive.visible || widgetKeepAlive.timerRunning;
+  if (shouldRun && keepAliveIntervalId == null) {
+    broadcastKeepAliveHeartbeat();
+    keepAliveIntervalId = setInterval(broadcastKeepAliveHeartbeat, KEEP_ALIVE_HEARTBEAT_MS);
+    return;
+  }
+  if (!shouldRun && keepAliveIntervalId != null) {
+    clearInterval(keepAliveIntervalId);
+    keepAliveIntervalId = null;
+  }
+}
+
+function setWidgetVisible(visible) {
+  widgetKeepAlive.visible = Boolean(visible);
+  if (visible) {
+    broadcastKeepAliveHeartbeat();
+  }
+  syncKeepAliveInterval();
+}
+
+function setWidgetTimerRunning(running) {
+  widgetKeepAlive.timerRunning = Boolean(running);
+  if (running) {
+    broadcastKeepAliveHeartbeat();
+  }
+  syncKeepAliveInterval();
+}
+
+function widgetTargetUrl(loadUrl = serverUrl) {
+  return `${String(loadUrl).replace(/\/$/, "")}/desktop-widget`;
+}
+
+function isDesktopWidgetUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname === "/desktop-widget" || parsed.pathname.startsWith("/desktop-widget/");
+  } catch {
+    return false;
+  }
+}
+
+function loadWidgetAuthenticatedRoute(windowRef, loadUrl = serverUrl) {
+  if (!windowRef || windowRef.isDestroyed()) {
+    return;
+  }
+  const target = widgetTargetUrl(loadUrl);
+  const current = windowRef.webContents.getURL();
+  if (!current || current === "about:blank" || !isDesktopWidgetUrl(current)) {
+    windowRef.loadURL(target);
+  }
+}
+
+function reloadWidgetSession() {
+  if (!widgetWindow || widgetWindow.isDestroyed()) {
+    return;
+  }
+  widgetWindow.loadURL(widgetTargetUrl(serverUrl));
+}
 
 function resolveAppIconPath() {
   const candidates = [
@@ -827,11 +934,7 @@ function createWindow(loadUrl = serverUrl) {
     height: 800,
     frame: true,
     icon: appIconPath ?? undefined,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-      devTools: isDev,
-    },
+    webPreferences: getSharedWebPreferences(),
   });
 
   mainWindow.loadURL(loadUrl);
@@ -846,6 +949,7 @@ function createWindow(loadUrl = serverUrl) {
 
   mainWindow.on("restore", () => {
     hideWidgetWindow();
+    broadcastKeepAliveHeartbeat();
   });
 
   mainWindow.on("closed", () => {
@@ -854,6 +958,8 @@ function createWindow(loadUrl = serverUrl) {
     }
     widgetWindow = null;
     mainWindow = null;
+    setWidgetVisible(false);
+    setWidgetTimerRunning(false);
   });
 
   return mainWindow;
@@ -879,15 +985,20 @@ function createFloatingWidget(loadUrl = serverUrl) {
     skipTaskbar: true,
     show: false,
     icon: appIconPath ?? undefined,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-      devTools: isDev,
-    },
+    webPreferences: getSharedWebPreferences(),
   });
 
-  widgetWindow.loadURL(`${loadUrl}/desktop-widget`);
+  // Delay loading /desktop-widget until show so the shared session already has
+  // login cookies. Loading at boot redirected the widget to /login.
   configureExternalLinks(widgetWindow.webContents, new URL(loadUrl).origin);
+
+  widgetWindow.on("show", () => {
+    setWidgetVisible(true);
+  });
+
+  widgetWindow.on("hide", () => {
+    setWidgetVisible(false);
+  });
 
   widgetWindow.on("close", (event) => {
     if (!app.isQuitting) {
@@ -898,6 +1009,8 @@ function createFloatingWidget(loadUrl = serverUrl) {
 
   widgetWindow.on("closed", () => {
     widgetWindow = null;
+    setWidgetVisible(false);
+    setWidgetTimerRunning(false);
   });
 
   return widgetWindow;
@@ -908,15 +1021,19 @@ function showWidgetWindow() {
   if (!windowRef || windowRef.isDestroyed()) {
     return;
   }
+  loadWidgetAuthenticatedRoute(windowRef, serverUrl);
+  setWidgetVisible(true);
   windowRef.show();
   windowRef.focus();
 }
 
 function hideWidgetWindow() {
   if (!widgetWindow || widgetWindow.isDestroyed()) {
+    setWidgetVisible(false);
     return;
   }
   widgetWindow.hide();
+  setWidgetVisible(false);
 }
 
 function toggleWidgetWindow() {
@@ -1036,6 +1153,15 @@ function setupWidgetIpc() {
   ipcMain.removeAllListeners(IPC_CHANNELS.TOGGLE_WIDGET);
   ipcMain.removeAllListeners(IPC_CHANNELS.FOCUS_MAIN);
   ipcMain.removeAllListeners(IPC_CHANNELS.RESIZE_WIDGET);
+  ipcMain.removeAllListeners(IPC_CHANNELS.SESSION_READY);
+  ipcMain.removeAllListeners(IPC_CHANNELS.WIDGET_ACTIVE);
+  ipcMain.removeAllListeners(IPC_CHANNELS.TIMER_RUNNING);
+  ipcMain.removeAllListeners(IPC_CHANNELS.HEARTBEAT);
+  try {
+    ipcMain.removeHandler(IPC_CHANNELS.KEEP_ALIVE_STATUS);
+  } catch {
+    // Handler not registered yet.
+  }
 
   ipcMain.on(IPC_CHANNELS.REFRESH_MAIN, () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1065,6 +1191,32 @@ function setupWidgetIpc() {
   ipcMain.on(IPC_CHANNELS.RESIZE_WIDGET, (_event, payload) => {
     resizeWidgetWindow(payload && typeof payload === "object" ? payload : {});
   });
+
+  ipcMain.on(IPC_CHANNELS.SESSION_READY, () => {
+    reloadWidgetSession();
+  });
+
+  ipcMain.on(IPC_CHANNELS.WIDGET_ACTIVE, (_event, visible) => {
+    const windowVisible = Boolean(
+      widgetWindow && !widgetWindow.isDestroyed() && widgetWindow.isVisible()
+    );
+    setWidgetVisible(windowVisible && Boolean(visible));
+  });
+
+  ipcMain.on(IPC_CHANNELS.TIMER_RUNNING, (_event, running) => {
+    setWidgetTimerRunning(Boolean(running));
+  });
+
+  ipcMain.on(IPC_CHANNELS.HEARTBEAT, () => {
+    const windowVisible = Boolean(
+      widgetWindow && !widgetWindow.isDestroyed() && widgetWindow.isVisible()
+    );
+    if (windowVisible || widgetKeepAlive.timerRunning) {
+      broadcastKeepAliveHeartbeat();
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.KEEP_ALIVE_STATUS, () => snapshotKeepAlive());
 }
 
 async function bootstrap() {
@@ -1090,6 +1242,10 @@ app.whenReady().then(bootstrap).catch((error) => {
 
 app.on("before-quit", () => {
   app.isQuitting = true;
+  if (keepAliveIntervalId != null) {
+    clearInterval(keepAliveIntervalId);
+    keepAliveIntervalId = null;
+  }
   stopManagedChildProcesses();
   stopProductionServer();
 });

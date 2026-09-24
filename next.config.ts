@@ -8,7 +8,7 @@ const allowedDevOrigins =
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  serverExternalPackages: ["sharp", "exifreader"],
+  serverExternalPackages: ["sharp", "exifreader", "pdf-parse", "pdfjs-dist", "@napi-rs/canvas"],
   typescript: {
     ignoreBuildErrors: true,
   },

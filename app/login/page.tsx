@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { handleClockIn } from "@/app/actions/shifts";
+import { ELECTRON_IPC, getIpcRenderer } from "@/lib/electronIpc";
 import { supabase } from "@/lib/supabaseClient";
 
 function LoginForm() {
@@ -84,6 +85,7 @@ function LoginForm() {
       }
 
       refreshAuthRole();
+      getIpcRenderer()?.send(ELECTRON_IPC.SESSION_READY);
       const safeRedirect =
         redirectTo.startsWith("/") && !redirectTo.startsWith("//") ? redirectTo : "/";
       router.replace(safeRedirect);

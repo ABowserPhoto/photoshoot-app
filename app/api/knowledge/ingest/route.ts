@@ -114,6 +114,8 @@ export async function POST(request: Request) {
     );
   }
 
+  const documentGroupId = crypto.randomUUID();
+
   const { data, error } = await sb
     .from("knowledge_documents")
     .insert({
@@ -121,6 +123,7 @@ export async function POST(request: Request) {
       content,
       category,
       embedding,
+      document_group_id: documentGroupId,
     })
     .select(KNOWLEDGE_LIST_COLUMNS)
     .single();

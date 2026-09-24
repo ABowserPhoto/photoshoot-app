@@ -3,15 +3,15 @@ import { NextResponse } from "next/server";
 import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 import {
   getKnowledgeSupabase,
+  groupKnowledgeDocumentRows,
   KNOWLEDGE_LIST_COLUMNS,
-  mapKnowledgeDocumentRow,
   type KnowledgeDocumentRow,
 } from "@/lib/server/knowledgeSupabase";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-/** GET /api/knowledge — list saved SOP documents (title, category, created_at). */
+/** GET /api/knowledge — list SOP documents grouped by document_group_id. */
 export async function GET() {
   const access = await assertModuleAccess("knowledge");
   if (!access.ok) {
@@ -35,6 +35,6 @@ export async function GET() {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const documents = ((data ?? []) as KnowledgeDocumentRow[]).map(mapKnowledgeDocumentRow);
+  const documents = groupKnowledgeDocumentRows((data ?? []) as KnowledgeDocumentRow[]);
   return NextResponse.json({ ok: true, documents });
 }
