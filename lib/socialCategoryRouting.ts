@@ -99,3 +99,28 @@ export function buildSocialCaptionSeed(input: {
   }
   return `Ready for AI caption — ${parts.join(" · ")}`;
 }
+
+/**
+ * Booking titles look like "Category - Client - Street, City"
+ * (e.g. "Immobilien - NIC by Siebert Immobilien GmbH - Wittbräuckerstr 32, Dortmund").
+ * The city is the text after the last comma. Hyphenated names such as
+ * "Schwerte-Schwerterheide" stay intact.
+ */
+export function extractCityFromBookingTitle(title: string | null | undefined): string | null {
+  const trimmed = (title ?? "").trim();
+  if (!trimmed) {
+    return null;
+  }
+  const commaIndex = trimmed.lastIndexOf(",");
+  if (commaIndex < 0) {
+    return null;
+  }
+  const city = trimmed.slice(commaIndex + 1).trim();
+  return city.length > 0 ? city : null;
+}
+
+/** Immobilien social caption: "New home in Dortmund", or "New home!" when no city parses. */
+export function buildImmobilienSocialCaption(bookingTitle: string | null | undefined): string {
+  const city = extractCityFromBookingTitle(bookingTitle);
+  return city ? `New home in ${city}` : "New home!";
+}

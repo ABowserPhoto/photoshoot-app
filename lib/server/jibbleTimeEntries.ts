@@ -88,6 +88,15 @@ export async function resolveJibbleEmployeeId(params: {
   return { id: null, notLinked: true };
 }
 
+const JIBBLE_REQUEST_TIMEOUT_MS = 15_000;
+
+function jibbleFetchInit(init: RequestInit): RequestInit {
+  return {
+    ...init,
+    signal: init.signal ?? AbortSignal.timeout(JIBBLE_REQUEST_TIMEOUT_MS),
+  };
+}
+
 export async function getJibbleAccessToken(): Promise<string> {
   const clientId = process.env.JIBBLE_CLIENT_ID?.trim();
   const clientSecret = process.env.JIBBLE_CLIENT_SECRET?.trim();
@@ -101,15 +110,18 @@ export async function getJibbleAccessToken(): Promise<string> {
     client_secret: clientSecret,
   }).toString();
 
-  const response = await fetch(JIBBLE_TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-    },
-    body,
-    cache: "no-store",
-  });
+  const response = await fetch(
+    JIBBLE_TOKEN_URL,
+    jibbleFetchInit({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body,
+      cache: "no-store",
+    })
+  );
 
   const json = (await response.json().catch(() => null)) as
     | {
@@ -211,16 +223,19 @@ export async function postJibbleTimeEntry(params: {
   const breakId = params.breakId?.trim() || null;
   const payload = buildTimeEntryPayload(params.employeeId, params.type, { breakId });
 
-  const response = await fetch(JIBBLE_TIME_ENTRIES_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
+  const response = await fetch(
+    JIBBLE_TIME_ENTRIES_URL,
+    jibbleFetchInit({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    })
+  );
 
   const json = (await response.json().catch(() => null)) as unknown;
 
@@ -267,14 +282,17 @@ export async function resolveJibbleBreakId(params: {
   const time = new Date().toISOString();
   const url = `${JIBBLE_GET_BREAKS_URL}(personId=${params.employeeId},time=${time})`;
 
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    cache: "no-store",
-  });
+  const response = await fetch(
+    url,
+    jibbleFetchInit({
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      cache: "no-store",
+    })
+  );
 
   if (!response.ok) {
     return null;
@@ -392,14 +410,17 @@ export async function fetchLatestJibbleClockMode(
   url.searchParams.set("$orderby", "time desc");
   url.searchParams.set("$top", "5");
 
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    cache: "no-store",
-  });
+  const response = await fetch(
+    url.toString(),
+    jibbleFetchInit({
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      cache: "no-store",
+    })
+  );
 
   if (!response.ok) {
     throw new Error(`Jibble TimeEntries request failed (${response.status}).`);

@@ -23,6 +23,7 @@ type QueueFromDeliverablesBody = {
   photoshootType?: unknown;
   clientName?: unknown;
   shootLocation?: unknown;
+  bookingTitle?: unknown;
   fileUrls?: unknown;
 };
 
@@ -58,6 +59,7 @@ export async function POST(request: Request) {
   const photoshootType = typeof body.photoshootType === "string" ? body.photoshootType.trim() : "";
   const clientName = typeof body.clientName === "string" ? body.clientName.trim() : "";
   const shootLocation = typeof body.shootLocation === "string" ? body.shootLocation.trim() : "";
+  const bookingTitle = typeof body.bookingTitle === "string" ? body.bookingTitle.trim() : "";
   const routePreview = resolveSocialCategoryRoute(photoshootType);
 
   if (!taskId) {
@@ -97,6 +99,7 @@ export async function POST(request: Request) {
     photoshootType,
     clientName,
     shootLocation,
+    bookingTitle,
     fileUrls,
     taskId,
   });

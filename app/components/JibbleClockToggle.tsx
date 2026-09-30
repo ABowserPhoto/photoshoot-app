@@ -1,7 +1,7 @@
 "use client";
 
 import { Coffee, Loader2, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 
 import { syncUserJibbleStatus } from "@/app/actions/jibble-sync";
 import { usePlannerGlobalSafe } from "@/app/contexts/PlannerGlobalContext";
@@ -23,6 +23,7 @@ type ClockApiResponse = {
 
 const STORAGE_KEY = "jibble-clock-state-v2";
 export const JIBBLE_BREAK_PAUSED_EVENT = "jibble:break-paused-studio-tasks";
+const CLOCK_REQUEST_TIMEOUT_MS = 20_000;
 
 function readInitialClockState(): ClockState {
   if (typeof window === "undefined") {
@@ -96,6 +97,30 @@ function timeEntryIdFromResponse(json: ClockApiResponse | null): string | null {
     : null;
 }
 
+function clockRequestErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    return `${fallback} The request timed out, so you can try again.`;
+  }
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return `${fallback} The request timed out, so you can try again.`;
+  }
+  return error instanceof Error && error.message.trim() ? error.message : fallback;
+}
+
+async function postClockEndpoint(path: string, body?: Record<string, unknown>): Promise<ClockApiResponse> {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(CLOCK_REQUEST_TIMEOUT_MS),
+  });
+  const json = (await response.json().catch(() => null)) as ClockApiResponse | null;
+  if (!response.ok || !json?.ok) {
+    throw new Error(normalizeErrorMessage(json?.error, `Request failed (HTTP ${response.status}).`));
+  }
+  return json;
+}
+
 function notifyStudioTasksPausedFromJibbleBreak(
   pausedTasks: Array<{ id?: string; elapsed_seconds?: number }> | undefined
 ) {
@@ -122,29 +147,49 @@ export default function JibbleClockToggle() {
   const [clockState, setClockState] = useState<ClockState>(() => readInitialClockState());
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isSyncing, startSyncTransition] = useTransition();
+  const [isSyncing, setIsSyncing] = useState(false);
 
   const mode = clockState.mode;
 
   useEffect(() => {
-    startSyncTransition(async () => {
-      const result = await syncUserJibbleStatus();
-      if (!result.ok || result.notLinked) return;
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      setIsSyncing(false);
+    }, CLOCK_REQUEST_TIMEOUT_MS);
 
-      setClockState((prev) => {
-        const nextMode = result.mode ?? (result.isClockedIn ? "working" : "out");
-        if (prev.mode === nextMode && prev.timeEntryId === result.timeEntryId) {
-          return prev;
+    setIsSyncing(true);
+    void (async () => {
+      try {
+        const result = await syncUserJibbleStatus();
+        if (cancelled || !result.ok || result.notLinked) return;
+
+        setClockState((prev) => {
+          const nextMode = result.mode ?? (result.isClockedIn ? "working" : "out");
+          if (prev.mode === nextMode && prev.timeEntryId === result.timeEntryId) {
+            return prev;
+          }
+          const next: ClockState = {
+            mode: nextMode,
+            timeEntryId: result.timeEntryId,
+          };
+          persistClockState(next);
+          return next;
+        });
+      } catch {
+        // Keep the cached clock state when status sync fails.
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (!cancelled) {
+          setIsSyncing(false);
         }
-        const next: ClockState = {
-          mode: nextMode,
-          timeEntryId: result.timeEntryId,
-        };
-        persistClockState(next);
-        return next;
-      });
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+      setIsSyncing(false);
+    };
   }, []);
 
   const primaryLabel = useMemo(() => {
@@ -173,19 +218,10 @@ export default function JibbleClockToggle() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const response = await fetch("/api/jibble/clock-in", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      const json = (await response.json().catch(() => null)) as ClockApiResponse | null;
-      if (!response.ok || !json?.ok) {
-        throw new Error(
-          normalizeErrorMessage(json?.error, `Clock in failed (HTTP ${response.status}).`)
-        );
-      }
+      const json = await postClockEndpoint("/api/jibble/clock-in");
       applyMode("working", timeEntryIdFromResponse(json));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Clock in failed.");
+      setErrorMessage(clockRequestErrorMessage(error, "Clock in failed."));
     } finally {
       setIsLoading(false);
     }
@@ -195,20 +231,13 @@ export default function JibbleClockToggle() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const response = await fetch("/api/jibble/clock-out", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ timeEntryId: clockState.timeEntryId }),
-      });
-      const json = (await response.json().catch(() => null)) as ClockApiResponse | null;
-      if (!response.ok || !json?.ok) {
-        throw new Error(
-          normalizeErrorMessage(json?.error, `Clock out failed (HTTP ${response.status}).`)
-        );
-      }
+      await postClockEndpoint(
+        "/api/jibble/clock-out",
+        clockState.timeEntryId ? { timeEntryId: clockState.timeEntryId } : undefined
+      );
       applyMode("out", null);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Clock out failed.");
+      setErrorMessage(clockRequestErrorMessage(error, "Clock out failed."));
     } finally {
       setIsLoading(false);
     }
@@ -218,23 +247,14 @@ export default function JibbleClockToggle() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const response = await fetch("/api/jibble/break", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      const json = (await response.json().catch(() => null)) as ClockApiResponse | null;
-      if (!response.ok || !json?.ok) {
-        throw new Error(
-          normalizeErrorMessage(json?.error, `Break failed (HTTP ${response.status}).`)
-        );
-      }
+      const json = await postClockEndpoint("/api/jibble/break");
       applyMode("break", timeEntryIdFromResponse(json));
 
       // Clear floating widget immediately; planner board refreshes via event.
       plannerGlobal?.setActiveTimerSession(null);
       notifyStudioTasksPausedFromJibbleBreak(json.pausedTasks);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Break failed.");
+      setErrorMessage(clockRequestErrorMessage(error, "Break failed."));
     } finally {
       setIsLoading(false);
     }
@@ -245,22 +265,35 @@ export default function JibbleClockToggle() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const response = await fetch("/api/jibble/clock-in", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      const json = (await response.json().catch(() => null)) as ClockApiResponse | null;
-      if (!response.ok || !json?.ok) {
-        throw new Error(
-          normalizeErrorMessage(json?.error, `Resume failed (HTTP ${response.status}).`)
-        );
-      }
+      const json = await postClockEndpoint("/api/jibble/clock-in");
       applyMode("working", timeEntryIdFromResponse(json));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Resume failed.");
+      setErrorMessage(clockRequestErrorMessage(error, "Resume failed."));
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const onPrimaryClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (isLoading) return;
+    if (mode === "out") {
+      void handleClockIn();
+      return;
+    }
+    void handleClockOut();
+  };
+
+  const onBreakClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (isLoading) return;
+    if (mode === "break") {
+      void handleResume();
+      return;
+    }
+    void handleBreak();
   };
 
   const primaryButtonClass =
@@ -274,7 +307,7 @@ export default function JibbleClockToggle() {
       : "inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-amber-600/80 bg-amber-600/20 px-4 text-sm font-semibold text-amber-200 transition hover:bg-amber-600/35 disabled:cursor-not-allowed disabled:opacity-60";
 
   return (
-    <div className="flex flex-col items-end gap-1">
+    <div className="relative z-10 flex flex-col items-end gap-1">
       <div className="flex items-center gap-2">
         {isSyncing ? (
           <RefreshCw
@@ -286,8 +319,8 @@ export default function JibbleClockToggle() {
         {mode === "working" || mode === "break" ? (
           <button
             type="button"
-            onClick={() => void (mode === "break" ? handleResume() : handleBreak())}
-            disabled={isLoading || isSyncing}
+            onClick={onBreakClick}
+            disabled={isLoading}
             className={breakButtonClass}
             title={mode === "break" ? "End break and resume work" : "Start a break"}
           >
@@ -302,8 +335,8 @@ export default function JibbleClockToggle() {
 
         <button
           type="button"
-          onClick={() => void (mode === "out" ? handleClockIn() : handleClockOut())}
-          disabled={isLoading || isSyncing}
+          onClick={onPrimaryClick}
+          disabled={isLoading}
           className={primaryButtonClass}
         >
           {isLoading ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
+  buildImmobilienSocialCaption,
   buildSocialCaptionSeed,
   profileMatchesRoute,
   resolveSocialCategoryRoute,
@@ -231,6 +232,8 @@ export async function queueDeliverablesToSocialGrid(input: {
   photoshootType: string;
   clientName: string;
   shootLocation: string;
+  /** Stored booking title (`Category - Client - Street, City`). Used for Immobilien city captions. */
+  bookingTitle?: string;
   /** Public URLs in the social_media bucket (uploaded client-side). */
   fileUrls: string[];
   taskId: string;
@@ -285,11 +288,20 @@ export async function queueDeliverablesToSocialGrid(input: {
     cursor += 1;
   }
 
-  const captionSeed = buildSocialCaptionSeed({
-    clientName: input.clientName,
-    shootLocation: input.shootLocation,
-    photoshootType: input.photoshootType,
-  });
+  const bookingTitle =
+    input.bookingTitle?.trim() ||
+    [input.photoshootType, input.clientName, input.shootLocation]
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .join(" - ");
+  const captionSeed =
+    route.categoryLabel === "Immobilien"
+      ? buildImmobilienSocialCaption(bookingTitle)
+      : buildSocialCaptionSeed({
+          clientName: input.clientName,
+          shootLocation: input.shootLocation,
+          photoshootType: input.photoshootType,
+        });
 
   const queued: QueuedSocialPost[] = [];
 

@@ -1574,6 +1574,7 @@ function HomeContent() {
           uploadTask.companyName.trim() ||
           [uploadTask.contactFirstName, uploadTask.contactLastName].filter(Boolean).join(" ").trim(),
         shootLocation: uploadTask.shootLocation,
+        bookingTitle: uploadTask.taskTitle.trim() || getTaskTitle(uploadTask),
         fileUrls,
       }),
     });

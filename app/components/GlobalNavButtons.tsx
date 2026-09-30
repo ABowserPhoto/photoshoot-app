@@ -181,7 +181,11 @@ export default function GlobalNavButtons({ className, secondaryMiddle, children 
   );
 
   return (
-    <div className={className ?? "relative flex w-full items-center justify-end gap-2"}>
+    <div
+      className={["relative z-[60]", className ?? "flex w-full items-center justify-end gap-2"]
+        .filter(Boolean)
+        .join(" ")}
+    >
       <button
         type="button"
         className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 transition hover:bg-zinc-800 md:hidden"
