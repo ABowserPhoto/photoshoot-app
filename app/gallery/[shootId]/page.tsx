@@ -63,7 +63,7 @@ function WatermarkOverlay() {
       src="/watermark.png"
       alt=""
       aria-hidden
-      className="pointer-events-none absolute inset-0 z-[1] h-full w-full object-cover opacity-40"
+      className="pointer-events-none absolute inset-0 z-[1] h-full w-full object-cover opacity-[0.34]"
     />
   );
 }
@@ -107,7 +107,7 @@ export default function GalleryPage() {
   }, [photoshootType]);
   // object-contain (not cover) so portrait/RAW orientation stays upright without cropping.
   const thumbImageClass = isLandscape
-    ? "h-32 w-full bg-black object-contain transition duration-200 group-hover:opacity-95"
+    ? "h-64 w-full bg-black object-contain transition duration-200 group-hover:opacity-95"
     : "aspect-[3/4] h-auto w-full bg-black object-contain transition duration-200 group-hover:opacity-95";
   const selectedIndices = useMemo(
     () => Array.from(selectedChunks).sort((a, b) => a - b),
@@ -185,6 +185,20 @@ export default function GalleryPage() {
     }
     window.localStorage.setItem(selectionStorageKey, JSON.stringify(selectedIndices));
   }, [isLockedByServer, isSuccess, selectionHydrated, selectionStorageKey, selectedIndices]);
+
+  useEffect(() => {
+    if (activeChunkIndex == null) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeLightbox();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeChunkIndex]);
 
   function readDraftSelection(storageKey: string): number[] {
     try {
@@ -575,8 +589,8 @@ export default function GalleryPage() {
           <section
             className={
               isLandscape
-                ? "grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
-                : "grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5"
+                ? "grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3"
+                : "grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3"
             }
           >
             {gridItems.map((item) => {
@@ -698,7 +712,7 @@ export default function GalleryPage() {
               event.stopPropagation();
               closeLightbox();
             }}
-            className="absolute right-4 top-4 z-50 inline-flex h-10 w-10 items-center justify-center rounded-full border border-zinc-600 bg-zinc-900/80 text-xl text-zinc-100"
+            className="absolute right-4 top-4 z-[60] inline-flex h-10 w-10 pointer-events-auto items-center justify-center rounded-full border border-zinc-600 bg-zinc-900/80 text-xl text-zinc-100"
             aria-label="Schließen"
           >
             ×
@@ -712,7 +726,7 @@ export default function GalleryPage() {
                   event.stopPropagation();
                   goToRelativeItem(-1);
                 }}
-                className="absolute left-4 top-1/2 z-50 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-zinc-600 bg-zinc-900/80 text-2xl text-zinc-100"
+                className="absolute left-4 top-1/2 z-[60] inline-flex h-10 w-10 -translate-y-1/2 pointer-events-auto items-center justify-center rounded-full border border-zinc-600 bg-zinc-900/80 text-2xl text-zinc-100"
                 aria-label="Vorheriges Bild"
               >
                 ‹
@@ -723,7 +737,7 @@ export default function GalleryPage() {
                   event.stopPropagation();
                   goToRelativeItem(1);
                 }}
-                className="absolute right-4 top-1/2 z-50 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-zinc-600 bg-zinc-900/80 text-2xl text-zinc-100"
+                className="absolute right-4 top-1/2 z-[60] inline-flex h-10 w-10 -translate-y-1/2 pointer-events-auto items-center justify-center rounded-full border border-zinc-600 bg-zinc-900/80 text-2xl text-zinc-100"
                 aria-label="Nächstes Bild"
               >
                 ›
@@ -731,40 +745,51 @@ export default function GalleryPage() {
             </>
           ) : null}
 
-          <div
-            className="mx-auto flex h-full w-full max-w-7xl flex-col items-center justify-center px-4 pb-8 pt-16"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="relative inline-flex max-h-[78vh] max-w-full">
+          <div className="pointer-events-none mx-auto flex h-full w-full flex-col items-center justify-center px-6 py-16 sm:px-14">
+            <div
+              className="relative inline-flex max-h-[70vh] max-w-[70vw] pointer-events-auto"
+              onClick={(event) => event.stopPropagation()}
+            >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
+                key={activeModalItem.previewUrl}
                 src={activeModalItem.previewUrl}
                 alt={activeModalItem.firstFilename}
-                className="max-h-[78vh] w-auto max-w-full object-contain"
+                className="max-h-[70vh] max-w-[70vw] object-contain"
+                onLoad={(event) => {
+                  const image = event.currentTarget;
+                  const { naturalWidth, naturalHeight } = image;
+                  if (!naturalWidth || !naturalHeight) {
+                    return;
+                  }
+                  const ratio = naturalWidth / naturalHeight;
+                  image.style.width = `min(70vw, calc(70vh * ${ratio}))`;
+                  image.style.height = `min(70vh, calc(70vw / ${ratio}))`;
+                }}
               />
               <WatermarkOverlay />
-            </div>
-            <div className="mt-3 w-full max-w-3xl rounded-lg border border-zinc-700 bg-zinc-900/80 px-4 py-3">
-              <div className="truncate text-sm text-zinc-300">{displayFilename(activeModalItem.firstFilename)}</div>
-              <div className="mt-2 flex items-center justify-between gap-3">
-                <StarsRow
-                  chunkIndex={activeModalItem.chunkIndex}
-                  size="text-xl"
-                  disabled={isSuccess || isLockedByServer}
-                />
-                <button
-                  type="button"
-                  disabled={isSuccess || isLockedByServer}
-                  onClick={() => toggleChunk(activeModalItem.chunkIndex)}
-                  aria-disabled={isSuccess || isLockedByServer}
-                  className={`inline-flex h-7 min-w-7 items-center justify-center rounded-sm border px-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${
-                    selectedChunks.has(activeModalItem.chunkIndex)
-                      ? "border-green-400 bg-green-500 text-white"
-                      : "border-zinc-500 bg-zinc-900 text-zinc-300"
-                  }`}
-                >
-                  {selectedChunks.has(activeModalItem.chunkIndex) ? "Ausgewählt" : "Auswählen"}
-                </button>
+              <div className="absolute inset-x-0 bottom-0 z-[2] rounded-b-md bg-gradient-to-t from-black/85 via-black/55 to-transparent px-4 pb-3 pt-10">
+                <div className="truncate text-sm text-zinc-200">{displayFilename(activeModalItem.firstFilename)}</div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <StarsRow
+                    chunkIndex={activeModalItem.chunkIndex}
+                    size="text-xl"
+                    disabled={isSuccess || isLockedByServer}
+                  />
+                  <button
+                    type="button"
+                    disabled={isSuccess || isLockedByServer}
+                    onClick={() => toggleChunk(activeModalItem.chunkIndex)}
+                    aria-disabled={isSuccess || isLockedByServer}
+                    className={`inline-flex h-7 min-w-7 items-center justify-center rounded-sm border px-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${
+                      selectedChunks.has(activeModalItem.chunkIndex)
+                        ? "border-green-400 bg-green-500 text-white"
+                        : "border-zinc-500 bg-zinc-900 text-zinc-300"
+                    }`}
+                  >
+                    {selectedChunks.has(activeModalItem.chunkIndex) ? "Ausgewählt" : "Auswählen"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
