@@ -44,14 +44,48 @@ function looksLikeCalendarSyncTitle(parts) {
   return first === "real estate" || first === "immobilien" || first === "business portraits";
 }
 
+function formatClientAddress(street, city) {
+  const streetPart = String(street ?? "").trim();
+  const cityPart = String(city ?? "").trim();
+  if (streetPart && cityPart) {
+    return `${streetPart}, ${cityPart}`;
+  }
+  return streetPart || cityPart;
+}
+
+/** Join only non-empty parts so folder names never end with a dangling " - ". */
+function joinFolderParts(...parts) {
+  return parts
+    .map((part) => String(part ?? "").trim())
+    .filter((part) => part.length > 0)
+    .join(" - ");
+}
+
+/**
+ * Prefer photoshoot location (`shoot_location`); fall back to client address.
+ * Omits the trailing segment entirely when both are blank.
+ */
+function resolveLocationPart(row) {
+  return (
+    String(row.shoot_location ?? "").trim() ||
+    String(row.titleLocationFallback ?? "").trim() ||
+    formatClientAddress(row.street, row.city)
+  );
+}
+
 export function buildLocalFolderNameFromTask(row) {
   const titleParts = splitCalendarTitle(row.title);
 
   if (looksLikeCalendarSyncTitle(titleParts)) {
     const type = normalizeShootType(titleParts[0] ?? null);
     const client = titleParts[1] || String(row.company_name ?? "").trim() || "Client";
-    const city = titleParts[2] || String(row.city ?? "").trim() || String(row.shoot_location ?? "").trim() || "Unknown";
-    return sanitizeWindowsFolderName(`${type} - ${client} - ${city}`);
+    const location = resolveLocationPart({
+      shoot_location: row.shoot_location,
+      street: row.street,
+      city: row.city,
+      titleLocationFallback: titleParts[2] ?? null,
+    });
+    return sanitizeWindowsFolderName(joinFolderParts(type, client, location));
   }
 
   const type = normalizeShootType(row.photoshoot_type ?? titleParts[0] ?? null);
@@ -60,12 +94,11 @@ export function buildLocalFolderNameFromTask(row) {
     titleParts[1] ||
     titleParts[0] ||
     "Client";
-  const street = String(row.street ?? "").trim();
-  const city = String(row.city ?? "").trim();
-  const addressPart =
-    street && city
-      ? `${street}, ${city}`
-      : String(row.shoot_location ?? "").trim() || city || "Unknown";
+  const location = resolveLocationPart({
+    shoot_location: row.shoot_location,
+    street: row.street,
+    city: row.city,
+  });
 
-  return sanitizeWindowsFolderName(`${type} - ${client} - ${addressPart}`);
+  return sanitizeWindowsFolderName(joinFolderParts(type, client, location));
 }

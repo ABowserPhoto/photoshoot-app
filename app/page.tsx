@@ -1259,8 +1259,8 @@ function HomeContent() {
       return;
     }
 
-    if (!shootLocation.trim() || !photoshootDate) {
-      setFormError("Photoshoot Location and Photoshoot Date are required.");
+    if (!photoshootDate) {
+      setFormError("Photoshoot Date is required.");
       return;
     }
 
@@ -1287,7 +1287,9 @@ function HomeContent() {
         due_date: dueDate || null,
         title:
           preservedTaskTitle.trim() ||
-          `${photoshootType} - ${companyName.trim() || contactPerson.trim() || "Client"} - ${shootLocation}`,
+          [photoshootType, companyName.trim() || contactPerson.trim() || "Client", shootLocation.trim()]
+            .filter(Boolean)
+            .join(" - "),
         status: {
           "awaiting-folders": "awaiting_folder_creation",
           booking: "Booking",
@@ -1338,7 +1340,9 @@ function HomeContent() {
     const servicesLexofficeIds = selectedServices.map((service) => service.lexoffice_id ?? "");
     const productsLexofficeIds = selectedProducts.map((product) => product.lexoffice_id ?? "");
     const displayClientLabel = companyName.trim() || contactPerson.trim() || "Client";
-    const generatedTitle = `${photoshootType} - ${displayClientLabel} - ${shootLocation}`;
+    const generatedTitle = [photoshootType, displayClientLabel, shootLocation.trim()]
+      .filter(Boolean)
+      .join(" - ");
 
     const payload: TaskSupabasePayload = {
       company_name: companyName.trim(),
@@ -2228,11 +2232,13 @@ function HomeContent() {
                     <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
                       Photoshoot Location
                       <input
-                        required
                         value={shootLocation}
                         onChange={(event) => setShootLocation(event.target.value)}
                         className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                       />
+                      <span className="mt-1 block text-[11px] font-normal text-zinc-500">
+                        Used for the local folder name. If left blank, the client address is used instead.
+                      </span>
                     </label>
                     <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
                       Type of Photoshoot
