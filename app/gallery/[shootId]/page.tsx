@@ -56,18 +56,6 @@ function formatSelectionLockedLabel(submittedAt: string): string | null {
   return `Auswahl gesperrt am ${datePart} um ${timePart} Uhr`;
 }
 
-function WatermarkOverlay() {
-  return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src="/watermark.png"
-      alt=""
-      aria-hidden
-      className="pointer-events-none absolute inset-0 z-[1] h-full w-full object-cover opacity-[0.34]"
-    />
-  );
-}
-
 export default function GalleryPage() {
   const searchParams = useSearchParams();
   const routeParams = useParams<{ shootId: string }>();
@@ -618,7 +606,6 @@ export default function GalleryPage() {
                         className={thumbImageClass}
                         loading="lazy"
                       />
-                      <WatermarkOverlay />
                     </button>
                     <button
                       type="button"
@@ -767,7 +754,6 @@ export default function GalleryPage() {
                   image.style.height = `min(70vh, calc(70vw / ${ratio}))`;
                 }}
               />
-              <WatermarkOverlay />
               <div className="absolute inset-x-0 bottom-0 z-[2] rounded-b-md bg-gradient-to-t from-black/85 via-black/55 to-transparent px-4 pb-3 pt-10">
                 <div className="truncate text-sm text-zinc-200">{displayFilename(activeModalItem.firstFilename)}</div>
                 <div className="mt-2 flex items-center justify-between gap-3">
