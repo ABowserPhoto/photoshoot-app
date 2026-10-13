@@ -2295,7 +2295,7 @@ function HomeContent() {
                       <span>
                         Generate Client Gallery
                         <span className="mt-0.5 block text-[11px] font-normal text-zinc-500">
-                          When unchecked, the worker skips watermarked preview generation and storage uploads for this booking.
+                          When unchecked, the worker skips watermarked client preview generation. The Kanban cover image is still created.
                         </span>
                       </span>
                     </label>

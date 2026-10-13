@@ -80,6 +80,7 @@ function buildClientWritePayload(companyName: string, input: TaskClientLinkInput
     billing_address: composeBillingAddress(input),
     lexoffice_contact_id: lexofficeId,
     lexoffice_id: lexofficeId,
+    is_approved: true,
   };
 }
 

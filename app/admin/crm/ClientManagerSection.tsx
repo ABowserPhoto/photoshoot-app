@@ -4,6 +4,7 @@ import { GitMerge, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import ReminderDraftedMarker from "@/app/admin/crm/ReminderDraftedMarker";
+import { approveClient } from "@/app/actions/approveClient";
 import { formatEuro } from "@/lib/adminStatsFormat";
 
 export type ContactPerson = {
@@ -25,6 +26,7 @@ export type CrmClient = {
   contactPersons: ContactPerson[];
   lifetimeRevenue: number;
   reminderDates?: string[];
+  isApproved: boolean;
 };
 
 type ClientFormState = {
@@ -36,6 +38,7 @@ type ClientFormState = {
   billing_address: string;
   lexoffice_id: string;
   contact_persons: ContactPerson[];
+  is_approved: boolean;
 };
 
 const EMPTY_FORM: ClientFormState = {
@@ -47,6 +50,7 @@ const EMPTY_FORM: ClientFormState = {
   billing_address: "",
   lexoffice_id: "",
   contact_persons: [],
+  is_approved: true,
 };
 
 function newContactPerson(): ContactPerson {
@@ -72,6 +76,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
   const [mergeTargetId, setMergeTargetId] = useState("");
   const [merging, setMerging] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
 
   const mergeTargetOptions = useMemo(() => {
     if (!selectedSourceClient) {
@@ -82,16 +87,31 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
 
   const filteredClients = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
-    if (!query) {
-      return clients;
-    }
-    return clients.filter((client) => {
-      const companyName = client.companyName.toLowerCase();
-      const contactName = client.contactName.toLowerCase();
-      const email = client.email.toLowerCase();
-      return companyName.includes(query) || contactName.includes(query) || email.includes(query);
+    const matched = !query
+      ? clients
+      : clients.filter((client) => {
+          const companyName = client.companyName.toLowerCase();
+          const contactName = client.contactName.toLowerCase();
+          const email = client.email.toLowerCase();
+          return companyName.includes(query) || contactName.includes(query) || email.includes(query);
+        });
+
+    return [...matched].sort((a, b) => {
+      if (a.isApproved !== b.isApproved) {
+        return a.isApproved ? 1 : -1;
+      }
+      return a.companyName.localeCompare(b.companyName, "en");
     });
   }, [clients, searchTerm]);
+
+  const pendingClients = useMemo(
+    () => filteredClients.filter((client) => !client.isApproved),
+    [filteredClients]
+  );
+  const pendingTotal = useMemo(
+    () => clients.filter((client) => !client.isApproved).length,
+    [clients]
+  );
 
   const loadClients = useCallback(async () => {
     setLoading(true);
@@ -166,6 +186,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
       billing_address: client.billingAddress,
       lexoffice_id: client.lexofficeId,
       contact_persons: client.contactPersons.length > 0 ? client.contactPersons : [],
+      is_approved: client.isApproved,
     });
     setModalOpen(true);
   };
@@ -224,6 +245,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
           billing_address: form.billing_address.trim(),
           lexoffice_id: form.lexoffice_id.trim(),
           contact_persons: validPersons,
+          ...(form.id ? { is_approved: form.is_approved } : {}),
         }),
       });
       const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
@@ -268,6 +290,31 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
       onError(err instanceof Error ? err.message : "Failed to delete client.");
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const handleApproveClient = async (client: CrmClient) => {
+    setApprovingId(client.id);
+    onError(null);
+    try {
+      const result = await approveClient(client.id);
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+      if (result.lexofficeError) {
+        onToast(
+          `${client.companyName} is approved. Lexoffice sync failed and was logged: ${result.lexofficeError}`
+        );
+      } else if (result.lexofficeSynced) {
+        onToast(`${client.companyName} approved and synced to Lexoffice.`);
+      } else {
+        onToast(`${client.companyName} approved.`);
+      }
+      await loadClients();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to approve client.");
+    } finally {
+      setApprovingId(null);
     }
   };
 
@@ -334,6 +381,9 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
             <h2 className="text-lg font-semibold text-white">Client manager</h2>
             <p className="mt-1 text-sm text-zinc-400">
               CRM profiles with lifetime revenue from paid or completed shoots.
+              {pendingTotal > 0
+                ? ` ${pendingTotal} waiting for approval.`
+                : " No clients are waiting for approval."}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -378,12 +428,49 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
           />
         </div>
 
+        {pendingClients.length > 0 ? (
+          <div className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-amber-100">Pending approval</h3>
+              <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-semibold text-amber-200">
+                {pendingClients.length}
+              </span>
+            </div>
+            <ul className="space-y-2">
+              {pendingClients.map((client) => (
+                <li
+                  key={client.id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/20 bg-zinc-950/70 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-zinc-100">{client.companyName}</div>
+                    <div className="truncate text-xs text-zinc-400">
+                      {[client.contactName, client.email].filter(Boolean).join(" · ") || "No contact details"}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleApproveClient(client)}
+                    disabled={approvingId === client.id}
+                    className="inline-flex h-8 items-center rounded-lg bg-amber-500 px-3 text-xs font-semibold text-zinc-950 hover:bg-amber-400 disabled:opacity-50"
+                  >
+                    {approvingId === client.id ? "Approving…" : "Approve"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
         <div className="max-h-[600px] overflow-y-auto overflow-x-auto rounded-xl border border-zinc-800 pr-2">
           <table className="min-w-full divide-y divide-zinc-800 text-sm">
             <thead className="sticky top-0 z-10 bg-zinc-950/95 backdrop-blur-sm">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
                   Company
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Status
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
                   Contact(s)
@@ -405,30 +492,44 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
             <tbody className="divide-y divide-zinc-800">
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-zinc-400">
+                  <td colSpan={7} className="px-4 py-8 text-center text-zinc-400">
                     Loading clients…
                   </td>
                 </tr>
               ) : clients.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-zinc-500">
+                  <td colSpan={7} className="px-4 py-8 text-center text-zinc-500">
                     No clients yet. Add your first client profile.
                   </td>
                 </tr>
               ) : filteredClients.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-zinc-500">
+                  <td colSpan={7} className="px-4 py-8 text-center text-zinc-500">
                     No clients found matching &ldquo;{searchTerm.trim()}&rdquo;.
                   </td>
                 </tr>
               ) : (
                 filteredClients.map((client) => (
-                  <tr key={client.id} className="hover:bg-zinc-950/40">
+                  <tr
+                    key={client.id}
+                    className={client.isApproved ? "hover:bg-zinc-950/40" : "bg-amber-500/5 hover:bg-amber-500/10"}
+                  >
                     <td className="px-4 py-3 font-medium text-zinc-100">
                       <span className="inline-flex items-center">
                         {client.companyName}
                         <ReminderDraftedMarker dates={client.reminderDates} />
                       </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      {client.isApproved ? (
+                        <span className="inline-flex rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-semibold text-emerald-300">
+                          Approved
+                        </span>
+                      ) : (
+                        <span className="inline-flex rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-200">
+                          Pending
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-zinc-300">
                       {client.contactPersons.length > 0 ? (
@@ -457,6 +558,16 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                     <td className="px-4 py-3 font-medium text-zinc-100">{formatEuro(client.lifetimeRevenue)}</td>
                     <td className="px-4 py-3 text-right">
                       <div className="inline-flex items-center gap-2">
+                        {client.isApproved ? null : (
+                          <button
+                            type="button"
+                            onClick={() => void handleApproveClient(client)}
+                            disabled={approvingId === client.id || deletingId === client.id}
+                            className="inline-flex items-center rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {approvingId === client.id ? "Approving…" : "Approve"}
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => openMergeModal(client)}
@@ -561,6 +672,33 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                   className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-500"
                 />
               </label>
+
+              {form.id ? (
+                <div className="flex items-center justify-between gap-4 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3">
+                  <div>
+                    <p className="text-sm font-medium text-zinc-100">Allow Online Booking</p>
+                    <p className="mt-0.5 text-xs text-zinc-500">
+                      Grants or revokes this client&apos;s website booking access.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={form.is_approved}
+                    aria-label="Allow Online Booking"
+                    onClick={() => setForm((prev) => ({ ...prev, is_approved: !prev.is_approved }))}
+                    className={`relative h-6 w-11 shrink-0 rounded-full transition ${
+                      form.is_approved ? "bg-violet-600" : "bg-zinc-700"
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
+                        form.is_approved ? "translate-x-5" : "translate-x-0"
+                      }`}
+                    />
+                  </button>
+                </div>
+              ) : null}
 
               {/* Contact persons */}
               <div>

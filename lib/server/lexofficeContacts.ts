@@ -337,6 +337,21 @@ export async function syncLexofficeContactsToClients(): Promise<LexofficeSyncRes
   const errors: string[] = [];
   let synced = 0;
 
+  const { data: existingLexRows, error: existingLexError } = await supabase
+    .from("clients")
+    .select("lexoffice_id");
+  if (existingLexError) {
+    throw new Error(existingLexError.message);
+  }
+  const existingLexofficeIds = new Set(
+    (existingLexRows ?? [])
+      .map((row) => {
+        const lexofficeId = (row as { lexoffice_id?: string | null }).lexoffice_id;
+        return typeof lexofficeId === "string" ? lexofficeId.trim() : "";
+      })
+      .filter(Boolean)
+  );
+
   for (const contact of contacts) {
     const id = contact.id?.trim();
     if (!id) {
@@ -380,6 +395,8 @@ export async function syncLexofficeContactsToClients(): Promise<LexofficeSyncRes
           zip_code: billingAddr?.zip?.trim() || null,
           city: billingAddr?.city?.trim() || null,
           country: billingAddr?.countryCode?.trim() || null,
+          // New Lexoffice contacts are bookable. Existing rows keep the admin's toggle.
+          ...(existingLexofficeIds.has(id) ? {} : { is_approved: true }),
         },
         { onConflict: "lexoffice_id" }
       )
@@ -389,6 +406,10 @@ export async function syncLexofficeContactsToClients(): Promise<LexofficeSyncRes
     if (error) {
       errors.push(`${companyName} (${id}): ${error.message}`);
       continue;
+    }
+
+    if (!existingLexofficeIds.has(id)) {
+      existingLexofficeIds.add(id);
     }
 
     const companyId = typeof upserted?.id === "string" ? upserted.id : "";

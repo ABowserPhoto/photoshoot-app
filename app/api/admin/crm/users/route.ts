@@ -4,7 +4,12 @@ import {
   normalizeAccessibleModules,
   type AppModule,
 } from "@/lib/appModules";
-import { crmRoleFormValue, formatCrmUserRole, normalizeAssignableRole } from "@/lib/crmUserRoles";
+import {
+  crmRoleFormValue,
+  formatCrmUserRole,
+  isInternalCrmUser,
+  normalizeAssignableRole,
+} from "@/lib/crmUserRoles";
 import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
 
@@ -131,16 +136,23 @@ async function listAllUsers() {
   }
 
   // Fetch jibble + archive + module grants from profiles for all users in one query.
-  const { data: profiles } = await supabaseAdmin
-    .from("profiles")
-    .select("id, jibble_employee_id, is_archived, accessible_modules");
+  const [{ data: profiles }, { data: clientLinks, error: clientLinkError }] = await Promise.all([
+    supabaseAdmin.from("profiles").select("id, role, jibble_employee_id, is_archived, accessible_modules"),
+    supabaseAdmin.from("clients").select("user_id").not("user_id", "is", null),
+  ]);
+
+  if (clientLinkError) {
+    return { error: clientLinkError.message };
+  }
 
   const jibbleMap = new Map<string, string | null>();
   const archivedMap = new Map<string, boolean>();
   const modulesMap = new Map<string, AppModule[]>();
+  const profileRoleMap = new Map<string, string | null>();
   for (const profile of profiles ?? []) {
     const p = profile as {
       id: string;
+      role?: string | null;
       jibble_employee_id?: string | null;
       is_archived?: boolean | null;
       accessible_modules?: unknown;
@@ -148,13 +160,36 @@ async function listAllUsers() {
     jibbleMap.set(p.id, p.jibble_employee_id?.trim() || null);
     archivedMap.set(p.id, p.is_archived === true);
     modulesMap.set(p.id, normalizeAccessibleModules(p.accessible_modules));
+    profileRoleMap.set(p.id, typeof p.role === "string" ? p.role : null);
   }
+
+  const clientUserIds = new Set(
+    (clientLinks ?? [])
+      .map((row) => {
+        const userId = (row as { user_id?: string | null }).user_id;
+        return typeof userId === "string" ? userId : "";
+      })
+      .filter(Boolean)
+  );
 
   return {
     users: authUsers
+      .filter((u) =>
+        isInternalCrmUser({
+          profileRole: profileRoleMap.get(u.id),
+          metadataRole: u.user_metadata?.role,
+          hasClientRecord: clientUserIds.has(u.id),
+        })
+      )
       .map((u) =>
         mapUserRecord(
-          u,
+          {
+            ...u,
+            user_metadata: {
+              ...(u.user_metadata ?? {}),
+              role: profileRoleMap.get(u.id) ?? u.user_metadata?.role,
+            },
+          },
           jibbleMap.get(u.id) ?? null,
           archivedMap.get(u.id) ?? false,
           modulesMap.get(u.id) ?? []

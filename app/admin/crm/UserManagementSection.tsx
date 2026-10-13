@@ -374,7 +374,7 @@ export default function UserManagementSection({ active, onToast, onError }: User
           <div>
             <h2 className="text-lg font-semibold text-white">User management</h2>
             <p className="mt-1 text-sm text-zinc-400">
-              Create accounts, assign roles, link Jibble profiles, and archive former employees without deleting history.
+              Internal staff and admin accounts. Website clients are approved in Client Manager.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">

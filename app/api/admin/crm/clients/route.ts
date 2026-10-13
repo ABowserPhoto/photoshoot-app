@@ -21,6 +21,7 @@ type ClientRow = {
   city?: string | null;
   lexoffice_contact_id?: string | null;
   contact_persons?: ContactPerson[] | null;
+  is_approved?: boolean | null;
 };
 
 export type CrmClientRecord = {
@@ -34,6 +35,7 @@ export type CrmClientRecord = {
   contactPersons: ContactPerson[];
   lifetimeRevenue: number;
   reminderDates: string[];
+  isApproved: boolean;
 };
 
 function serviceSupabase() {
@@ -95,6 +97,7 @@ function mapClientRow(
     contactPersons: safeContactPersons(row.contact_persons),
     lifetimeRevenue: companyKey ? (ltvByCompany.get(companyKey) ?? 0) : 0,
     reminderDates: reminderDatesByCompany.get(row.id) ?? [],
+    isApproved: row.is_approved === true,
   };
 }
 
@@ -146,6 +149,7 @@ type ClientUpsertBody = {
   billing_address?: unknown;
   lexoffice_id?: unknown;
   contact_persons?: unknown;
+  is_approved?: unknown;
 };
 
 export async function POST(request: Request) {
@@ -190,30 +194,44 @@ export async function POST(request: Request) {
   };
 
   const clientId = typeof body.id === "string" ? body.id.trim() : "";
+  const requestedApproval = typeof body.is_approved === "boolean" ? body.is_approved : null;
+  let nextApproved = requestedApproval ?? true;
+  if (requestedApproval === null && clientId) {
+    const { data: existing } = await supabase
+      .from("clients")
+      .select("is_approved")
+      .eq("id", clientId)
+      .maybeSingle();
+    nextApproved = existing?.is_approved === true;
+  }
 
-  // Push to Lexoffice (best-effort — DB write is not blocked by Lexoffice failure)
-  const lexofficePushPromise = pushClientToLexoffice({
-    lexofficeId,
-    companyName,
-    email: payload.email,
-    phone: payload.phone,
-    billingAddress: payload.billing_address,
-    contactPersons,
-  }).then((result) => {
-    if (!result.ok) {
-      console.warn("[crm/clients] Lexoffice push failed:", result.error);
-    } else if (!lexofficeId) {
-      // If a new Lexoffice contact was created, write its ID back to the DB record
-      return result.lexofficeId;
-    }
-    return null;
-  }).catch((err: unknown) => {
-    console.warn("[crm/clients] Lexoffice push error:", err instanceof Error ? err.message : err);
-    return null;
-  });
+  const record = { ...payload, is_approved: nextApproved };
+
+  // Pending clients stay local until booking access is turned on.
+  const lexofficePushPromise = !nextApproved
+    ? Promise.resolve(null)
+    : pushClientToLexoffice({
+        lexofficeId,
+        companyName,
+        email: payload.email,
+        phone: payload.phone,
+        billingAddress: payload.billing_address,
+        contactPersons,
+      }).then((result) => {
+        if (!result.ok) {
+          console.warn("[crm/clients] Lexoffice push failed:", result.error);
+        } else if (!lexofficeId) {
+          // If a new Lexoffice contact was created, write its ID back to the DB record
+          return result.lexofficeId;
+        }
+        return null;
+      }).catch((err: unknown) => {
+        console.warn("[crm/clients] Lexoffice push error:", err instanceof Error ? err.message : err);
+        return null;
+      });
 
   if (clientId) {
-    const { data, error } = await supabase.from("clients").update(payload).eq("id", clientId).select("*").single();
+    const { data, error } = await supabase.from("clients").update(record).eq("id", clientId).select("*").single();
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
@@ -240,7 +258,7 @@ export async function POST(request: Request) {
   if (lexofficeId) {
     const { data: upserted, error: upsertError } = await supabase
       .from("clients")
-      .upsert(payload, { onConflict: "lexoffice_id" })
+      .upsert(record, { onConflict: "lexoffice_id" })
       .select("*")
       .maybeSingle();
 
@@ -272,7 +290,7 @@ export async function POST(request: Request) {
       if (existing) {
         const { data: updated, error: updateError } = await supabase
           .from("clients")
-          .update(payload)
+          .update(record)
           .eq("id", (existing as { id: string }).id)
           .select("*")
           .single();
@@ -293,7 +311,7 @@ export async function POST(request: Request) {
     }
   }
 
-  const { data, error } = await supabase.from("clients").insert(payload).select("*").single();
+  const { data, error } = await supabase.from("clients").insert(record).select("*").single();
   if (error) {
     if (/clients_lexoffice_id_key|duplicate key.*lexoffice_id/i.test(error.message) && lexofficeId) {
       const { data: existing } = await supabase
@@ -304,7 +322,7 @@ export async function POST(request: Request) {
       if (existing) {
         const { data: updated, error: updateError } = await supabase
           .from("clients")
-          .update(payload)
+          .update(record)
           .eq("id", (existing as { id: string }).id)
           .select("*")
           .single();

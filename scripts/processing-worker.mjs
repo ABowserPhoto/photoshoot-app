@@ -978,8 +978,26 @@ async function syncTaskPreviews(supabase, taskRow) {
     return;
   }
 
+  const base = path.join(getShootFoldersRoot(), localFolderName);
+  const rawDir = path.join(base, "1_Raw");
+  if (!fs.existsSync(rawDir)) {
+    return;
+  }
+
+  const chunks = await buildTimestampBracketsFromDir(rawDir, {
+    taskBracketSize: taskRow.bracket_size ?? null,
+  });
+
+  // Kanban cover is independent of the client preview gallery opt-out.
+  await ensureCoverImageOnce(supabase, taskRow, rawDir, chunks).catch((err) => {
+    console.warn(
+      `[worker] Cover image skipped for task ${taskRow.id}:`,
+      err instanceof Error ? err.message : err
+    );
+  });
+
   // Opt-out: booking asked not to generate client gallery previews.
-  // Return early (no watermark/upload loop) so folder watchers never get stuck.
+  // Cover is already set; return before the watermark/upload loop so folder watchers never get stuck.
   if (taskRow.generate_gallery === false) {
     console.info(
       `[worker] Skipping gallery preview generation for folder [${localFolderName}] (task ${taskRow.id}): generate_gallery=false.`
@@ -990,15 +1008,6 @@ async function syncTaskPreviews(supabase, taskRow) {
   const photoshootType =
     typeof taskRow.photoshoot_type === "string" ? taskRow.photoshoot_type.trim() : "";
 
-  const base = path.join(getShootFoldersRoot(), localFolderName);
-  const rawDir = path.join(base, "1_Raw");
-  if (!fs.existsSync(rawDir)) {
-    return;
-  }
-
-  const chunks = await buildTimestampBracketsFromDir(rawDir, {
-    taskBracketSize: taskRow.bracket_size ?? null,
-  });
   const previewPreference = normalizePreviewPreference(taskRow.preview_preference);
   const forceGalleryPreviewDbSync = galleryPreviewsNeedsDbSync(taskRow.gallery_previews);
   const { selectedChunkIndices } = parseSelectionPayload(taskRow.gallery_selection);
@@ -1009,13 +1018,6 @@ async function syncTaskPreviews(supabase, taskRow) {
   let selectedSkippedCount = 0;
   let failedCount = 0;
   let reusedFromStorageCount = 0;
-
-  await ensureCoverImageOnce(supabase, taskRow, rawDir, chunks).catch((err) => {
-    console.warn(
-      `[worker] Cover image skipped for task ${taskRow.id}:`,
-      err instanceof Error ? err.message : err
-    );
-  });
 
   const existingPreviewItems = parsePreviewItems(taskRow.gallery_previews);
 
