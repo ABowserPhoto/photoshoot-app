@@ -29,6 +29,7 @@ type AmountType = "Net" | "Gross";
 type PhotoshootType =
   | "Immobilien"
   | "Business Portraits"
+  | "Business"
   | "Food"
   | "Product"
   | "Portrait Pro"
@@ -2255,6 +2256,7 @@ function HomeContent() {
                       >
                         <option value="Immobilien">Immobilien</option>
                         <option value="Business Portraits">Business Portraits</option>
+                        <option value="Business">Business</option>
                         <option value="Food">Food</option>
                         <option value="Product">Product</option>
                         <option value="Portrait Pro">Portrait Pro</option>

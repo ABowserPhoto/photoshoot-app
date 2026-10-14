@@ -65,6 +65,7 @@ export type BoardTask = {
   photoshootType:
     | "Immobilien"
     | "Business Portraits"
+    | "Business"
     | "Food"
     | "Product"
     | "Portrait Pro"
@@ -620,7 +621,9 @@ function mapDbTaskToBoardTask(row: Partial<DbTask>, existing?: BoardTask): Board
     photoshootType:
       row.photoshoot_type === "Business Portraits"
         ? "Business Portraits"
-        : row.photoshoot_type === "Real Estate" || row.photoshoot_type === "Immobilien"
+        : row.photoshoot_type === "Business"
+          ? "Business"
+          : row.photoshoot_type === "Real Estate" || row.photoshoot_type === "Immobilien"
           ? "Immobilien"
           : row.photoshoot_type === "Food"
             ? "Food"
