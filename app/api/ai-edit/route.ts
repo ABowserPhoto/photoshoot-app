@@ -38,9 +38,52 @@ function normalizeErrorMessage(value: unknown, fallback: string): string {
 }
 
 function loadWorkflowTemplate(): Record<string, WorkflowNode> {
-  const workflowPath = path.join(process.cwd(), "lib", "comfy", "workflow_api.json");
+  const workflowPath = path.join(process.cwd(), "lib", "comfy", "stratocumuclouds_workflow.json");
   const raw = fs.readFileSync(workflowPath, "utf8");
   return JSON.parse(raw) as Record<string, WorkflowNode>;
+}
+
+/**
+ * Stratocumulus sky-replacement API graph:
+ * - "1" LoadImage ← source photo (ComfyUI input filename)
+ * - "4" GroundingDinoSAMSegment ← sky mask prompt (default "sky")
+ * - "7" CLIPTextEncode ← positive sky/cloud prompt
+ * - "8" CLIPTextEncode ← negative prompt
+ * - "9" KSampler ← random seed
+ * - "11" SaveImage ← output filename_prefix
+ */
+function patchSkyReplacementWorkflow(
+  workflow: Record<string, WorkflowNode>,
+  options: {
+    comfyImageName: string;
+    outputPrefix: string;
+    prompt?: string;
+    skyMaskPrompt?: string;
+  }
+): void {
+  const loadImage = workflow["1"];
+  const skySegment = workflow["4"];
+  const positivePrompt = workflow["7"];
+  const sampler = workflow["9"];
+  const saveImage = workflow["11"];
+
+  if (!loadImage?.inputs || !skySegment?.inputs || !positivePrompt?.inputs || !sampler?.inputs || !saveImage?.inputs) {
+    throw new Error(
+      "Sky replacement workflow is missing required nodes (1 LoadImage, 4 segment, 7 prompt, 9 sampler, or 11 SaveImage)."
+    );
+  }
+
+  loadImage.inputs.image = options.comfyImageName;
+  sampler.inputs.seed = Math.floor(Math.random() * 1_000_000_000_000_000);
+  saveImage.inputs.filename_prefix = options.outputPrefix;
+
+  const skyMaskPrompt = options.skyMaskPrompt?.trim() || "sky";
+  skySegment.inputs.prompt = skyMaskPrompt;
+
+  const prompt = options.prompt?.trim();
+  if (prompt) {
+    positivePrompt.inputs.text = prompt;
+  }
 }
 
 function normalizeFilenameInput(value: string): string {
@@ -162,6 +205,9 @@ export async function POST(request: Request) {
       local_folder_name?: string;
       task_id?: string;
       filename?: string;
+      comfyImageName?: string;
+      prompt?: string;
+      skyMaskPrompt?: string;
     };
 
     const localFolderName =
@@ -169,57 +215,80 @@ export async function POST(request: Request) {
     const taskId = typeof body.task_id === "string" ? body.task_id.trim() : "";
     const filenameRaw = typeof body.filename === "string" ? body.filename.trim() : "";
     const filename = normalizeFilenameInput(filenameRaw);
+    const providedComfyImageName =
+      typeof body.comfyImageName === "string" ? body.comfyImageName.trim() : "";
+    const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+    const skyMaskPrompt = typeof body.skyMaskPrompt === "string" ? body.skyMaskPrompt.trim() : "";
 
-    if ((!localFolderName && !taskId) || !filename) {
+    if (providedComfyImageName && (/[\\/]/.test(providedComfyImageName) || /^[a-zA-Z]:/.test(providedComfyImageName))) {
       return NextResponse.json(
-        { error: "filename and either local_folder_name or task_id are required." },
+        { error: "comfyImageName must be a ComfyUI input filename, not a disk path." },
         { status: 400 }
       );
     }
 
-    const { sourceInput, resolvedLocalFolderName, sourceType, sourceRef } = await resolveMergedSource(
-      localFolderName,
-      filename,
-      taskId
-    );
-    console.info(
-      `[ai-edit] source_lookup task_id=${taskId || "(none)"} filename=${filename} source=${sourceType} ref=${sourceRef}`
-    );
-
-    const comfyInputDir = process.env.COMFYUI_INPUT_DIR?.trim();
-
-    if (!comfyInputDir) {
+    if ((!localFolderName && !taskId && !providedComfyImageName) || (!filename && !providedComfyImageName)) {
       return NextResponse.json(
-        {
-          error:
-            "COMFYUI_INPUT_DIR is not configured. Set it to your ComfyUI installation's input folder so merged images can be copied for LoadImage.",
-          comfyQueued: false,
-        },
-        { status: 503 }
+        { error: "filename and either local_folder_name or task_id are required (or provide comfyImageName)." },
+        { status: 400 }
       );
     }
 
-    const inputRoot = path.resolve(comfyInputDir);
-    fs.mkdirSync(inputRoot, { recursive: true });
-    const safeFilename = path.basename(filename);
-    const resizedFilename = `resized_${safeFilename}`.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const resizedPath = path.join(inputRoot, resizedFilename);
-    await sharp(sourceInput)
-      .resize({ width: 2048, height: 2048, fit: "inside" })
-      .toFile(resizedPath);
+    let comfyImageName = providedComfyImageName;
+    let resolvedLocalFolderName = localFolderName;
+    let effectiveFilename = filename;
 
-    const outputBaseName = path.basename(safeFilename, path.extname(safeFilename));
-    const effectiveFolderForOutput = resolvedLocalFolderName || localFolderName || taskId;
+    if (!comfyImageName) {
+      const { sourceInput, resolvedLocalFolderName: resolvedFolder, sourceType, sourceRef } =
+        await resolveMergedSource(localFolderName, filename, taskId);
+      resolvedLocalFolderName = resolvedFolder;
+      console.info(
+        `[ai-edit] source_lookup task_id=${taskId || "(none)"} filename=${filename} source=${sourceType} ref=${sourceRef}`
+      );
+
+      const comfyInputDir = process.env.COMFYUI_INPUT_DIR?.trim();
+      if (!comfyInputDir) {
+        return NextResponse.json(
+          {
+            error:
+              "COMFYUI_INPUT_DIR is not configured. Set it to your ComfyUI installation's input folder so merged images can be copied for LoadImage.",
+            comfyQueued: false,
+          },
+          { status: 503 }
+        );
+      }
+
+      const inputRoot = path.resolve(comfyInputDir);
+      fs.mkdirSync(inputRoot, { recursive: true });
+      const safeFilename = path.basename(filename);
+      effectiveFilename = safeFilename;
+      const resizedFilename = `resized_${safeFilename}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const resizedPath = path.join(inputRoot, resizedFilename);
+      await sharp(sourceInput)
+        .resize({ width: 2048, height: 2048, fit: "inside" })
+        .toFile(resizedPath);
+      comfyImageName = resizedFilename;
+    }
+
+    const outputBaseName = path.basename(
+      effectiveFilename || comfyImageName,
+      path.extname(effectiveFilename || comfyImageName)
+    );
+    const effectiveFolderForOutput = resolvedLocalFolderName || localFolderName || taskId || "AIStudio";
     const outputPrefix = path.join(PHOTOS_ROOT, effectiveFolderForOutput, "4_Final", `AI_${outputBaseName}`);
 
     const workflow = loadWorkflowTemplate();
-    if (!workflow["1"]?.inputs || !workflow["9"]?.inputs || !workflow["11"]?.inputs) {
-      return NextResponse.json({ error: "Workflow template is missing required nodes." }, { status: 500 });
+    try {
+      patchSkyReplacementWorkflow(workflow, {
+        comfyImageName,
+        outputPrefix,
+        prompt,
+        skyMaskPrompt,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Workflow template is invalid.";
+      return NextResponse.json({ error: message }, { status: 500 });
     }
-
-    workflow["9"].inputs.seed = Math.floor(Math.random() * 1000000000000000);
-    workflow["1"].inputs.image = resizedFilename;
-    workflow["11"].inputs.filename_prefix = outputPrefix;
 
     const clientId = randomUUID();
     const promptUrl = "http://127.0.0.1:8188/prompt";
@@ -229,7 +298,7 @@ export async function POST(request: Request) {
 
     try {
       console.info(
-        `[ai-edit] Triggering ComfyUI prompt for ${effectiveFolderForOutput || "(unknown-folder)"}/${filename} at ${promptUrl}`
+        `[ai-edit] Triggering ComfyUI sky replacement for ${effectiveFolderForOutput || "(unknown-folder)"}/${effectiveFilename || comfyImageName} image=${comfyImageName} at ${promptUrl}`
       );
       const promptPayload = {
         prompt: workflow,
@@ -277,7 +346,7 @@ export async function POST(request: Request) {
       comfyQueued = true;
       promptId = comfyPayload?.prompt_id;
       console.info(
-        `[ai-edit] ComfyUI prompt accepted for ${effectiveFolderForOutput || "(unknown-folder)"}/${filename}${promptId ? ` (prompt ${promptId})` : ""}.`
+        `[ai-edit] ComfyUI sky replacement accepted for ${effectiveFolderForOutput || "(unknown-folder)"}/${effectiveFilename || comfyImageName}${promptId ? ` (prompt ${promptId})` : ""}.`
       );
     } catch (err) {
       console.error("ComfyUI fetch error:", err);
@@ -300,7 +369,8 @@ export async function POST(request: Request) {
       promptId,
       local_folder_name: localFolderName,
       task_id: taskId,
-      filename,
+      filename: effectiveFilename || filename,
+      comfyImageName,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "AI edit failed.";

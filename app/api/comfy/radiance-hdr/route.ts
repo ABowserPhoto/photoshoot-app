@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
+import { readComfyUploadFilename } from "@/lib/comfy/comfyImageName";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import { resolveSourceImagePath } from "@/lib/comfy/resolveSourceImagePath";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
@@ -115,12 +116,15 @@ export async function POST(request: Request) {
     const taskIdEntry = formData.get("taskId") ?? formData.get("task_id");
     const taskId = typeof taskIdEntry === "string" ? taskIdEntry.trim() : "";
 
-    const localSourcePath = resolveLocalSourcePath(sourceImagePath, filename, taskId);
-    const sourceExt = path.extname(localSourcePath).toLowerCase() || ".jpg";
-    const comfyInputFilename = `temp_radiance_${Date.now()}_${randomUUID().slice(0, 8)}${sourceExt}`;
-
-    fs.mkdirSync(path.resolve(COMFY_INPUT_DIR), { recursive: true });
-    fs.copyFileSync(localSourcePath, path.join(path.resolve(COMFY_INPUT_DIR), comfyInputFilename));
+    const uploadedImageName = readComfyUploadFilename(formData.get("comfyImageName"));
+    let comfyInputFilename = uploadedImageName;
+    if (!comfyInputFilename) {
+      const localSourcePath = resolveLocalSourcePath(sourceImagePath, filename, taskId);
+      const sourceExt = path.extname(localSourcePath).toLowerCase() || ".jpg";
+      comfyInputFilename = `temp_radiance_${Date.now()}_${randomUUID().slice(0, 8)}${sourceExt}`;
+      fs.mkdirSync(path.resolve(COMFY_INPUT_DIR), { recursive: true });
+      fs.copyFileSync(localSourcePath, path.join(path.resolve(COMFY_INPUT_DIR), comfyInputFilename));
+    }
 
     const workflow = loadRadianceWorkflowTemplate();
 

@@ -64,21 +64,82 @@ const DEFAULT_BATCH_SIZE = 1;
 const DRAW_MASK_BRUSH_COLOR = "rgba(255, 0, 0, 0.5)";
 const DRAW_MASK_BRUSH_SIZE = 40;
 
-function extractSourceImagePathFromUrl(photoUrl: string): string {
-  const trimmed = photoUrl.trim();
-  if (!trimmed) {
-    return "";
+function isRenderableImageSource(value: string | null | undefined): value is string {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length > 0 && trimmed !== "null" && trimmed !== "undefined";
+}
+
+async function uploadBlobToComfy(blob: Blob, filename: string): Promise<string> {
+  if (!blob.size) {
+    throw new Error("The image file is empty.");
   }
-  try {
-    const url = new URL(trimmed, typeof window !== "undefined" ? window.location.origin : "http://localhost");
-    const pathParam = url.searchParams.get("path") ?? url.searchParams.get("imagePath");
-    if (pathParam) {
-      return decodeURIComponent(pathParam);
+
+  // Always include an explicit filename + extension. Do not set Content-Type on this
+  // fetch — the browser/Electron runtime must generate the multipart boundary.
+  const fallbackName = filename.toLowerCase().includes("mask") ? "upload_mask.png" : "upload_image.png";
+  const uploadName = (() => {
+    const trimmed = filename.trim();
+    const base = trimmed.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) ?? "";
+    if (base && /\.[a-z0-9]+$/i.test(base) && !base.includes("..")) {
+      return base.replace(/[^a-zA-Z0-9._-]/g, "_");
     }
-  } catch {
-    // Ignore malformed URLs and fall back to server-side filename lookup.
+    return fallbackName;
+  })();
+
+  const formData = new FormData();
+  formData.append("image", blob, uploadName);
+
+  let uploadResponse: Response;
+  try {
+    uploadResponse = await fetch("/api/comfy/upload-image", {
+      method: "POST",
+      body: formData,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "request failed";
+    throw new Error(`Could not reach the ComfyUI upload proxy. ${detail}`);
   }
-  return "";
+
+  const bodyText = await uploadResponse.text();
+  let payload: { name?: string; error?: string } | null = null;
+  try {
+    payload = JSON.parse(bodyText) as { name?: string; error?: string };
+  } catch {
+    payload = null;
+  }
+
+  if (!uploadResponse.ok) {
+    throw new Error(payload?.error || `ComfyUI image upload failed (${uploadResponse.status}).`);
+  }
+
+  const uploadedName = payload?.name?.trim() ?? "";
+  if (!uploadedName || /[\\/]/.test(uploadedName) || /^[a-zA-Z]:/.test(uploadedName)) {
+    throw new Error("ComfyUI image upload did not return a filename.");
+  }
+  return uploadedName;
+}
+
+async function uploadSourceImageToComfy(imageUrl: string, filename: string): Promise<string> {
+  let imageResponse: Response;
+  try {
+    imageResponse = await fetch(imageUrl);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "request failed";
+    throw new Error(`Could not fetch the original image. ${detail}`);
+  }
+  if (!imageResponse.ok) {
+    throw new Error(`Could not fetch the original image (${imageResponse.status}).`);
+  }
+
+  let blob: Blob;
+  try {
+    blob = await imageResponse.blob();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "request failed";
+    throw new Error(`Could not read the original image. ${detail}`);
+  }
+
+  return uploadBlobToComfy(blob, filename);
 }
 
 function exportDrawMaskBase64(
@@ -121,6 +182,26 @@ function exportDrawMaskBase64(
 
   exportCtx.putImageData(exportData, 0, 0);
   return exportCanvas.toDataURL("image/png");
+}
+
+async function exportDrawMaskBlob(
+  drawCanvas: HTMLCanvasElement,
+  naturalWidth: number,
+  naturalHeight: number
+): Promise<Blob> {
+  const dataUrl = exportDrawMaskBase64(drawCanvas, naturalWidth, naturalHeight);
+  if (!dataUrl) {
+    throw new Error("Mask export failed. Draw a mask over the object you want to remove.");
+  }
+  const response = await fetch(dataUrl);
+  if (!response.ok) {
+    throw new Error("Mask export failed. Draw a mask over the object you want to remove.");
+  }
+  const blob = await response.blob();
+  if (!blob.size) {
+    throw new Error("Mask export failed. Draw a mask over the object you want to remove.");
+  }
+  return blob;
 }
 
 const TOOL_PRESETS: Record<ToolKey, string[]> = {
@@ -169,7 +250,7 @@ const TOOL_PRESETS: Record<ToolKey, string[]> = {
 function AiStudioPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const photoUrl = searchParams.get("photoUrl") ?? "";
+  const photoUrl = (searchParams.get("photoUrl") ?? searchParams.get("imageUrl") ?? "").trim();
   const taskId =
     searchParams.get("taskId") ??
     searchParams.get("taskID") ??
@@ -180,22 +261,21 @@ function AiStudioPageContent() {
     "";
   const taskIdForRequest = taskId.trim();
   const filename = searchParams.get("filename") ?? "";
-  const absoluteLocalPathFromQuery =
-    searchParams.get("absoluteLocalPath") ?? searchParams.get("absolute_local_path") ?? "";
-  const isStandaloneMode = !photoUrl.trim();
+  const isStandaloneMode = !photoUrl;
 
   const [uploadedPhotoUrl, setUploadedPhotoUrl] = useState("");
   const [uploadedFilename, setUploadedFilename] = useState("");
   const [savedPhotoUrl, setSavedPhotoUrl] = useState<string | null>(null);
   const [currentFilename, setCurrentFilename] = useState(filename);
-  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  const [originalImage, setOriginalImage] = useState<string | null>(photoUrl || null);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [previewMediaType, setPreviewMediaType] = useState<"image" | "video">("image");
   const [genWidth, setGenWidth] = useState(DEFAULT_TEXT2IMAGE_WIDTH);
   const [genHeight, setGenHeight] = useState(DEFAULT_TEXT2IMAGE_HEIGHT);
   const [genLength, setGenLength] = useState(DEFAULT_VIDEO_LENGTH);
   const [genBatchSize, setGenBatchSize] = useState(DEFAULT_BATCH_SIZE);
   const [referenceImages, setReferenceImages] = useState<File[]>([]);
-  const [showOriginalImage, setShowOriginalImage] = useState(false);
+  const [isComparing, setIsComparing] = useState(false);
   const [activeTool, setActiveTool] = useState<ToolKey>(isStandaloneMode ? "text-to-photo" : "material-replacement");
   const [isGenerating, setIsGenerating] = useState(false);
   const [isRemovingObject, setIsRemovingObject] = useState(false);
@@ -252,16 +332,29 @@ function AiStudioPageContent() {
   }, [comfyUiPath]);
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(AI_STUDIO_LAST_IMAGE_KEY);
-      if (saved) {
-        setPreviewImageUrl(saved);
-        setShowOriginalImage(false);
+    const nextOriginal = savedPhotoUrl || uploadedPhotoUrl || photoUrl || null;
+    setOriginalImage(nextOriginal);
+  }, [photoUrl, savedPhotoUrl, uploadedPhotoUrl]);
+
+  useEffect(() => {
+    setUploadedPhotoUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
       }
+      return "";
+    });
+    setUploadedFilename("");
+    setSavedPhotoUrl(null);
+    setOriginalImage(photoUrl || null);
+    setPreviewImage(null);
+    setPreviewMediaType("image");
+    setIsComparing(false);
+    try {
+      localStorage.removeItem(AI_STUDIO_LAST_IMAGE_KEY);
     } catch {
       // localStorage may be unavailable in some contexts
     }
-  }, []);
+  }, [photoUrl]);
 
   useEffect(() => {
     void getAllMoodboards().then((res) => {
@@ -275,17 +368,6 @@ function AiStudioPageContent() {
       }
     });
   }, []);
-
-  useEffect(() => {
-    if (!previewImageUrl) {
-      return;
-    }
-    try {
-      localStorage.setItem(AI_STUDIO_LAST_IMAGE_KEY, previewImageUrl);
-    } catch {
-      // localStorage may be unavailable in some contexts
-    }
-  }, [previewImageUrl]);
 
   useEffect(() => {
     return () => {
@@ -305,8 +387,11 @@ function AiStudioPageContent() {
 
   const effectivePhotoUrl = savedPhotoUrl || uploadedPhotoUrl || photoUrl;
   const effectiveFilename = currentFilename || uploadedFilename || filename;
-  const displayedImageUrl = previewImageUrl && !showOriginalImage ? previewImageUrl : effectivePhotoUrl;
-  const showingPreview = Boolean(previewImageUrl && !showOriginalImage);
+  const sourceImage = (isRenderableImageSource(originalImage) ? originalImage.trim() : "") || effectivePhotoUrl.trim();
+  const hasPreview = isRenderableImageSource(previewImage);
+  const canvasImageSrc = (!isComparing && hasPreview ? previewImage.trim() : "") || sourceImage;
+  const showingPreview = hasPreview;
+  const showPreviewVideo = hasPreview && !isComparing && previewMediaType === "video";
   const activeToolLabel = useMemo(
     () => AI_TOOLS.find((tool) => tool.key === activeTool)?.label ?? "AI Tool",
     [activeTool]
@@ -334,12 +419,8 @@ function AiStudioPageContent() {
       ? "Generating Photo..."
       : isTextToVideoTool || isImageToVideoTool
         ? "Generating Video..."
-        : "Generating..."
-    : isMediaGenerationTool
-      ? "Generate"
-      : isRadianceHdrTool
-        ? "Process Image"
-      : "Generate Preview";
+        : "Generating Preview..."
+    : "Generate Preview";
   const referenceImagePreviews = useMemo(
     () =>
       referenceImages.map((file) => ({
@@ -523,45 +604,58 @@ function AiStudioPageContent() {
   }, []);
 
   const handleRemoveObject = useCallback(async () => {
-    const canvas = drawMaskCanvasRef.current;
-    if (!canvas) {
-      return;
-    }
-    const maskBase64 = exportDrawMaskBase64(
-      canvas,
-      sourceImageNaturalSize.width,
-      sourceImageNaturalSize.height
-    );
-    if (!maskBase64) {
-      setGenerationError("Mask export failed. Draw a mask over the object you want to remove.");
+    if (!isRenderableImageSource(originalImage)) {
+      setGenerationError("Load an original image before removing an object.");
       setGenerationMessage(null);
       return;
     }
 
-    const filenameForRequest = effectiveFilename.trim();
-    const sourceImagePath =
-      absoluteLocalPathFromQuery.trim() ||
-      extractSourceImagePathFromUrl(effectivePhotoUrl) ||
-      extractSourceImagePathFromUrl(photoUrl);
-    if (!sourceImagePath && !filenameForRequest) {
-      setGenerationError("Cannot resolve the source image. Open AI Studio from a merged photo or upload a named image.");
+    const promptText = promptByTool["object-removal"].trim();
+    let maskBlob: Blob | null = null;
+    if (hasDrawnMask) {
+      const canvas = drawMaskCanvasRef.current;
+      if (!canvas) {
+        setGenerationError("Draw a mask over the object you want to remove.");
+        setGenerationMessage(null);
+        return;
+      }
+      try {
+        maskBlob = await exportDrawMaskBlob(
+          canvas,
+          sourceImageNaturalSize.width,
+          sourceImageNaturalSize.height
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Mask export failed.";
+        setGenerationError(message);
+        setGenerationMessage(null);
+        return;
+      }
+    } else if (!promptText) {
+      setGenerationError("Draw a mask or enter a prompt describing what to remove.");
       setGenerationMessage(null);
       return;
     }
 
     setIsRemovingObject(true);
+    setIsGenerating(true);
     setGenerationError(null);
-    setGenerationMessage("Removing Object... Please wait");
-    setShowOriginalImage(false);
+    setGenerationMessage(maskBlob ? "Removing the masked object..." : "Removing objects from the prompt...");
+    setPreviewImage(null);
+    setPreviewMediaType("image");
+    setIsComparing(false);
 
     try {
+      const comfyImageName = await uploadSourceImageToComfy(originalImage, "upload_image.png");
+      const comfyMaskName = maskBlob ? await uploadBlobToComfy(maskBlob, "upload_mask.png") : "";
       const response = await fetch("/api/ai-inpaint", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sourceImagePath,
-          maskBase64,
-          filename: filenameForRequest,
+          comfyImageName,
+          comfyMaskName,
+          prompt: promptText,
+          filename: effectiveFilename.trim(),
           taskId: taskIdForRequest,
         }),
       });
@@ -579,23 +673,26 @@ function AiStudioPageContent() {
         throw new Error("Object removal completed but no image URL was returned.");
       }
 
-      setPreviewImageUrl(imageUrl);
+      setPreviewImage(imageUrl);
       setPreviewMediaType("image");
       setGenerationMessage("Object removed successfully.");
-      handleClearDrawMask();
+      if (maskBlob) {
+        handleClearDrawMask();
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Object removal failed.";
       setGenerationError(message);
       setGenerationMessage(null);
     } finally {
       setIsRemovingObject(false);
+      setIsGenerating(false);
     }
   }, [
-    absoluteLocalPathFromQuery,
     effectiveFilename,
-    effectivePhotoUrl,
     handleClearDrawMask,
-    photoUrl,
+    hasDrawnMask,
+    originalImage,
+    promptByTool,
     sourceImageNaturalSize.height,
     sourceImageNaturalSize.width,
     taskIdForRequest,
@@ -627,9 +724,9 @@ function AiStudioPageContent() {
     setUploadedFilename(file.name);
     setCurrentFilename(file.name);
     setSavedPhotoUrl(null);
-    setPreviewImageUrl(null);
+    setPreviewImage(null);
     setPreviewMediaType("image");
-    setShowOriginalImage(false);
+    setIsComparing(false);
     setGenerationMessage(null);
     setGenerationError(null);
   };
@@ -659,6 +756,11 @@ function AiStudioPageContent() {
   };
 
   const handleGeneratePreview = async () => {
+    if (activeTool === "object-removal") {
+      await handleRemoveObject();
+      return;
+    }
+
     if (
       activeTool !== "material-replacement" &&
       activeTool !== "relight" &&
@@ -682,16 +784,7 @@ function AiStudioPageContent() {
       }
 
       const filenameForRequest = effectiveFilename.trim();
-      const sourceImagePath =
-        absoluteLocalPathFromQuery.trim() ||
-        extractSourceImagePathFromUrl(effectivePhotoUrl) ||
-        extractSourceImagePathFromUrl(photoUrl);
-      if (isImageToVideoTool && !sourceImagePath && !filenameForRequest) {
-        setGenerationError("Please load or upload a source image before generating video.");
-        setGenerationMessage(null);
-        return;
-      }
-      if (isImageToVideoTool && !effectivePhotoUrl) {
+      if (isImageToVideoTool && !isRenderableImageSource(originalImage)) {
         setGenerationError("Image to Video requires a loaded source image in the viewer.");
         setGenerationMessage(null);
         return;
@@ -704,9 +797,9 @@ function AiStudioPageContent() {
           ? "Generating photo... Please wait."
           : "Generating video... This may take several minutes."
       );
-      setPreviewImageUrl(null);
+      setPreviewImage(null);
       setPreviewMediaType("image");
-      setShowOriginalImage(false);
+      setIsComparing(false);
       clearStatusPolling();
 
       try {
@@ -715,6 +808,10 @@ function AiStudioPageContent() {
           : isTextToVideoTool
             ? "text2video"
             : "image2video";
+        const sourceUrl = isRenderableImageSource(originalImage) ? originalImage : "";
+        const comfyImageName = isImageToVideoTool
+          ? await uploadSourceImageToComfy(sourceUrl, "upload_image.png")
+          : "";
         const response = await fetch("/api/ai-generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -725,7 +822,7 @@ function AiStudioPageContent() {
             height: genHeight,
             length: genLength,
             batchSize: genBatchSize,
-            sourceImagePath,
+            comfyImageName,
             filename: filenameForRequest,
             taskId: taskIdForRequest,
           }),
@@ -746,13 +843,14 @@ function AiStudioPageContent() {
         }
 
         const mediaUrl = `${payload.mediaUrl}${payload.mediaUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-        setPreviewImageUrl(mediaUrl);
+        setPreviewImage(mediaUrl);
         setPreviewMediaType(payload.type === "video" ? "video" : "image");
         setGenerationMessage(
           payload.type === "video" ? "Video generated successfully." : "Photo generated successfully."
         );
-      } catch {
-        setGenerationError(`Network error while generating ${activeToolLabel}.`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : `Failed to generate ${activeToolLabel}.`;
+        setGenerationError(message);
         setGenerationMessage(null);
       } finally {
         setIsGenerating(false);
@@ -760,10 +858,8 @@ function AiStudioPageContent() {
       return;
     }
 
-    const requiresSourceImage = true;
     const filenameForRequest = effectiveFilename.trim();
-    const sourceImagePathForRequest = absoluteLocalPathFromQuery.trim();
-    if (requiresSourceImage && !filenameForRequest && !sourceImagePathForRequest) {
+    if (!isRenderableImageSource(originalImage)) {
       setGenerationError(`Please select or upload an image before generating a ${activeToolLabel} preview.`);
       setGenerationMessage(null);
       return;
@@ -777,12 +873,14 @@ function AiStudioPageContent() {
     setIsGenerating(true);
     setGenerationError(null);
     setGenerationMessage(null);
-    setPreviewImageUrl(null);
+    setPreviewImage(null);
     setPreviewMediaType("image");
-    setShowOriginalImage(false);
+    setIsComparing(false);
     clearStatusPolling();
     try {
+      const comfyImageName = await uploadSourceImageToComfy(originalImage, "upload_image.png");
       const formPayload = new FormData();
+      formPayload.append("comfyImageName", comfyImageName);
       formPayload.append("filename", filenameForRequest);
       if (isObjectSwapTool) {
         const maskBlob = await maskingCanvasRef.current?.exportMaskBlob();
@@ -795,7 +893,6 @@ function AiStudioPageContent() {
       }
       formPayload.append("prompt", promptByTool[activeTool].trim());
       if (isRadianceHdrTool) {
-        formPayload.append("sourceImagePath", sourceImagePathForRequest);
         formPayload.append("shadow_amount", String(radianceHdrSettings.shadow_amount));
         formPayload.append("highlight_amount", String(radianceHdrSettings.highlight_amount));
         formPayload.append("shadow_tone", String(radianceHdrSettings.shadow_tone));
@@ -867,11 +964,11 @@ function AiStudioPageContent() {
           if (statusPayload?.status === "completed" && statusPayload.previewUrl) {
             clearStatusPolling();
             setIsGenerating(false);
-            setPreviewImageUrl(
+            setPreviewImage(
               `${statusPayload.previewUrl}${statusPayload.previewUrl.includes("?") ? "&" : "?"}t=${Date.now()}`
             );
             setPreviewMediaType("image");
-            setShowOriginalImage(false);
+            setIsComparing(false);
             setGenerationMessage("Preview generated successfully.");
           }
         } catch {
@@ -893,8 +990,10 @@ function AiStudioPageContent() {
       }, 180000);
 
       void pollStatus();
-    } catch {
-      setGenerationError(`Network error while triggering ${activeToolLabel} preview.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Failed to generate the ${activeToolLabel} preview.`;
+      setGenerationError(message);
+      setGenerationMessage(null);
       setIsGenerating(false);
     }
   };
@@ -908,9 +1007,9 @@ function AiStudioPageContent() {
     setUploadedFilename("");
     setSavedPhotoUrl(null);
     setCurrentFilename("");
-    setPreviewImageUrl(null);
+    setPreviewImage(null);
     setPreviewMediaType("image");
-    setShowOriginalImage(false);
+    setIsComparing(false);
     try {
       localStorage.removeItem(AI_STUDIO_LAST_IMAGE_KEY);
     } catch {
@@ -926,8 +1025,8 @@ function AiStudioPageContent() {
     router.push("/ai-studio");
   };
 
-  const handleConfirmSaveFinalEdit = async () => {
-    if (!previewImageUrl) {
+  const handleSaveFinal = async () => {
+    if (!previewImage) {
       return;
     }
     setIsSaving(true);
@@ -939,7 +1038,7 @@ function AiStudioPageContent() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           originalFilename: currentFilename || null,
-          previewUrl: previewImageUrl,
+          previewUrl: previewImage,
           taskId: taskIdForRequest,
           task_id: taskIdForRequest,
         }),
@@ -960,8 +1059,8 @@ function AiStudioPageContent() {
       const nextPhotoUrl = `${payload.newPhotoUrl}${payload.newPhotoUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
       setSavedPhotoUrl(nextPhotoUrl);
       setCurrentFilename(payload.newFilename);
-      setPreviewImageUrl(null);
-      setShowOriginalImage(false);
+      setPreviewImage(null);
+      setIsComparing(false);
       setGenerationMessage(`Edit saved successfully as ${payload.newFilename}`);
     } catch {
       setGenerationError("Network error while saving final edit.");
@@ -976,10 +1075,10 @@ function AiStudioPageContent() {
     } catch {
       // ignore
     }
-    setPreviewImageUrl(null);
+    setPreviewImage(null);
     setPreviewMediaType("image");
     setSendToBoardSuccess(false);
-    setShowOriginalImage(false);
+    setIsComparing(false);
   };
 
   const handleLaunchComfyUi = async () => {
@@ -1013,13 +1112,13 @@ function AiStudioPageContent() {
   };
 
   const handleSendToMoodboard = async () => {
-    if (!previewImageUrl || !selectedBoardId) {
+    if (!previewImage || !selectedBoardId) {
       return;
     }
     setIsSendingToBoard(true);
     setSendToBoardSuccess(false);
     try {
-      const res = await sendImageToMoodboard(selectedBoardId, previewImageUrl);
+      const res = await sendImageToMoodboard(selectedBoardId, previewImage);
       if (!res.success) {
         setGenerationError(res.error || "Failed to send image to moodboard.");
         return;
@@ -1070,7 +1169,7 @@ function AiStudioPageContent() {
             </div>
             <div
               ref={viewerContainerRef}
-              className="flex min-h-[68vh] items-center justify-center rounded-xl border border-zinc-200 bg-zinc-100 p-3 dark:border-zinc-800 dark:bg-zinc-950"
+              className="relative flex min-h-[68vh] items-center justify-center rounded-xl border border-zinc-200 bg-zinc-100 p-3 dark:border-zinc-800 dark:bg-zinc-950"
             >
               {shouldShowMaskingCanvas ? (
                 <MaskingCanvas
@@ -1107,11 +1206,11 @@ function AiStudioPageContent() {
                     onMouseLeave={stopDrawMask}
                   />
                 </div>
-              ) : displayedImageUrl ? (
-                showingPreview && previewMediaType === "video" ? (
+              ) : canvasImageSrc ? (
+                showPreviewVideo ? (
                   // eslint-disable-next-line jsx-a11y/media-has-caption
                   <video
-                    src={displayedImageUrl}
+                    src={canvasImageSrc}
                     autoPlay
                     loop
                     muted
@@ -1122,8 +1221,8 @@ function AiStudioPageContent() {
                 ) : (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
-                    src={displayedImageUrl}
-                    alt={effectiveFilename || "Selected photo"}
+                    src={canvasImageSrc}
+                    alt={hasPreview && !isComparing ? "AI preview" : effectiveFilename || "Original photo"}
                     className="max-h-[66vh] w-auto max-w-full rounded-lg object-contain shadow-lg shadow-black/20"
                   />
                 )
@@ -1139,8 +1238,40 @@ function AiStudioPageContent() {
                   </label>
                 </div>
               )}
+              {isGenerating ? (
+                <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-zinc-950/50 text-sm font-semibold text-white">
+                  Generating preview…
+                </div>
+              ) : null}
+              {hasPreview ? (
+                <button
+                  type="button"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    setIsComparing(true);
+                  }}
+                  onPointerUp={(event) => {
+                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                      event.currentTarget.releasePointerCapture(event.pointerId);
+                    }
+                    setIsComparing(false);
+                  }}
+                  onPointerCancel={() => setIsComparing(false)}
+                  onContextMenu={(event) => event.preventDefault()}
+                  aria-pressed={isComparing}
+                  title="Hold to compare with the original"
+                  className={`absolute bottom-4 left-1/2 z-20 inline-flex h-10 -translate-x-1/2 touch-none select-none items-center justify-center rounded-lg px-4 text-sm font-semibold text-white shadow-lg transition ${
+                    isComparing
+                      ? "bg-amber-600"
+                      : "bg-zinc-900/90 hover:bg-zinc-900 dark:bg-zinc-100/90 dark:text-zinc-900 dark:hover:bg-zinc-100"
+                  }`}
+                >
+                  {isComparing ? "Showing Original" : "Compare"}
+                </button>
+              ) : null}
             </div>
-            {previewImageUrl ? (
+            {hasPreview ? (
               <div className="mt-3 flex flex-wrap items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
                 <button
                   type="button"
@@ -1148,6 +1279,14 @@ function AiStudioPageContent() {
                   className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-zinc-300 bg-white px-3 text-xs font-semibold text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800"
                 >
                   Clear Image
+                </button>
+                <button
+                  type="button"
+                  disabled={isSaving || previewMediaType === "video"}
+                  onClick={() => void handleSaveFinal()}
+                  className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600 px-4 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-emerald-500 dark:text-zinc-950 dark:hover:bg-emerald-400"
+                >
+                  {isSaving ? "Saving..." : "Save Final Copy"}
                 </button>
                 <select
                   value={selectedBoardId}
@@ -1238,15 +1377,6 @@ function AiStudioPageContent() {
               >
                 New Edit
               </button>
-              {previewImageUrl && effectivePhotoUrl ? (
-                <button
-                  type="button"
-                  onClick={() => setShowOriginalImage((prev) => !prev)}
-                  className="inline-flex h-8 items-center justify-center rounded-md border border-zinc-300 bg-white px-3 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                >
-                  {showingPreview ? "View Original" : "View Preview"}
-                </button>
-              ) : null}
             </div>
           </div>
 
@@ -1449,36 +1579,28 @@ function AiStudioPageContent() {
                   </button>
                 </div>
               ) : null}
-              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <button
-                  type="button"
-                  disabled={
-                    isGenerating ||
-                    !canGenerateObjectSwap ||
-                    (isImageToVideoTool && !effectivePhotoUrl)
-                  }
-                  onClick={() => void handleGeneratePreview()}
-                  className="inline-flex h-10 items-center justify-center rounded-lg bg-zinc-900 px-4 text-sm font-semibold text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-                >
-                  {generationButtonLabel}
-                </button>
-                <button
-                  type="button"
-                  disabled={!previewImageUrl || previewMediaType === "video"}
-                  onClick={() => void handleConfirmSaveFinalEdit()}
-                  className="inline-flex h-10 items-center justify-center rounded-lg bg-emerald-600 px-4 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-emerald-500 dark:text-zinc-950 dark:hover:bg-emerald-400"
-                >
-                  {isSaving ? "Saving..." : "Confirm & Save Final Edit"}
-                </button>
-              </div>
+              <button
+                type="button"
+                disabled={
+                  isGenerating ||
+                  !canGenerateObjectSwap ||
+                  (isImageToVideoTool && !effectivePhotoUrl)
+                }
+                onClick={() => void handleGeneratePreview()}
+                className="mt-4 inline-flex h-11 w-full items-center justify-center rounded-lg bg-zinc-900 px-4 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+              >
+                {generationButtonLabel}
+              </button>
               <p className="mt-2 text-[11px] text-zinc-500 dark:text-zinc-400">
                 {isMediaGenerationTool
                   ? isTextToPhotoTool
-                    ? "Generates a Flux photo preview in the viewer."
-                    : "Generates a Wan 2.1 video preview. Video jobs may take 5–10 minutes."
+                    ? "Generates a temporary Flux photo in the viewer. Save Final Copy keeps it."
+                    : "Generates a temporary Wan 2.1 video preview. Video jobs may take 5–10 minutes."
                   : isRadianceHdrTool
-                    ? "Applies Radiance HDR shadow/highlight recovery and ACES output transform."
-                  : '(Generates a preview below. "Confirm & Save" creates the final _wf file)'}
+                    ? "Applies Radiance HDR as a temporary preview. Save Final Copy keeps it."
+                    : isObjectRemovalTool
+                      ? "Draw a mask for manual removal, or enter a prompt such as \"remove the cars\" for automatic masking."
+                      : "Generates a temporary preview on the canvas. Save Final Copy writes the final file."}
               </p>
               {generationMessage ? (
                 <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">{generationMessage}</p>

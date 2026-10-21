@@ -3,8 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
-import { resolveSourceImagePath } from "@/lib/comfy/resolveSourceImagePath";
-import { PHOTOS_ROOT } from "@/lib/photosPaths";
+import { readComfyUploadFilename } from "@/lib/comfy/comfyImageName";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const runtime = "nodejs";
@@ -13,7 +12,7 @@ export const dynamic = "force-dynamic";
 const COMFY_BASE_URL = process.env.COMFYUI_BASE_URL?.trim() || "http://127.0.0.1:8188";
 const COMFY_DEFAULT_ROOT = process.env.COMFYUI_PATH?.trim() || "C:/ComfyUI_windows_portable/ComfyUI";
 const COMFY_OUTPUT_DIR = process.env.COMFYUI_OUTPUT_DIR?.trim() || path.join(COMFY_DEFAULT_ROOT, "output");
-const SAVE_IMAGE_NODE_ID = "4";
+const SAVE_IMAGE_NODE_ID = "9";
 const POLL_INTERVAL_MS = 2500;
 const POLL_TIMEOUT_MS = 180_000;
 
@@ -31,12 +30,6 @@ type ComfyOutputImage = {
 
 type ComfyHistoryEntry = {
   outputs?: Record<string, { images?: ComfyOutputImage[] }>;
-};
-
-type ComfyUploadResponse = {
-  name?: string;
-  subfolder?: string;
-  type?: string;
 };
 
 function normalizeErrorMessage(value: unknown, fallback: string): string {
@@ -58,118 +51,112 @@ function normalizeErrorMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
-function loadDrawMaskRemoveWorkflowTemplate(): Record<string, WorkflowNode> {
-  const workflowPath = path.join(process.cwd(), "lib", "comfy", "draw_mask_remove_workflow.json");
+function loadObjectRemovalWorkflowTemplate(): Record<string, WorkflowNode> {
+  const workflowPath = path.join(process.cwd(), "lib", "comfy", "remove_objects.json");
   const raw = fs.readFileSync(workflowPath, "utf8");
   return JSON.parse(raw) as Record<string, WorkflowNode>;
 }
 
-function resolveAndValidateAbsoluteImagePath(imagePath: string): string {
-  const resolved = path.resolve(imagePath.trim());
-  const rootResolved = path.resolve(PHOTOS_ROOT);
-  if (!resolved.toLowerCase().startsWith(rootResolved.toLowerCase() + path.sep)) {
-    throw new Error("Access denied.");
+function selectPositivePrompt(removalTarget: string): string {
+  const t = removalTarget.toLowerCase();
+  if (t.includes("car") || t.includes("vehicle") || t.includes("trash") || t.includes("bin")) {
+    return "empty street, bare concrete driveway, asphalt, empty space, highly detailed texture";
   }
-  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-    throw new Error(`Image not found. attempted_local_path=${resolved}`);
+  if (t.includes("cable") || t.includes("wire")) {
+    return "background, wall texture, seamless, highly detailed";
   }
-  return resolved;
+  if (t.includes("picture") || t.includes("frame") || t.includes("clutter") || t.includes("counter")) {
+    return "background, wall texture, seamless, highly detailed";
+  }
+  return "background, wall texture, seamless, empty space, highly detailed texture";
 }
 
-function resolveLocalSourcePath(
-  sourceImagePath: string,
-  filename: string,
-  taskId: string
-): string {
-  const trimmedPath = sourceImagePath.trim();
-  if (trimmedPath) {
-    return resolveAndValidateAbsoluteImagePath(trimmedPath);
-  }
-  if (!filename.trim()) {
-    throw new Error("sourceImagePath or filename is required.");
-  }
-  return resolveSourceImagePath(filename, taskId);
+function selectNegativePrompt(removalTarget: string): string {
+  const target = removalTarget.trim() || "object";
+  return `${target}, blurry, distorted, artifacts, low quality, watermark`;
 }
 
-function decodeMaskBase64(maskBase64: string): Buffer {
-  const trimmed = maskBase64.trim();
-  if (!trimmed) {
-    throw new Error("maskBase64 is required.");
-  }
-  const dataUrlMatch = /^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/i.exec(trimmed);
-  const base64Payload = dataUrlMatch?.[1] ?? trimmed;
-  const buffer = Buffer.from(base64Payload, "base64");
-  if (buffer.length === 0) {
-    throw new Error("maskBase64 is invalid or empty.");
-  }
-  return buffer;
-}
+/**
+ * remove_objects.json graph:
+ * - "1" LoadImage ← source photo
+ * - "2" GroundingDinoSAMSegment ← text mask prompt (text mode)
+ * - "5" GrowMask ← expands mask before inpaint
+ * - "17" Checkpoint / "20" positive / "21" negative / "23" VAEEncodeForInpaint / "24" KSampler / "25" VAEDecode
+ * - "9" SaveImage
+ *
+ * Manual mode replaces the segmenter mask with an uploaded mask LoadImage → ImageToMask → GrowMask.
+ */
+function buildObjectRemovalWorkflow(
+  comfyImageName: string,
+  comfyMaskName: string,
+  prompt: string
+): Record<string, WorkflowNode> {
+  const workflow = loadObjectRemovalWorkflowTemplate();
+  const sourceNode = workflow["1"];
+  const segmentNode = workflow["2"];
+  const growMaskNode = workflow["5"];
+  const positiveNode = workflow["20"];
+  const negativeNode = workflow["21"];
+  const encodeNode = workflow["23"];
+  const samplerNode = workflow["24"];
+  const saveNode = workflow["9"];
 
-function patchWorkflowImageNodes(
-  workflow: Record<string, WorkflowNode>,
-  mainImageFilename: string,
-  maskImageFilename: string
-): void {
-  let mainLoadNode: WorkflowNode | null = null;
-  let maskLoadNode: WorkflowNode | null = null;
-
-  for (const node of Object.values(workflow)) {
-    if (!node.inputs || typeof node.inputs.image !== "string") {
-      continue;
-    }
-    if (node.class_type === "LoadImage") {
-      mainLoadNode = node;
-    } else if (node.class_type === "LoadImageMask") {
-      maskLoadNode = node;
-    }
-  }
-
-  if (!mainLoadNode?.inputs) {
-    throw new Error('Workflow template is missing a LoadImage node with "inputs.image".');
-  }
-  if (!maskLoadNode?.inputs) {
-    throw new Error('Workflow template is missing a LoadImageMask node with "inputs.image".');
-  }
-
-  mainLoadNode.inputs.image = mainImageFilename;
-  maskLoadNode.inputs.image = maskImageFilename;
-}
-
-async function uploadImageToComfy(buffer: Buffer, filename: string): Promise<string> {
-  const formData = new FormData();
-  const blob = new Blob([new Uint8Array(buffer)], { type: "application/octet-stream" });
-  formData.append("image", blob, filename);
-  formData.append("overwrite", "true");
-  formData.append("type", "input");
-
-  const uploadUrl = `${COMFY_BASE_URL.replace(/\/$/, "")}/upload/image`;
-  const response = await fetchWithTimeout(
-    uploadUrl,
-    {
-      method: "POST",
-      body: formData,
-    },
-    20_000
-  );
-  const responseText = await response.text();
-  let payload: ComfyUploadResponse | null = null;
-  try {
-    payload = JSON.parse(responseText) as ComfyUploadResponse;
-  } catch {
-    payload = null;
-  }
-
-  if (!response.ok) {
+  if (
+    !sourceNode?.inputs ||
+    !segmentNode?.inputs ||
+    !growMaskNode?.inputs ||
+    !positiveNode?.inputs ||
+    !negativeNode?.inputs ||
+    !encodeNode?.inputs ||
+    !samplerNode?.inputs ||
+    !saveNode?.inputs
+  ) {
     throw new Error(
-      normalizeErrorMessage(payload, `ComfyUI image upload failed (${response.status}).`)
+      "Object removal workflow is missing required nodes (1, 2, 5, 9, 20, 21, 23, or 24)."
     );
   }
 
-  const uploadedName = payload?.name?.trim() ?? "";
-  if (!uploadedName) {
-    throw new Error("ComfyUI image upload did not return a filename.");
+  sourceNode.inputs.image = comfyImageName;
+  saveNode.inputs.filename_prefix = "wf";
+  samplerNode.inputs.seed = Math.floor(Math.random() * 1_000_000_000_000_000);
+
+  const removalTarget = prompt.trim() || "unwanted object";
+  positiveNode.inputs.text = selectPositivePrompt(removalTarget);
+  negativeNode.inputs.text = selectNegativePrompt(removalTarget);
+
+  if (comfyMaskName) {
+    workflow["30"] = {
+      inputs: {
+        image: comfyMaskName,
+      },
+      class_type: "LoadImage",
+      _meta: { title: "Load Manual Mask" },
+    };
+    workflow["31"] = {
+      inputs: {
+        image: ["30", 0],
+        channel: "red",
+      },
+      class_type: "ImageToMask",
+      _meta: { title: "Manual Mask" },
+    };
+    growMaskNode.inputs.mask = ["31", 0];
+    // Drop text-segmentation from the executed graph so only the drawn mask is used.
+    delete workflow["2"];
+    delete workflow["3"];
+    delete workflow["10"];
+    delete workflow["11"];
+    delete workflow["12"];
+    delete workflow["13"];
+    delete workflow["15"];
+    return workflow;
   }
-  return uploadedName;
+
+  segmentNode.inputs.prompt = removalTarget;
+  segmentNode.inputs.image = ["1", 0];
+  growMaskNode.inputs.mask = ["2", 1];
+  encodeNode.inputs.mask = ["5", 0];
+  return workflow;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -257,40 +244,29 @@ async function fetchComfyViewImage(outputImage: ComfyOutputImage): Promise<Buffe
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as {
-      sourceImagePath?: string;
-      maskBase64?: string;
-      filename?: string;
-      taskId?: string;
-      task_id?: string;
+      comfyImageName?: string;
+      comfyMaskName?: string;
+      prompt?: string;
     };
 
-    const sourceImagePath = typeof body.sourceImagePath === "string" ? body.sourceImagePath.trim() : "";
-    const maskBase64 = typeof body.maskBase64 === "string" ? body.maskBase64.trim() : "";
-    const filename = typeof body.filename === "string" ? body.filename.trim() : "";
-    const taskId =
-      (typeof body.taskId === "string" ? body.taskId.trim() : "") ||
-      (typeof body.task_id === "string" ? body.task_id.trim() : "");
+    const comfyImageName = readComfyUploadFilename(body.comfyImageName);
+    const comfyMaskName = readComfyUploadFilename(body.comfyMaskName);
+    const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
 
-    if (!maskBase64) {
-      return NextResponse.json({ error: "maskBase64 is required." }, { status: 400 });
+    if (!comfyImageName) {
+      return NextResponse.json(
+        { error: "Upload the source image to ComfyUI before removing an object." },
+        { status: 400 }
+      );
+    }
+    if (!comfyMaskName && !prompt) {
+      return NextResponse.json(
+        { error: "Draw a mask or enter a prompt describing what to remove." },
+        { status: 400 }
+      );
     }
 
-    const localSourcePath = resolveLocalSourcePath(sourceImagePath, filename, taskId);
-    const sourceBuffer = fs.readFileSync(localSourcePath);
-    const maskBuffer = decodeMaskBase64(maskBase64);
-
-    const uniqueBase = `inpaint_${Date.now()}_${randomUUID().slice(0, 8)}`;
-    const sourceExt = path.extname(localSourcePath).toLowerCase() || ".jpg";
-    const sourceUploadName = `${uniqueBase}_source${sourceExt}`;
-    const maskUploadName = `${uniqueBase}_mask.png`;
-
-    const [uploadedSourceName, uploadedMaskName] = await Promise.all([
-      uploadImageToComfy(sourceBuffer, sourceUploadName),
-      uploadImageToComfy(maskBuffer, maskUploadName),
-    ]);
-
-    const workflow = loadDrawMaskRemoveWorkflowTemplate();
-    patchWorkflowImageNodes(workflow, uploadedSourceName, uploadedMaskName);
+    const workflow = buildObjectRemovalWorkflow(comfyImageName, comfyMaskName, prompt);
 
     const promptResponse = await fetchWithTimeout(
       `${COMFY_BASE_URL.replace(/\/$/, "")}/prompt`,
@@ -337,7 +313,7 @@ export async function POST(request: Request) {
     }
 
     console.info(
-      `[ai-inpaint] prompt_id=${promptId} source=${localSourcePath} comfy_source=${uploadedSourceName} comfy_mask=${uploadedMaskName}`
+      `[ai-inpaint] prompt_id=${promptId} comfy_source=${comfyImageName} comfy_mask=${comfyMaskName || "(text)"} prompt=${prompt || "(none)"}`
     );
 
     const outputImage = await waitForComfyOutput(promptId);

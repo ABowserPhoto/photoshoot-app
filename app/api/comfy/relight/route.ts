@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
+import { readComfyUploadFilename } from "@/lib/comfy/comfyImageName";
 import { resolveSourceImagePath } from "@/lib/comfy/resolveSourceImagePath";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
@@ -34,20 +35,21 @@ export async function POST(request: Request) {
     const filename = typeof filenameEntry === "string" ? filenameEntry.trim() : "";
     const prompt = typeof promptEntry === "string" ? promptEntry.trim() : "";
     const taskId = typeof taskIdEntry === "string" ? taskIdEntry.trim() : "";
+    const uploadedImageName = readComfyUploadFilename(formData.get("comfyImageName"));
 
-    if (!filename) {
-      return NextResponse.json({ error: "filename is required." }, { status: 400 });
+    if (!filename && !uploadedImageName) {
+      return NextResponse.json({ error: "filename or a ComfyUI image upload is required." }, { status: 400 });
     }
 
-    const sourceImagePath = resolveSourceImagePath(filename, taskId);
-    const sourceExt = path.extname(sourceImagePath).toLowerCase() || ".jpg";
-    const uniqueBase = `temp_relight_${Date.now()}_${randomUUID().slice(0, 8)}`;
-    const comfyInputFilename = `${uniqueBase}${sourceExt}`;
-    const comfyInputDirResolved = path.resolve(COMFY_INPUT_DIR);
-    fs.mkdirSync(comfyInputDirResolved, { recursive: true });
-    const comfyInputFilePath = path.join(comfyInputDirResolved, comfyInputFilename);
-
-    fs.copyFileSync(sourceImagePath, comfyInputFilePath);
+    let comfyInputFilename = uploadedImageName;
+    if (!comfyInputFilename) {
+      const sourceImagePath = resolveSourceImagePath(filename, taskId);
+      const sourceExt = path.extname(sourceImagePath).toLowerCase() || ".jpg";
+      comfyInputFilename = `temp_relight_${Date.now()}_${randomUUID().slice(0, 8)}${sourceExt}`;
+      const comfyInputDirResolved = path.resolve(COMFY_INPUT_DIR);
+      fs.mkdirSync(comfyInputDirResolved, { recursive: true });
+      fs.copyFileSync(sourceImagePath, path.join(comfyInputDirResolved, comfyInputFilename));
+    }
 
     const workflow = loadRelightWorkflowTemplate();
     const loadImageNode = workflow["11"];

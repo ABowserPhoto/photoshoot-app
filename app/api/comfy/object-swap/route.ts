@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import sharp from "sharp";
 
+import { readComfyUploadFilename } from "@/lib/comfy/comfyImageName";
 import { resolveSourceImagePath } from "@/lib/comfy/resolveSourceImagePath";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
@@ -43,29 +44,32 @@ export async function POST(request: Request) {
     const filename = typeof filenameEntry === "string" ? filenameEntry.trim() : "";
     const prompt = typeof promptEntry === "string" ? promptEntry.trim() : "";
     const taskId = typeof taskIdEntry === "string" ? taskIdEntry.trim() : "";
+    const uploadedImageName = readComfyUploadFilename(formData.get("comfyImageName"));
 
-    if (!filename) {
-      return NextResponse.json({ error: "filename is required." }, { status: 400 });
+    if (!filename && !uploadedImageName) {
+      return NextResponse.json({ error: "filename or a ComfyUI image upload is required." }, { status: 400 });
     }
     if (!(maskFileEntry instanceof File)) {
       return NextResponse.json({ error: "maskFile is required." }, { status: 400 });
     }
 
-    const sourceImagePath = resolveSourceImagePath(filename, taskId);
     const comfyInputDirResolved = path.resolve(COMFY_INPUT_DIR);
     fs.mkdirSync(comfyInputDirResolved, { recursive: true });
 
-    const mainExt = path.extname(sourceImagePath).toLowerCase() || ".png";
-    const mainFilename = `temp_object_swap_main_${Date.now()}_${randomUUID().slice(0, 8)}${mainExt}`;
-    const mainTargetPath = path.join(comfyInputDirResolved, mainFilename);
-    await sharp(sourceImagePath)
-      .resize({
-        width: MAX_FLUX_INPUT_SIZE,
-        height: MAX_FLUX_INPUT_SIZE,
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .toFile(mainTargetPath);
+    let mainFilename = uploadedImageName;
+    if (!mainFilename) {
+      const sourceImagePath = resolveSourceImagePath(filename, taskId);
+      const mainExt = path.extname(sourceImagePath).toLowerCase() || ".png";
+      mainFilename = `temp_object_swap_main_${Date.now()}_${randomUUID().slice(0, 8)}${mainExt}`;
+      await sharp(sourceImagePath)
+        .resize({
+          width: MAX_FLUX_INPUT_SIZE,
+          height: MAX_FLUX_INPUT_SIZE,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .toFile(path.join(comfyInputDirResolved, mainFilename));
+    }
 
     const maskExt = ensureImageExtension(maskFileEntry.name || "", ".png");
     const maskFilename = `mask_${Date.now()}_${randomUUID().slice(0, 8)}${maskExt}`;

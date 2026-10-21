@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
+import { readComfyUploadFilename } from "@/lib/comfy/comfyImageName";
 import { resolveSourceImagePath } from "@/lib/comfy/resolveSourceImagePath";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
@@ -44,9 +45,10 @@ export async function POST(request: Request) {
     const filename = typeof filenameEntry === "string" ? filenameEntry.trim() : "";
     const prompt = typeof promptEntry === "string" ? promptEntry.trim() : "";
     const taskId = typeof taskIdEntry === "string" ? taskIdEntry.trim() : "";
+    const comfyImageName = readComfyUploadFilename(formData.get("comfyImageName"));
 
-    if (!filename) {
-      return NextResponse.json({ error: "filename is required." }, { status: 400 });
+    if (!filename && !comfyImageName) {
+      return NextResponse.json({ error: "filename or a ComfyUI image upload is required." }, { status: 400 });
     }
 
     const referenceEntries = formData.getAll("referenceImages");
@@ -58,14 +60,16 @@ export async function POST(request: Request) {
       );
     }
 
-    const sourceImagePath = resolveSourceImagePath(filename, taskId);
-    const sourceExt = path.extname(sourceImagePath).toLowerCase() || ".jpg";
     const comfyInputDirResolved = path.resolve(COMFY_INPUT_DIR);
     fs.mkdirSync(comfyInputDirResolved, { recursive: true });
 
-    const mainTempFilename = `temp_material_main_${Date.now()}_${randomUUID().slice(0, 8)}${sourceExt}`;
-    const mainTargetPath = path.join(comfyInputDirResolved, mainTempFilename);
-    fs.copyFileSync(sourceImagePath, mainTargetPath);
+    let mainTempFilename = comfyImageName;
+    if (!mainTempFilename) {
+      const sourceImagePath = resolveSourceImagePath(filename, taskId);
+      const sourceExt = path.extname(sourceImagePath).toLowerCase() || ".jpg";
+      mainTempFilename = `temp_material_main_${Date.now()}_${randomUUID().slice(0, 8)}${sourceExt}`;
+      fs.copyFileSync(sourceImagePath, path.join(comfyInputDirResolved, mainTempFilename));
+    }
 
     const refExt = ensureImageExtension(firstReferenceFile.name || "", ".jpg");
     const refTempFilename = `ref_mat_${Date.now()}_${randomUUID().slice(0, 8)}${refExt}`;

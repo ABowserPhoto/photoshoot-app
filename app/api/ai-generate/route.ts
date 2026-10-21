@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
+import { readComfyUploadFilename } from "@/lib/comfy/comfyImageName";
 import { resolveSourceImagePath } from "@/lib/comfy/resolveSourceImagePath";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
@@ -515,6 +516,7 @@ export async function POST(request: Request) {
       length?: number;
       batchSize?: number;
       sourceImagePath?: string;
+      comfyImageName?: string;
       filename?: string;
       taskId?: string;
       task_id?: string;
@@ -578,15 +580,19 @@ export async function POST(request: Request) {
     }
 
     workflow = loadWorkflow("image2VideoWorkflow.json");
-    const localSourcePath = resolveLocalSourcePath(sourceImagePath, filename, taskId);
-    const sourceBuffer = fs.readFileSync(localSourcePath);
-    const sourceExt = path.extname(localSourcePath).toLowerCase() || ".jpg";
-    const uploadName = `i2v_${Date.now()}_${randomUUID().slice(0, 8)}${sourceExt}`;
-    const uploadedImageName = await uploadImageToComfy(sourceBuffer, uploadName);
-    patchImageToVideoWorkflow(workflow, uploadedImageName, width, height, length, batchSize);
+    const uploadedImageName = readComfyUploadFilename(body.comfyImageName);
+    let loadImageName = uploadedImageName;
+    if (!loadImageName) {
+      const localSourcePath = resolveLocalSourcePath(sourceImagePath, filename, taskId);
+      const sourceBuffer = fs.readFileSync(localSourcePath);
+      const sourceExt = path.extname(localSourcePath).toLowerCase() || ".jpg";
+      const uploadName = `i2v_${Date.now()}_${randomUUID().slice(0, 8)}${sourceExt}`;
+      loadImageName = await uploadImageToComfy(sourceBuffer, uploadName);
+    }
+    patchImageToVideoWorkflow(workflow, loadImageName, width, height, length, batchSize);
     promptId = await submitComfyPrompt(workflow);
     console.info(
-      `[ai-generate] mode=image2video prompt_id=${promptId} source=${localSourcePath} ${width}x${height} length=${length} batch=${batchSize}`
+      `[ai-generate] mode=image2video prompt_id=${promptId} image=${loadImageName} ${width}x${height} length=${length} batch=${batchSize}`
     );
     const outputVideo = await waitForComfyVideoOutput(promptId, workflow);
     const outputBuffer = await fetchComfyViewBuffer(outputVideo);

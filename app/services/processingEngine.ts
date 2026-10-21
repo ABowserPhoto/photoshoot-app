@@ -394,7 +394,7 @@ function failedSingleItemSummary(
 }
 
 function loadWorkflowTemplate(): Record<string, WorkflowNode> {
-  const workflowPath = path.join(process.cwd(), "lib", "comfy", "workflow_api.json");
+  const workflowPath = path.join(process.cwd(), "lib", "comfy", "stratocumuclouds_workflow.json");
   if (!fs.existsSync(workflowPath)) {
     throw new Error(`Comfy workflow template not found at ${workflowPath}`);
   }
@@ -404,6 +404,24 @@ function loadWorkflowTemplate(): Record<string, WorkflowNode> {
     throw new Error("Comfy workflow template is invalid.");
   }
   return parsed as Record<string, WorkflowNode>;
+}
+
+function patchSkyReplacementWorkflow(
+  workflow: Record<string, WorkflowNode>,
+  comfyImageName: string,
+  outputPrefix: string
+): void {
+  const loadImage = workflow["1"];
+  const skySegment = workflow["4"];
+  const sampler = workflow["9"];
+  const saveImage = workflow["11"];
+  if (!loadImage?.inputs || !skySegment?.inputs || !sampler?.inputs || !saveImage?.inputs) {
+    throw new Error("Sky replacement workflow is missing required nodes.");
+  }
+  loadImage.inputs.image = comfyImageName;
+  skySegment.inputs.prompt = "sky";
+  sampler.inputs.seed = Math.floor(Math.random() * 1_000_000_000_000_000);
+  saveImage.inputs.filename_prefix = outputPrefix;
 }
 
 function validateMergedFilename(filename: string): string {
@@ -446,12 +464,7 @@ async function triggerComfyLocally(localFolderName: string, mergedFilename: stri
   const outputBaseName = path.basename(safeFilename, path.extname(safeFilename));
   const outputPrefix = path.join(PHOTOS_ROOT, safeFolder, "4_Final", `AI_${outputBaseName}`);
   const workflow = loadWorkflowTemplate();
-  if (!workflow["1"]?.inputs || !workflow["9"]?.inputs || !workflow["11"]?.inputs) {
-    throw new Error("Workflow template is missing required nodes.");
-  }
-  workflow["9"].inputs.seed = Math.floor(Math.random() * 1000000000000000);
-  workflow["1"].inputs.image = resizedFilename;
-  workflow["11"].inputs.filename_prefix = outputPrefix;
+  patchSkyReplacementWorkflow(workflow, resizedFilename, outputPrefix);
 
   const comfyRequestPayload = {
     prompt: workflow,
