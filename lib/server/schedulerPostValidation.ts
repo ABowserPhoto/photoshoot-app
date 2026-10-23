@@ -1,4 +1,5 @@
 import { assertFutureScheduledAt } from "@/lib/schedulerDateUtils";
+import { parseScheduledAtInSchedulerTimezone } from "@/lib/schedulerTimezone";
 
 export function parseScheduledAtInput(value: unknown): Date | null {
   if (value == null || value === "") {
@@ -10,12 +11,7 @@ export function parseScheduledAtInput(value: unknown): Date | null {
   if (typeof value !== "string") {
     return null;
   }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-  const parsed = new Date(trimmed);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+  return parseScheduledAtInSchedulerTimezone(value);
 }
 
 export function validateScheduledAtOrError(

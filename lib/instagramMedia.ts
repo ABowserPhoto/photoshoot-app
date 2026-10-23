@@ -1,3 +1,5 @@
+import { schedulerNow } from "@/lib/schedulerTimezone";
+
 export type InstagramPostType = "FEED" | "REEL" | "STORY";
 
 export const META_NATIVE_SCHEDULE_MIN_MS = 15 * 60 * 1000;
@@ -70,7 +72,7 @@ export function validateMediaForPostType(
 export function canUseMetaNativeSchedule(
   scheduledAt: Date | null | undefined,
   postType: InstagramPostType,
-  now = new Date()
+  now = schedulerNow()
 ): { ok: true; unixSeconds: number } | { ok: false; reason: string } {
   if (!scheduledAt || Number.isNaN(scheduledAt.getTime())) {
     return { ok: false, reason: "No scheduled time." };

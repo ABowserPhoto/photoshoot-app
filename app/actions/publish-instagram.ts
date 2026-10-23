@@ -10,8 +10,11 @@ import { fetchWithTimeout, toFetchErrorMessage } from "@/lib/server/fetchWithTim
 const GRAPH_VERSION = "v19.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
 const META_FETCH_TIMEOUT_MS = Number(process.env.META_FETCH_TIMEOUT_MS ?? "15000");
-const REEL_STATUS_POLL_ATTEMPTS = 24;
-const REEL_STATUS_POLL_MS = 5_000;
+const CONTAINER_STATUS_POLL_ATTEMPTS = 24;
+const CONTAINER_STATUS_POLL_MS = 5_000;
+const MEDIA_NOT_READY_CODE = 9007;
+const PUBLISH_RETRY_ATTEMPTS = 6;
+const PUBLISH_RETRY_MS = 5_000;
 
 type GraphErrorBody = {
   error?: {
@@ -54,9 +57,9 @@ async function waitForContainerReady(
   creationId: string,
   accessToken: string
 ): Promise<{ ok: true } | { ok: false; error: string; details?: unknown }> {
-  for (let attempt = 0; attempt < REEL_STATUS_POLL_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < CONTAINER_STATUS_POLL_ATTEMPTS; attempt += 1) {
     if (attempt > 0) {
-      await new Promise((resolve) => setTimeout(resolve, REEL_STATUS_POLL_MS));
+      await new Promise((resolve) => setTimeout(resolve, CONTAINER_STATUS_POLL_MS));
     }
     let statusRes: Response;
     try {
@@ -91,10 +94,99 @@ async function waitForContainerReady(
         details: statusJson,
       };
     }
+    // Static image containers often omit status_code; give Meta time before publish (9007).
+    if (!statusJson.status_code) {
+      await new Promise((resolve) => setTimeout(resolve, CONTAINER_STATUS_POLL_MS));
+      return { ok: true };
+    }
   }
   return {
     ok: false,
     error: "Timed out waiting for Instagram to finish processing the media container.",
+  };
+}
+
+async function publishContainerWithRetry(
+  igId: string,
+  creationId: string,
+  token: string
+): Promise<
+  | { ok: true; mediaId: string; publishJson: { id?: string } & GraphErrorBody }
+  | { ok: false; error: string; details?: unknown }
+> {
+  const publishParams = new URLSearchParams({
+    creation_id: creationId,
+    access_token: token,
+  });
+
+  for (let attempt = 0; attempt < PUBLISH_RETRY_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, PUBLISH_RETRY_MS));
+    }
+
+    let publishRes: Response;
+    try {
+      publishRes = await fetchWithTimeout(
+        `${GRAPH_BASE}/${igId}/media_publish`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: publishParams.toString(),
+          cache: "no-store",
+        },
+        META_FETCH_TIMEOUT_MS
+      );
+    } catch (e) {
+      if (attempt === PUBLISH_RETRY_ATTEMPTS - 1) {
+        return {
+          ok: false,
+          error: toFetchErrorMessage(e, "Network error while publishing media"),
+          details: { creationId },
+        };
+      }
+      continue;
+    }
+
+    let publishJson: { id?: string } & GraphErrorBody;
+    try {
+      publishJson = (await publishRes.json()) as { id?: string } & GraphErrorBody;
+    } catch {
+      return {
+        ok: false,
+        error: "Invalid response from Instagram (publish).",
+        details: { creationId },
+      };
+    }
+
+    if (publishRes.ok && !publishJson.error) {
+      const mediaId = publishJson.id?.trim() || creationId;
+      return { ok: true, mediaId, publishJson };
+    }
+
+    const code = publishJson.error?.code;
+    const retryable =
+      code === MEDIA_NOT_READY_CODE ||
+      /media id is not available|not available/i.test(publishJson.error?.message ?? "");
+
+    if (retryable && attempt < PUBLISH_RETRY_ATTEMPTS - 1) {
+      console.warn("[publish-instagram] Media not ready (9007), retrying publish…", {
+        creationId,
+        attempt: attempt + 1,
+      });
+      continue;
+    }
+
+    return {
+      ok: false,
+      error: formatGraphError(publishJson.error, "Failed to publish media."),
+      details: publishJson.error ?? publishJson,
+    };
+  }
+
+  return {
+    ok: false,
+    error: "Failed to publish media after retries.",
+    details: { creationId },
   };
 }
 
@@ -236,26 +328,21 @@ export async function publishToInstagram(
     };
   }
 
-  const needsProcessing =
-    postType === "REEL" || (postType === "STORY" && createParams.has("video_url"));
-
-  // Video containers must finish processing before publish (or before Meta holds a schedule).
-  if (needsProcessing) {
-    const ready = await waitForContainerReady(creationId, token);
-    if (!ready.ok) {
-      console.error("[publish-instagram] container not ready:", ready.error, {
-        creationId,
-        postType,
-        isScheduled,
-        scheduledUnix,
-      });
-      return {
-        ok: false,
-        error: ready.error,
-        step: "wait_ready",
-        details: ready.details,
-      };
-    }
+  // All containers must finish processing before publish (avoids Graph error 9007).
+  const ready = await waitForContainerReady(creationId, token);
+  if (!ready.ok) {
+    console.error("[publish-instagram] container not ready:", ready.error, {
+      creationId,
+      postType,
+      isScheduled,
+      scheduledUnix,
+    });
+    return {
+      ok: false,
+      error: ready.error,
+      step: "wait_ready",
+      details: ready.details,
+    };
   }
 
   // Native Meta schedule: container is created with scheduled_publish_time + published=false.
@@ -269,60 +356,25 @@ export async function publishToInstagram(
     return { ok: true, creationId, mediaId: creationId, scheduled: true };
   }
 
-  const publishParams = new URLSearchParams({
-    creation_id: creationId,
-    access_token: token,
-  });
-
-  let publishRes: Response;
-  try {
-    publishRes = await fetchWithTimeout(
-      `${GRAPH_BASE}/${igId}/media_publish`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: publishParams.toString(),
-        cache: "no-store",
-      },
-      META_FETCH_TIMEOUT_MS
-    );
-  } catch (e) {
-    console.error("[publish-instagram] publish fetch failed:", e, { creationId });
-    return {
-      ok: false,
-      error: toFetchErrorMessage(e, "Network error while publishing media"),
-      step: "publish",
-      details: { creationId },
-    };
-  }
-
-  let publishJson: { id?: string } & GraphErrorBody;
-  try {
-    publishJson = (await publishRes.json()) as { id?: string } & GraphErrorBody;
-  } catch {
-    return {
-      ok: false,
-      error: "Invalid response from Instagram (publish).",
-      step: "publish",
-      details: { creationId },
-    };
-  }
-
-  if (!publishRes.ok || publishJson.error) {
-    const message = formatGraphError(publishJson.error, "Failed to publish media.");
+  const published = await publishContainerWithRetry(igId, creationId, token);
+  if (!published.ok) {
     console.error("[publish-instagram] publish Graph error:", {
-      message,
+      message: published.error,
       creationId,
-      details: publishJson.error ?? publishJson,
+      details: published.details,
     });
     return {
       ok: false,
-      error: message,
+      error: published.error,
       step: "publish",
-      details: publishJson.error ?? publishJson,
+      details: published.details,
     };
   }
 
-  const mediaId = publishJson.id?.trim() || creationId;
-  return { ok: true, creationId, mediaId, scheduled: false };
+  return {
+    ok: true,
+    creationId,
+    mediaId: published.mediaId,
+    scheduled: false,
+  };
 }

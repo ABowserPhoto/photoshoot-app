@@ -1,3 +1,5 @@
+import { parseScheduledAtInSchedulerTimezone, schedulerNow } from "@/lib/schedulerTimezone";
+
 export const PAST_SCHEDULE_ERROR = "Cannot schedule posts in the past.";
 export const INVALID_SCHEDULE_ERROR = "Invalid scheduled date.";
 
@@ -11,11 +13,14 @@ export function formatScheduledDateTime(date: Date): string {
   return `${hours}:${minutes} ${weekday} ${day}-${month}-${year}`;
 }
 
-export function isScheduledInPast(scheduledAt: Date | null | undefined): boolean {
+export function isScheduledInPast(
+  scheduledAt: Date | null | undefined,
+  now = schedulerNow()
+): boolean {
   if (!scheduledAt || Number.isNaN(scheduledAt.getTime())) {
     return false;
   }
-  return scheduledAt.getTime() < Date.now();
+  return scheduledAt.getTime() < now.getTime();
 }
 
 export function assertFutureScheduledAt(scheduledAt: Date | null | undefined): string | null {
@@ -64,19 +69,5 @@ export function dateTimeLocalValueToDate(value: string): Date | null {
   if (!trimmed) {
     return null;
   }
-  const match = trimmed.match(
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?$/
-  );
-  if (!match) {
-    const parsed = new Date(trimmed);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  }
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6] ?? "0");
-  const parsed = new Date(year, month - 1, day, hour, minute, second, 0);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+  return parseScheduledAtInSchedulerTimezone(trimmed);
 }

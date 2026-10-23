@@ -14,6 +14,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import { publishToInstagram } from "@/app/actions/publish-instagram";
 import { normalizeInstagramPostType, type InstagramPostType } from "@/lib/instagramMedia";
+import { SCHEDULER_TIMEZONE, schedulerDueCutoffIso } from "@/lib/schedulerTimezone";
 
 const GRAPH_VERSION = "v19.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
@@ -67,7 +68,7 @@ export function makeServiceSupabase(): SupabaseClient | null {
  * Intentionally excludes `scheduled_with_meta` (Meta owns those).
  */
 export async function fetchDuePosts(supabase: SupabaseClient): Promise<DuePost[]> {
-  const now = new Date().toISOString();
+  const now = schedulerDueCutoffIso();
 
   const { data, error } = await supabase
     .from("social_posts")
@@ -90,7 +91,9 @@ export async function fetchDuePosts(supabase: SupabaseClient): Promise<DuePost[]
         throw new Error(`Failed to fetch due posts: ${retry.error.message}`);
       }
       const due = (retry.data ?? []) as DuePost[];
-      console.info(`[socialPublisher] Due posts at ${now}: ${due.length} (without post_type)`);
+      console.info(
+        `[socialPublisher] Due posts at ${now} (${SCHEDULER_TIMEZONE} cutoff): ${due.length} (without post_type)`
+      );
       return due;
     }
     console.error("[socialPublisher] Failed to fetch due posts:", error.message, { now });
@@ -98,7 +101,9 @@ export async function fetchDuePosts(supabase: SupabaseClient): Promise<DuePost[]
   }
 
   const due = (data ?? []) as DuePost[];
-  console.info(`[socialPublisher] Due posts at ${now}: ${due.length}`);
+  console.info(
+    `[socialPublisher] Due posts at ${now} (${SCHEDULER_TIMEZONE} cutoff): ${due.length}`
+  );
   return due;
 }
 

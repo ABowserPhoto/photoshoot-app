@@ -1,6 +1,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
+  addDaysBerlin,
+  berlinTimeOnDay,
+  parseDateOnlyInSchedulerTimezone,
+  schedulerNow,
+  startOfTodayInSchedulerTimezone,
+  startOfWeekMondayBerlin,
+} from "@/lib/schedulerTimezone";
+import {
   buildImmobilienSocialCaption,
   buildSocialCaptionSeed,
   profileMatchesRoute,
@@ -104,18 +112,16 @@ export function computeScheduledAtsForNewSlots(
   const intervalMs = Math.max(1, rule?.min_interval_hours ?? 24) * 60 * 60 * 1000;
   const postsPerWeek = Math.min(Math.max(1, rule?.posts_per_week ?? 3), Math.max(1, validDays.length));
 
-  const startAnchor = rule?.start_date ? new Date(`${rule.start_date}T00:00:00`) : new Date();
-  if (Number.isNaN(startAnchor.getTime())) {
-    startAnchor.setTime(Date.now());
+  const now = schedulerNow();
+  let startAnchor = rule?.start_date
+    ? parseDateOnlyInSchedulerTimezone(String(rule.start_date).trim())
+    : now;
+  if (!startAnchor || Number.isNaN(startAnchor.getTime())) {
+    startAnchor = now;
   }
 
-  const firstWeekStart = new Date(startAnchor);
-  const mondayOffset = (firstWeekStart.getDay() + 6) % 7;
-  firstWeekStart.setDate(firstWeekStart.getDate() - mondayOffset);
-  firstWeekStart.setHours(0, 0, 0, 0);
-
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
+  const firstWeekStart = startOfWeekMondayBerlin(startAnchor);
+  const todayStart = startOfTodayInSchedulerTimezone(now);
 
   const previousTimes = existingScheduledAts
     .map((value) => (value ? new Date(value) : null))
@@ -129,16 +135,10 @@ export function computeScheduledAtsForNewSlots(
   let pickedThisWeek = 0;
 
   while (results.length < count && weekOffset < 104) {
-    const weekStart = new Date(firstWeekStart);
-    weekStart.setDate(firstWeekStart.getDate() + weekOffset * 7);
+    const weekStart = addDaysBerlin(firstWeekStart, weekOffset * 7);
 
     const weekCandidates = weekdayOffsets
-      .map((offset) => {
-        const date = new Date(weekStart);
-        date.setDate(weekStart.getDate() + offset);
-        date.setHours(0, 0, 0, 0);
-        return date;
-      })
+      .map((offset) => addDaysBerlin(weekStart, offset))
       .filter((date) => date.getTime() >= Math.max(startAnchor.getTime(), todayStart.getTime()))
       .sort((a, b) => a.getTime() - b.getTime());
 
@@ -150,10 +150,8 @@ export function computeScheduledAtsForNewSlots(
         break;
       }
 
-      let dayStart = new Date(day);
-      dayStart.setMinutes(startMinutes, 0, 0);
-      const dayEnd = new Date(day);
-      dayEnd.setMinutes(endMinutes, 0, 0);
+      let dayStart = berlinTimeOnDay(day, startMinutes);
+      const dayEnd = berlinTimeOnDay(day, endMinutes);
 
       if (previousScheduled) {
         const minNext = new Date(previousScheduled.getTime() + intervalMs);
