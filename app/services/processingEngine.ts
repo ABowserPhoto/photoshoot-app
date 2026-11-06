@@ -6,7 +6,11 @@ import { promisify } from "node:util";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
-import { assertCliExecutableExists, spawnCliWithDiagnostics } from "@/lib/server/spawnCli";
+import {
+  assertCliExecutableExists,
+  CliProcessError,
+  spawnCliWithDiagnostics,
+} from "@/lib/server/spawnCli";
 
 const execAsync = promisify(exec);
 
@@ -514,6 +518,124 @@ function validateShootFolder(
   return { ok: true, taskRoot, localFolderName: rel };
 }
 
+function sanitizeSelectsFileName(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.includes("\0")) {
+    return null;
+  }
+  const base = path.basename(trimmed.replace(/\\/g, "/"));
+  if (!base || base === "." || base === "..") {
+    return null;
+  }
+  return base;
+}
+
+function positiveBracketCount(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function mergedOutputIsUsable(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Preview sync skips already-selected chunks, and that path only knows the
+ * preview filename. Merge must ignore that and keep every exposure the worker
+ * resolved for the bracket.
+ */
+function resolveMergeInputFiles(selectsDir: string, requested: string[] | undefined, grouped: string[]): string[] {
+  const explicit = (requested ?? [])
+    .map((name) => sanitizeSelectsFileName(name))
+    .filter((name): name is string => Boolean(name));
+  if (explicit.length === 0) {
+    return grouped;
+  }
+
+  const present: string[] = [];
+  const missing: string[] = [];
+  for (const name of explicit) {
+    if (fs.existsSync(path.join(selectsDir, name))) {
+      present.push(name);
+    } else {
+      missing.push(name);
+    }
+  }
+  if (missing.length > 0) {
+    console.error("[processingEngine] Merge input files missing in 2_Selects:", missing);
+  }
+  if (present.length === 0) {
+    console.error(
+      "[processingEngine] None of the explicit merge inputs exist in 2_Selects; refusing to substitute a shorter regrouped bracket:",
+      explicit
+    );
+    return [];
+  }
+  if (present.length !== grouped.length || present.some((name, index) => name !== grouped[index])) {
+    console.log(
+      `[processingEngine] HDR merge will use ${present.length} explicit input file(s) ` +
+        `(regrouped bracket had ${grouped.length}; preview skip does not drop exposures):`,
+      present
+    );
+  }
+  return present;
+}
+
+async function clearMergeTargetsForOverwrite(outFile: string, tempOutFile: string): Promise<void> {
+  if (fs.existsSync(tempOutFile)) {
+    await fs.promises.unlink(tempOutFile);
+  }
+  if (fs.existsSync(outFile)) {
+    console.log(
+      `[processingEngine] Removing existing 3_Merged file so SNS-HDR overwrites it: ${path.basename(outFile)}`
+    );
+    await fs.promises.unlink(outFile);
+  }
+}
+
+function mergeCliErrorText(error: unknown): string {
+  if (error instanceof CliProcessError) {
+    return error.stderr.trim() ? error.stderr : error.message;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function runSnsHdrMerge(params: {
+  snsArgs: string[];
+  context: Record<string, unknown>;
+  outFile: string;
+  tempOutFile: string;
+}): Promise<void> {
+  await clearMergeTargetsForOverwrite(params.outFile, params.tempOutFile);
+  try {
+    await spawnCliWithDiagnostics(SNS_HDR_PATH, params.snsArgs, {
+      logPrefix: "[CLI SNS-HDR]",
+      envVar: "SNSHDR_PATH",
+      label: "SNS-HDR",
+      // Answer a console "file already exists" prompt if the CLI still asks.
+      stdinText: "y\n",
+      emitMergeCliError: true,
+      context: params.context,
+    });
+  } catch (error) {
+    if (!(error instanceof CliProcessError)) {
+      console.error("Merge CLI Error:", mergeCliErrorText(error));
+    }
+    throw error;
+  }
+}
+
 function mergedOutputFileName(
   firstFileInGroup: string,
   bracketIndex: number,
@@ -610,12 +732,19 @@ export async function startProcessingSingleItem(
   taskId: string,
   shootFolderPath: string,
   bracketIndex: number,
-  options?: { taskBracketSize?: number | null; forceRemerge?: boolean }
+  options?: {
+    taskBracketSize?: number | null;
+    forceRemerge?: boolean;
+    /** Full raw bracket from the worker. Preview-skip state must not replace this list. */
+    inputFiles?: string[];
+    totalBrackets?: number;
+  }
 ): Promise<SingleItemProcessingSummary> {
   try {
     void taskId;
     const taskBracketSize = options?.taskBracketSize ?? null;
     const forceRemerge = options?.forceRemerge === true;
+    const requestedTotalBrackets = positiveBracketCount(options?.totalBrackets);
     const folderValidation = validateShootFolder(shootFolderPath);
     if (!folderValidation.ok) {
       return failedSingleItemSummary(bracketIndex, 0, folderValidation.error);
@@ -638,23 +767,37 @@ export async function startProcessingSingleItem(
       );
     }
     const brackets = bracketResult.brackets;
-    const totalBrackets = brackets.length;
-    if (totalBrackets === 0) {
-      return failedSingleItemSummary(bracketIndex, totalBrackets, "No images found in 2_Selects.");
+    const groupedTotal = brackets.length;
+    const hasExplicitInputs = (options?.inputFiles ?? []).some((name) => sanitizeSelectsFileName(name));
+    if (!hasExplicitInputs && groupedTotal === 0) {
+      return failedSingleItemSummary(bracketIndex, groupedTotal, "No images found in 2_Selects.");
     }
-    if (!Number.isInteger(bracketIndex) || bracketIndex < 0 || bracketIndex >= totalBrackets) {
+    if (!Number.isInteger(bracketIndex) || bracketIndex < 0) {
       return failedSingleItemSummary(
         bracketIndex,
-        totalBrackets,
-        `Invalid bracket index ${bracketIndex}. Valid range is 0..${Math.max(0, totalBrackets - 1)}.`
+        requestedTotalBrackets ?? groupedTotal,
+        `Invalid bracket index ${bracketIndex}.`
+      );
+    }
+    if (!hasExplicitInputs && bracketIndex >= groupedTotal) {
+      return failedSingleItemSummary(
+        bracketIndex,
+        groupedTotal,
+        `Invalid bracket index ${bracketIndex}. Valid range is 0..${Math.max(0, groupedTotal - 1)}.`
       );
     }
 
-    const group = brackets[bracketIndex] ?? [];
+    const grouped = brackets[bracketIndex] ?? [];
+    const group = resolveMergeInputFiles(selectsDir, options?.inputFiles, grouped);
+    const totalBrackets = requestedTotalBrackets ?? Math.max(groupedTotal, bracketIndex + 1);
     const currentBracketIndex = bracketIndex + 1;
     const firstName = group[0];
     if (!firstName) {
-      return failedSingleItemSummary(bracketIndex, totalBrackets, `Bracket ${currentBracketIndex} is empty.`);
+      return failedSingleItemSummary(
+        bracketIndex,
+        totalBrackets,
+        `Bracket ${currentBracketIndex} is empty. Preview skip must not drop the raw file list.`
+      );
     }
 
     logActiveBracketPipelineStart({
@@ -674,7 +817,7 @@ export async function startProcessingSingleItem(
     // If this bracket was already merged (e.g. worker was interrupted mid-run),
     // skip the expensive RawTherapee → SNS-HDR pipeline unless the user
     // explicitly queued a rematch (forceRemerge).
-    if (fs.existsSync(outFile) && !forceRemerge) {
+    if (mergedOutputIsUsable(outFile) && !forceRemerge) {
       console.log(
         `[Worker Skip] Skipping ${outBaseName}: Reason = output already exists in 3_Merged (resume cache)`
       );
@@ -689,9 +832,9 @@ export async function startProcessingSingleItem(
         comfyErrors: [],
       };
     }
-    if (fs.existsSync(outFile) && forceRemerge) {
+    if (fs.existsSync(outFile)) {
       console.log(
-        `[processingEngine] forceRemerge: removing existing 3_Merged output ${outBaseName} before rewrite`
+        `[processingEngine] Removing existing 3_Merged output ${outBaseName} before overwrite`
       );
       await fs.promises.unlink(outFile);
     }
@@ -720,19 +863,25 @@ export async function startProcessingSingleItem(
         snsInputs.map((p) => path.basename(p))
       );
 
+      if (snsInputs.length === 0) {
+        const emptyMessage = `Bracket ${currentBracketIndex} has no input files for SNS-HDR.`;
+        console.error("Merge CLI Error:", emptyMessage);
+        return failedSingleItemSummary(bracketIndex, totalBrackets, emptyMessage);
+      }
+
       assertCliExecutableExists(SNS_HDR_PATH, { envVar: "SNSHDR_PATH", label: "SNS-HDR" });
 
       const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...snsInputs];
       const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
       console.log(
-        `[processingEngine] Starting SNS-HDR CLI for bracket ${currentBracketIndex}: ${constructedCommandString}`
+        `[processingEngine] Starting SNS-HDR CLI for bracket ${currentBracketIndex} with ${snsInputs.length} file(s): ${constructedCommandString}`
       );
 
       try {
-        await spawnCliWithDiagnostics(SNS_HDR_PATH, snsArgs, {
-          logPrefix: "[CLI SNS-HDR]",
-          envVar: "SNSHDR_PATH",
-          label: "SNS-HDR",
+        await runSnsHdrMerge({
+          snsArgs,
+          outFile,
+          tempOutFile,
           context: {
             localFolderName,
             bracketIndex: currentBracketIndex,
@@ -748,7 +897,7 @@ export async function startProcessingSingleItem(
         }
         await fs.promises.rename(tempOutFile, outFile);
       } catch (error) {
-        const mergeError = error instanceof Error ? error.message : String(error);
+        const mergeError = mergeCliErrorText(error);
         return failedSingleItemSummary(
           bracketIndex,
           totalBrackets,
@@ -980,17 +1129,23 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
           snsInputs.map((p) => path.basename(p))
         );
 
+        if (snsInputs.length === 0) {
+          const emptyMessage = `Bracket ${currentBracketIndex} has no input files for SNS-HDR.`;
+          console.error("Merge CLI Error:", emptyMessage);
+          throw new Error(emptyMessage);
+        }
+
         const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...snsInputs];
         const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
         console.log(
-          `[processingEngine] Starting SNS-HDR CLI for bracket ${currentBracketIndex}: ${constructedCommandString}`
+          `[processingEngine] Starting SNS-HDR CLI for bracket ${currentBracketIndex} with ${snsInputs.length} file(s): ${constructedCommandString}`
         );
         assertCliExecutableExists(SNS_HDR_PATH, { envVar: "SNSHDR_PATH", label: "SNS-HDR" });
         try {
-          await spawnCliWithDiagnostics(SNS_HDR_PATH, snsArgs, {
-            logPrefix: "[CLI SNS-HDR]",
-            envVar: "SNSHDR_PATH",
-            label: "SNS-HDR",
+          await runSnsHdrMerge({
+            snsArgs,
+            outFile,
+            tempOutFile,
             context: {
               localFolderName,
               bracketIndex: currentBracketIndex,
@@ -1002,7 +1157,7 @@ export async function startProcessing(taskId: string, shootFolderPath: string): 
             },
           });
         } catch (error) {
-          const mergeError = error instanceof Error ? error.message : String(error);
+          const mergeError = mergeCliErrorText(error);
           throw new Error(`snsHDR failed on bracket ${currentBracketIndex}: ${mergeError}`);
         }
         if (fs.existsSync(outFile)) {

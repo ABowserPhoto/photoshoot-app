@@ -14,6 +14,9 @@ type ProcessSingleItemBody = {
   bracketIndex?: number;
   bracket_size?: number;
   forceRemerge?: boolean;
+  /** Full bracket filenames. Preview-skip state must not replace this list. */
+  files?: string[];
+  totalBrackets?: number;
 };
 
 type SingleItemProcessingSummary = {
@@ -105,6 +108,11 @@ export async function POST(request: Request) {
           ? body.bracket_size
           : null,
       forceRemerge: body.forceRemerge === true,
+      inputFiles: Array.isArray(body.files) ? body.files : undefined,
+      totalBrackets:
+        typeof body.totalBrackets === "number" && Number.isFinite(body.totalBrackets)
+          ? body.totalBrackets
+          : undefined,
     });
     return buildResponse(summary, { taskId, localFolderName });
   } catch (error) {

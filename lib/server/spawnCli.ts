@@ -10,6 +10,23 @@ export type CliRunResult = {
   stderr: string;
 };
 
+export class CliProcessError extends Error {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number | null;
+
+  constructor(
+    message: string,
+    details: { stdout: string; stderr: string; exitCode: number | null }
+  ) {
+    super(message);
+    this.name = "CliProcessError";
+    this.stdout = details.stdout;
+    this.stderr = details.stderr;
+    this.exitCode = details.exitCode;
+  }
+}
+
 export type SpawnCliOptions = {
   timeoutMs?: number;
   context?: Record<string, unknown>;
@@ -18,6 +35,10 @@ export type SpawnCliOptions = {
   verifyExists?: boolean;
   envVar?: string;
   label?: string;
+  /** Written to stdin then closed. Used to answer overwrite prompts (`y`). */
+  stdinText?: string;
+  /** Log the child stderr with `Merge CLI Error` when the process fails. */
+  emitMergeCliError?: boolean;
 };
 
 export function assertCliExecutableExists(
@@ -109,15 +130,30 @@ export function spawnCliWithDiagnostics(
       }
     };
 
+    const writeStdin = typeof options.stdinText === "string";
     try {
       child = spawn(command, args, {
         windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [writeStdin ? "pipe" : "ignore", "pipe", "pipe"],
       });
     } catch (syncError) {
       const message = syncError instanceof Error ? syncError.message : String(syncError);
-      reject(new Error(`CLI failed to spawn (${command}): ${message}`));
+      if (options.emitMergeCliError) {
+        console.error("Merge CLI Error:", message);
+      }
+      reject(
+        new CliProcessError(`CLI failed to spawn (${command}): ${message}`, {
+          stdout: "",
+          stderr: message,
+          exitCode: null,
+        })
+      );
       return;
+    }
+
+    if (writeStdin && child.stdin) {
+      child.stdin.write(options.stdinText ?? "");
+      child.stdin.end();
     }
 
     console.log(`${logPrefix} Process started (pid=${child.pid ?? "unknown"})`);
@@ -129,11 +165,17 @@ export function spawnCliWithDiagnostics(
         pid: child?.pid ?? null,
         ...(options.context ?? {}),
       });
+      if (options.emitMergeCliError) {
+        console.error("Merge CLI Error:", stderr);
+      }
       killChild();
       settle(() =>
         reject(
-          new Error(
-            `CLI timed out after ${Math.round(timeoutMs / 1000)}s: ${command} ${args.join(" ")}`
+          new CliProcessError(
+            `CLI timed out after ${Math.round(timeoutMs / 1000)}s: ${command} ${args.join(" ")}${
+              stderr.trim() ? ` | stderr=${stderr.trim().slice(0, 4000)}` : ""
+            }`,
+            { stdout, stderr, exitCode: null }
           )
         )
       );
@@ -158,12 +200,17 @@ export function spawnCliWithDiagnostics(
         error: error.message,
         ...(options.context ?? {}),
       });
+      const combinedStderr = [stderr, error.message].filter((part) => part.trim()).join("\n");
+      if (options.emitMergeCliError) {
+        console.error("Merge CLI Error:", combinedStderr);
+      }
       settle(() =>
         reject(
-          new Error(
+          new CliProcessError(
             `CLI failed to start (${command}): ${error.message}${
-              stderr.trim() ? ` | stderr=${stderr.trim().slice(0, 500)}` : ""
-            }`
+              stderr.trim() ? ` | stderr=${stderr.trim().slice(0, 4000)}` : ""
+            }`,
+            { stdout, stderr: combinedStderr, exitCode: null }
           )
         )
       );
@@ -182,12 +229,16 @@ export function spawnCliWithDiagnostics(
         signal,
         ...(options.context ?? {}),
       });
+      if (options.emitMergeCliError) {
+        console.error("Merge CLI Error:", stderr);
+      }
       settle(() =>
         reject(
-          new Error(
+          new CliProcessError(
             `CLI failed (exit=${code ?? "null"}${signal ? `, signal=${signal}` : ""}): ${command}${
-              stderr.trim() ? ` | stderr=${stderr.trim().slice(0, 500)}` : ""
-            }`
+              stderr.trim() ? ` | stderr=${stderr.trim().slice(0, 4000)}` : ""
+            }`,
+            { stdout, stderr, exitCode: code }
           )
         )
       );

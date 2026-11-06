@@ -36,7 +36,7 @@ function filenamesFromGalleryPreviews(
       ? ((galleryPreviews as { items: unknown[] }).items)
       : [];
 
-  const byChunk = new Map<number, string>();
+  const byChunk = new Map<number, string[]>();
   for (const item of items) {
     if (!item || typeof item !== "object") {
       continue;
@@ -45,9 +45,19 @@ function filenamesFromGalleryPreviews(
       chunkIndex?: unknown;
       firstFilename?: unknown;
       middleFilename?: unknown;
+      sourceFiles?: unknown;
     };
     const chunkIndex = Number(row.chunkIndex);
     if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      continue;
+    }
+    const sourceFiles = Array.isArray(row.sourceFiles)
+      ? row.sourceFiles
+          .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+          .map((name) => name.trim())
+      : [];
+    if (sourceFiles.length > 0) {
+      byChunk.set(chunkIndex, sourceFiles);
       continue;
     }
     const filename =
@@ -55,13 +65,11 @@ function filenamesFromGalleryPreviews(
       (typeof row.middleFilename === "string" && row.middleFilename.trim()) ||
       "";
     if (filename) {
-      byChunk.set(chunkIndex, filename);
+      byChunk.set(chunkIndex, [filename]);
     }
   }
 
-  return selectedIndices
-    .map((index) => byChunk.get(index))
-    .filter((name): name is string => Boolean(name));
+  return selectedIndices.flatMap((index) => byChunk.get(index) ?? []);
 }
 
 export async function POST(request: Request) {
