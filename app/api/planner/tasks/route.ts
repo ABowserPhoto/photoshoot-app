@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
+import type { SupabaseClient, User } from "@supabase/supabase-js";
 
 import { getAuthRole } from "@/lib/server/getAuthRole";
-import { isStudioTaskUnassigned, isUserOnStudioTask } from "@/lib/plannerAssignees";
+import {
+  appendCreatorCollaboratorIfMissing,
+  isStudioTaskUnassigned,
+  isUserOnStudioTask,
+  serializeAssignedUsers,
+  type PlannerAssignee,
+} from "@/lib/plannerAssignees";
 import { createRouteSupabaseClient, getSessionUser } from "@/lib/server/supabaseServer";
 
 export const dynamic = "force-dynamic";
@@ -126,6 +133,29 @@ function toNullableNumber(value: unknown): number | null {
   return null;
 }
 
+function creatorNameFromSources(
+  user: User,
+  profile: { full_name?: string | null; email?: string | null } | null
+): string {
+  if (profile) {
+    return profile.full_name?.trim() || profile.email?.trim() || user.id;
+  }
+  const meta = user.user_metadata as Record<string, unknown> | undefined;
+  const metaName = typeof meta?.full_name === "string" ? meta.full_name.trim() : "";
+  return user.email?.trim() || metaName || "You";
+}
+
+/** Display name for the signed-in creator, matching planner assignee labels. */
+async function resolveCreatorAssignee(sb: SupabaseClient, user: User): Promise<PlannerAssignee> {
+  const { data } = await sb
+    .from("profiles")
+    .select("full_name, email")
+    .eq("id", user.id)
+    .maybeSingle();
+  const profile = (data as { full_name?: string | null; email?: string | null } | null) ?? null;
+  return { id: user.id, name: creatorNameFromSources(user, profile) };
+}
+
 export async function POST(request: Request) {
   const auth = await getAuthRole();
   if (!auth.authenticated) {
@@ -155,6 +185,21 @@ export async function POST(request: Request) {
   const clientName = toNullableString(body.client_name);
   const totalFee = toNullableNumber(body.total_fee);
 
+  // Editors lose tasks assigned only to someone else after reload. Keep the
+  // creator as a collaborator unless they are already the primary assignee.
+  // Admins already see every task, so their assignee list stays empty here.
+  let assignedUsers: PlannerAssignee[] = [];
+  if (!auth.isAdmin) {
+    const sessionUser = await getSessionUser();
+    if (sessionUser?.id) {
+      const creator = await resolveCreatorAssignee(sb, sessionUser);
+      assignedUsers = appendCreatorCollaboratorIfMissing([], creator, {
+        assignedTo,
+        includeCreator: true,
+      });
+    }
+  }
+
   const { data, error } = await sb
     .from("studio_tasks")
     .insert({
@@ -175,7 +220,7 @@ export async function POST(request: Request) {
       is_auto_generated: false,
       photoshoot_id: null,
       subtasks: [],
-      assigned_users: [],
+      assigned_users: serializeAssignedUsers(assignedUsers),
     })
     .select("*")
     .single();
