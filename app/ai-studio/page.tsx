@@ -21,21 +21,31 @@ type ToolKey =
   | "text-to-photo"
   | "text-to-video";
 
-const EDIT_TOOLS: Array<{ key: ToolKey; label: string }> = [
-  { key: "material-replacement", label: "Material Replacement" },
-  { key: "object-swap", label: "Object Swap" },
-  { key: "object-removal", label: "Object Removal" },
-  { key: "relight", label: "Relight" },
-  { key: "radiance-hdr", label: "Radiance HDR" },
+type StudioTool = {
+  key: ToolKey;
+  label: string;
+  icon: string;
+};
+
+const EDIT_TOOLS: StudioTool[] = [
+  {
+    key: "material-replacement",
+    label: "Material Replacement",
+    icon: "/ai-studio-icons/material-replacement.webp",
+  },
+  { key: "object-swap", label: "Object Swap", icon: "/ai-studio-icons/object-swap.webp" },
+  { key: "object-removal", label: "Object Removal", icon: "/ai-studio-icons/object-removal.webp" },
+  { key: "relight", label: "Relight", icon: "/ai-studio-icons/relight.webp" },
+  { key: "radiance-hdr", label: "Radiance HDR", icon: "/ai-studio-icons/radiance-hdr.webp" },
 ];
 
-const GENERATION_TOOLS: Array<{ key: ToolKey; label: string }> = [
-  { key: "image-to-video", label: "Image to Video" },
-  { key: "text-to-photo", label: "Text to Photo" },
-  { key: "text-to-video", label: "Text to Video" },
+const GENERATION_TOOLS: StudioTool[] = [
+  { key: "image-to-video", label: "Image to Video", icon: "/ai-studio-icons/image-to-video.webp" },
+  { key: "text-to-photo", label: "Text to Photo", icon: "/ai-studio-icons/text-to-photo.webp" },
+  { key: "text-to-video", label: "Text to Video", icon: "/ai-studio-icons/text-to-video.webp" },
 ];
 
-const AI_TOOLS: Array<{ key: ToolKey; label: string }> = [...EDIT_TOOLS, ...GENERATION_TOOLS];
+const AI_TOOLS: StudioTool[] = [...EDIT_TOOLS, ...GENERATION_TOOLS];
 const EMPTY_PROMPTS: Record<ToolKey, string> = {
   "material-replacement": "",
   "object-swap": "",
@@ -246,6 +256,39 @@ const TOOL_PRESETS: Record<ToolKey, string[]> = {
     "Create an aerial-inspired reveal sequence of a luxury home interior",
   ],
 };
+
+function ToolPickerButton({
+  tool,
+  isActive,
+  onSelect,
+}: {
+  tool: StudioTool;
+  isActive: boolean;
+  onSelect: (key: ToolKey) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(tool.key)}
+      aria-label={tool.label}
+      aria-pressed={isActive}
+      title={tool.label}
+      className={`relative h-24 w-24 overflow-hidden rounded-lg p-0 transition ${
+        isActive
+          ? "ring-2 ring-zinc-100 shadow-md"
+          : "ring-1 ring-zinc-700 hover:ring-zinc-400"
+      }`}
+    >
+      <Image
+        src={tool.icon}
+        alt={tool.label}
+        fill
+        sizes="96px"
+        className="object-cover"
+      />
+    </button>
+  );
+}
 
 function AiStudioPageContent() {
   const router = useRouter();
@@ -1413,43 +1456,25 @@ function AiStudioPageContent() {
               Tools
             </h2>
             <div className="grid grid-cols-3 gap-2 justify-items-start">
-              {EDIT_TOOLS.map((tool) => {
-                const isActive = tool.key === activeTool;
-                return (
-                  <button
-                    key={tool.key}
-                    type="button"
-                    onClick={() => handleSetActiveTool(tool.key)}
-                    className={`h-24 w-24 rounded-lg border p-1 text-[10px] transition flex flex-col items-center justify-center text-center leading-tight ${
-                      isActive
-                        ? "border-zinc-900 bg-zinc-900 text-white shadow-md dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
-                        : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                    }`}
-                  >
-                    {tool.label}
-                  </button>
-                );
-              })}
+              {EDIT_TOOLS.map((tool) => (
+                <ToolPickerButton
+                  key={tool.key}
+                  tool={tool}
+                  isActive={tool.key === activeTool}
+                  onSelect={handleSetActiveTool}
+                />
+              ))}
             </div>
             <div className="my-3 border-t border-zinc-200 dark:border-zinc-800" />
             <div className="grid grid-cols-3 gap-2 justify-items-start">
-              {GENERATION_TOOLS.map((tool) => {
-                const isActive = tool.key === activeTool;
-                return (
-                  <button
-                    key={tool.key}
-                    type="button"
-                    onClick={() => handleSetActiveTool(tool.key)}
-                    className={`h-24 w-24 rounded-lg border p-1 text-[10px] transition flex flex-col items-center justify-center text-center leading-tight ${
-                      isActive
-                        ? "border-zinc-900 bg-zinc-900 text-white shadow-md dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
-                        : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                    }`}
-                  >
-                    {tool.label}
-                  </button>
-                );
-              })}
+              {GENERATION_TOOLS.map((tool) => (
+                <ToolPickerButton
+                  key={tool.key}
+                  tool={tool}
+                  isActive={tool.key === activeTool}
+                  onSelect={handleSetActiveTool}
+                />
+              ))}
             </div>
 
             <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950/60">

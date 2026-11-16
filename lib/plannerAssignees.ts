@@ -48,6 +48,41 @@ export function appendCurrentUserIfMissing(
 }
 
 /**
+ * Adds the signed-in creator to `assigned_users` when they are neither the
+ * primary assignee nor an existing collaborator.
+ * Pass `includeCreator: false` for admins so their assignee lists stay unchanged.
+ */
+export function appendCreatorCollaboratorIfMissing(
+  assignedUsers: PlannerAssignee[],
+  creator: PlannerAssignee | null,
+  options?: {
+    assignedTo?: string | null;
+    includeCreator?: boolean;
+  }
+): PlannerAssignee[] {
+  if (options?.includeCreator === false) {
+    return assignedUsers;
+  }
+  const creatorId = creator?.id?.trim() ?? "";
+  if (!creatorId) {
+    return assignedUsers;
+  }
+  const primaryId = typeof options?.assignedTo === "string" ? options.assignedTo.trim() : "";
+  if (primaryId === creatorId) {
+    return assignedUsers;
+  }
+  const normalizedCreator: PlannerAssignee =
+    creator && creator.id === creatorId
+      ? creator
+      : {
+          id: creatorId,
+          name: creator?.name?.trim() || "You",
+          ...(creator?.avatar ? { avatar: creator.avatar } : {}),
+        };
+  return appendCurrentUserIfMissing(assignedUsers, normalizedCreator);
+}
+
+/**
  * True when there is no primary assignee and no collaborators.
  */
 export function isStudioTaskUnassigned(params: {
