@@ -2815,8 +2815,7 @@ export default function PlannerPage() {
             </div>
           </aside>
 
-          <div className="min-w-0 overflow-x-auto pb-3 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-black [&::-webkit-scrollbar-thumb]:bg-zinc-600">
-            <div className="inline-flex min-w-max flex-nowrap gap-4">
+          <div className="flex w-full min-w-0 flex-nowrap items-stretch gap-4 overflow-x-auto pb-3 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-black [&::-webkit-scrollbar-thumb]:bg-zinc-600">
               {COLUMN_CONFIG.map((column) => {
                 const isActive = activeDropColumn === column.id;
                 const isCollapsed = isColumnCollapsed(column.id);
@@ -2832,8 +2831,10 @@ export default function PlannerPage() {
                       event.preventDefault();
                       handleDrop(column.id);
                     }}
-                    className={`h-[70vh] shrink-0 rounded-xl border bg-white p-3 shadow-sm transition-all dark:bg-zinc-900 ${
-                      isCollapsed ? "w-12 min-w-[3rem]" : "min-w-[300px] w-[300px]"
+                    className={`h-[70vh] rounded-xl border bg-white p-3 shadow-sm transition-all dark:bg-zinc-900 ${
+                      isCollapsed
+                        ? "w-12 min-w-[3rem] shrink-0"
+                        : "max-lg:w-[300px] max-lg:min-w-[300px] max-lg:shrink-0 lg:w-auto lg:min-w-[16rem] lg:flex-1"
                     } ${
                       isActive
                         ? "border-zinc-500 bg-zinc-100/80 dark:border-zinc-500 dark:bg-zinc-800/80"
@@ -2848,7 +2849,7 @@ export default function PlannerPage() {
                       ) : (
                         <>
                           <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{column.title}</h2>
-                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 lg:ml-auto dark:bg-zinc-800 dark:text-zinc-300">
                             {board[column.id].length}
                           </span>
                         </>
@@ -3006,7 +3007,6 @@ export default function PlannerPage() {
                   </section>
                 );
               })}
-            </div>
           </div>
         </div>
       </main>
