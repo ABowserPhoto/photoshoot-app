@@ -2533,7 +2533,11 @@ export default function PlannerPage() {
           }))}
         />
 
-        <div className="grid min-w-0 gap-4 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-24">
+        <div className="relative grid min-w-0 gap-4 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-24">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute top-0 left-[calc(320px+2rem)] hidden h-[70vh] w-px -translate-x-1/2 border-l border-zinc-200 lg:block"
+          />
           <aside className="planner-master-column h-[70vh] rounded-xl border border-zinc-900 p-3 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Master To-Do List</h2>
