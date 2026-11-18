@@ -2,7 +2,45 @@ export type PlannerAssignee = {
   id: string;
   name: string;
   avatar?: string;
+  /**
+   * `profiles.role` for picker options loaded from the directory.
+   * Omitted when an assignee is saved on a task.
+   */
+  role?: string | null;
+  /** Present only on directory rows. Archived profiles are not selectable. */
+  is_archived?: boolean | null;
 };
+
+function normalizedProfileRole(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+/** True when `profiles.role` is the external client login, ignoring case and surrounding space. */
+export function isClientProfileRole(value: unknown): boolean {
+  return normalizedProfileRole(value) === "client";
+}
+
+/**
+ * Active staff and team profiles that may appear in planner user pickers.
+ * Client logins and archived profiles are excluded. Every other role
+ * (admin, staff, editor, team, owner, and similar) stays selectable.
+ */
+export function isSelectablePlannerStaffProfile(profile: {
+  role?: unknown;
+  is_archived?: boolean | null;
+}): boolean {
+  if (profile.is_archived === true) return false;
+  if (isClientProfileRole(profile.role)) return false;
+  return true;
+}
+
+export function filterPlannerStaffProfiles<
+  T extends { role?: unknown; is_archived?: boolean | null },
+>(rows: readonly T[]): T[] {
+  return rows.filter((row) => isSelectablePlannerStaffProfile(row));
+}
 
 export function parseAssignedUsers(value: unknown): PlannerAssignee[] {
   if (!Array.isArray(value)) {

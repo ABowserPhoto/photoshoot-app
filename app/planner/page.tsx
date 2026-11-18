@@ -19,6 +19,8 @@ import {
   appendCreatorCollaboratorIfMissing,
   appendCurrentUserIfMissing,
   ensurePrimaryInAssignedUsers,
+  filterPlannerStaffProfiles,
+  isSelectablePlannerStaffProfile,
   isStudioTaskUnassigned,
   isUserOnStudioTask,
   parseAssignedUsers,
@@ -116,6 +118,8 @@ type ProfileRow = {
   id: string;
   email: string | null;
   full_name: string | null;
+  role?: string | null;
+  is_archived?: boolean | null;
 };
 
 type StudioTaskRow = {
@@ -438,7 +442,12 @@ function derivePlannerIsPaused(
 
 function profileRowToAssignee(row: ProfileRow): PlannerAssignee {
   const name = row.full_name?.trim() || row.email?.trim() || row.id;
-  return { id: row.id, name };
+  return {
+    id: row.id,
+    name,
+    ...(typeof row.role === "string" ? { role: row.role } : {}),
+    ...(row.is_archived === true ? { is_archived: true } : {}),
+  };
 }
 
 function mapRowToTask(row: StudioTaskRow): PlannerTask {
@@ -559,7 +568,6 @@ export default function PlannerPage() {
 
       const { data: authData } = await supabase.auth.getUser();
       const uid = authData.user?.id ?? null;
-      const sessionUserLabel = authData.user?.user_metadata?.full_name ?? authData.user?.email ?? "You";
       if (isMounted) {
         setPlannerUserId(uid);
       }
@@ -614,12 +622,10 @@ export default function PlannerPage() {
         }
       } else {
         const profileRows = (profilesResult.data ?? []) as ProfileRow[];
-        const assignees = [...profileRows]
+        // Drop client and archived rows again in case the directory response regresses.
+        const assignees = filterPlannerStaffProfiles(profileRows)
           .map(profileRowToAssignee)
           .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
-        if (uid && !assignees.some((assignee) => assignee.id === uid)) {
-          assignees.push({ id: uid, name: String(sessionUserLabel).trim() || "You" });
-        }
         if (isMounted) {
           setProfileAssignees(assignees);
         }
@@ -852,16 +858,32 @@ export default function PlannerPage() {
     [board.completed]
   );
 
+  const staffAssignees = useMemo(
+    () => profileAssignees.filter((assignee) => isSelectablePlannerStaffProfile(assignee)),
+    [profileAssignees]
+  );
+  const staffAssigneeIds = useMemo(
+    () => new Set(staffAssignees.map((assignee) => assignee.id)),
+    [staffAssignees]
+  );
+  if (
+    !loadingTasks &&
+    adminAssigneeFilter !== "all" &&
+    !staffAssigneeIds.has(adminAssigneeFilter)
+  ) {
+    setAdminAssigneeFilter("all");
+  }
+
   const currentPlannerMember = useMemo((): PlannerAssignee | null => {
     if (!plannerUserId) {
       return null;
     }
-    const fromProfiles = profileAssignees.find((p) => p.id === plannerUserId);
+    const fromProfiles = staffAssignees.find((p) => p.id === plannerUserId);
     if (fromProfiles) {
       return fromProfiles;
     }
     return { id: plannerUserId, name: "You" };
-  }, [plannerUserId, profileAssignees]);
+  }, [plannerUserId, staffAssignees]);
 
   const formatDuration = (seconds: number): string => {
     const safe = Math.max(0, Math.floor(seconds));
@@ -2480,7 +2502,7 @@ export default function PlannerPage() {
                     className="h-9 rounded-md border border-zinc-300 bg-white px-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                   >
                     <option value="all">All employees</option>
-                    {profileAssignees.map((assignee) => (
+                    {staffAssignees.map((assignee) => (
                       <option key={assignee.id} value={assignee.id}>
                         {assignee.name}
                       </option>
@@ -3021,7 +3043,7 @@ export default function PlannerPage() {
         mode={modalMode}
         templates={templates}
         photoshootOptions={photoshootOptions}
-        assigneeOptions={profileAssignees}
+        assigneeOptions={staffAssignees}
         isOpen={modalOpen}
         isAdmin={isAdmin}
         onClose={closeTaskModal}

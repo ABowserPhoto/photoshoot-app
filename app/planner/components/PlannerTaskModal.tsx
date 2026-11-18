@@ -11,7 +11,11 @@ import {
   STD_PREPARE_ID as STD_PREPARE_REF,
   STD_TODO_ID as STD_TODO_REF,
 } from "@/lib/plannerStandardSubtasks";
-import type { PlannerAssignee } from "@/lib/plannerAssignees";
+import {
+  isClientProfileRole,
+  isSelectablePlannerStaffProfile,
+  type PlannerAssignee,
+} from "@/lib/plannerAssignees";
 import { getDirectoryFromFilePath, getElectronFilePath } from "@/lib/plannerFilePath";
 
 export const STD_PREPARE_ID = STD_PREPARE_REF;
@@ -155,31 +159,37 @@ export default function PlannerTaskModal({
   const [newSubtaskText, setNewSubtaskText] = useState("");
   const [isFileDropzoneActive, setIsFileDropzoneActive] = useState(false);
 
-  // Keep archived assignees visible when editing historical tasks.
+  // Keep archived staff visible when editing historical tasks. Client logins stay out
+  // of both the primary assignee menu and the collaborator list.
   const effectiveAssigneeOptions = useMemo(() => {
+    const blockedIds = new Set(
+      assigneeOptions
+        .filter((user) => !isSelectablePlannerStaffProfile(user))
+        .map((user) => user.id)
+    );
     const byId = new Map<string, PlannerAssignee>();
-    for (const u of assigneeOptions) {
-      byId.set(u.id, u);
+    for (const user of assigneeOptions) {
+      if (!isSelectablePlannerStaffProfile(user)) continue;
+      byId.set(user.id, user);
     }
-    if (assignedTo && !byId.has(assignedTo)) {
-      const fromHistory = (task?.assignedUsers ?? []).find((u) => u.id === assignedTo);
-      byId.set(assignedTo, {
-        id: assignedTo,
-        name: fromHistory?.name
-          ? `${fromHistory.name} (archived)`
-          : `Archived user (${assignedTo.slice(0, 8)}…)`,
+    const addHistoricalStaff = (id: string, user: PlannerAssignee | undefined) => {
+      if (!id || byId.has(id) || blockedIds.has(id) || isClientProfileRole(user?.role)) return;
+      byId.set(id, {
+        id,
+        name: user?.name ? `${user.name} (archived)` : `Archived user (${id.slice(0, 8)}…)`,
+        ...(user?.avatar ? { avatar: user.avatar } : {}),
       });
+    };
+    if (assignedTo) {
+      addHistoricalStaff(
+        assignedTo,
+        (task?.assignedUsers ?? []).find((user) => user.id === assignedTo)
+      );
     }
-    for (const u of assignedUsers) {
-      if (!byId.has(u.id)) {
-        byId.set(u.id, {
-          id: u.id,
-          name: `${u.name} (archived)`,
-          ...(u.avatar ? { avatar: u.avatar } : {}),
-        });
-      }
+    for (const user of assignedUsers) {
+      addHistoricalStaff(user.id, user);
     }
-    return Array.from(byId.values());
+    return Array.from(byId.values()).filter((user) => !isClientProfileRole(user.role));
   }, [assigneeOptions, assignedTo, assignedUsers, task?.assignedUsers]);
 
   const toggleCollaborator = (user: PlannerAssignee) => {

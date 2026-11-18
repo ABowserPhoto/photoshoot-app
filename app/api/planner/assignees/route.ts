@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+import { filterPlannerStaffProfiles } from "@/lib/plannerAssignees";
 import { getAuthRole } from "@/lib/server/getAuthRole";
 
 export const dynamic = "force-dynamic";
@@ -27,29 +28,49 @@ export async function GET() {
     return NextResponse.json({ error: "Database is not configured." }, { status: 503 });
   }
 
-  // Active assignees only — archived profiles stay in DB for historical name resolution.
+  // Staff and team accounts only. Client logins live in profiles.role = 'client'
+  // and must never be offered as task assignees. Archived profiles stay in the
+  // database so historical tasks can still resolve names.
   const { data, error } = await sb
     .from("profiles")
-    .select("id, email, full_name, is_archived")
+    .select("id, email, full_name, role, is_archived")
     .or("is_archived.eq.false,is_archived.is.null")
+    .not("role", "ilike", "client")
     .order("full_name");
 
   if (error) {
-    // Older DBs without is_archived: return all profiles.
+    // Older DBs without is_archived still must not return client logins.
     if (/is_archived|column|schema|Could not find/i.test(error.message)) {
-      const retry = await sb.from("profiles").select("id, email, full_name").order("full_name");
+      const retry = await sb
+        .from("profiles")
+        .select("id, email, full_name, role")
+        .not("role", "ilike", "client")
+        .order("full_name");
       if (retry.error) {
         return NextResponse.json({ error: retry.error.message }, { status: 500 });
       }
-      return NextResponse.json({ data: retry.data ?? [] });
+      return NextResponse.json({ data: toAssigneePayload(retry.data ?? []) });
     }
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const rows = (data ?? []).map((row) => {
-    const r = row as { id: string; email: string | null; full_name: string | null };
-    return { id: r.id, email: r.email, full_name: r.full_name };
-  });
+  return NextResponse.json({ data: toAssigneePayload(data ?? []) });
+}
 
-  return NextResponse.json({ data: rows });
+type AssigneeProfileRow = {
+  id: string;
+  email: string | null;
+  full_name: string | null;
+  role?: string | null;
+  is_archived?: boolean | null;
+};
+
+function toAssigneePayload(rows: AssigneeProfileRow[]) {
+  return filterPlannerStaffProfiles(rows).map((row) => ({
+    id: row.id,
+    email: row.email ?? null,
+    full_name: row.full_name ?? null,
+    role: typeof row.role === "string" ? row.role : null,
+    is_archived: row.is_archived === true,
+  }));
 }
