@@ -55,6 +55,14 @@ const RichTextEditor = dynamic(() => import("@/app/components/RichTextEditor"), 
   ),
 });
 
+/**
+ * Sidebar row actions stay hover-reveal for a mouse on md+ screens.
+ * Touch (`hover: none` / `pointer: coarse`) and the narrow layout always show them,
+ * with a 36px target. Keyboard focus inside the row reveals them too.
+ */
+const ROW_ACTION_VISIBILITY =
+  "opacity-0 max-md:opacity-100 [@media(hover:none)]:h-9 [@media(hover:none)]:w-9 [@media(hover:none)]:opacity-100 [@media(pointer:coarse)]:h-9 [@media(pointer:coarse)]:w-9 [@media(pointer:coarse)]:opacity-100";
+
 type FullNote = NoteRecord;
 
 function toErrorMessage(error: unknown, fallback: string) {
@@ -662,7 +670,7 @@ function NotesPageContent() {
                         type="button"
                         title="New note"
                         onClick={() => void createNote(nb.id)}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-400 opacity-0 hover:bg-zinc-800 hover:text-zinc-100 group-hover:opacity-100"
+                        className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 ${ROW_ACTION_VISIBILITY} group-hover:opacity-100 group-focus-within:opacity-100`}
                       >
                         <Plus className="h-3.5 w-3.5" />
                       </button>
@@ -671,7 +679,7 @@ function NotesPageContent() {
                           type="button"
                           title="Notebook settings"
                           onClick={() => openEditNotebookModal(nb)}
-                          className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-400 opacity-0 hover:bg-zinc-800 hover:text-zinc-100 group-hover:opacity-100"
+                          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 ${ROW_ACTION_VISIBILITY} group-hover:opacity-100 group-focus-within:opacity-100`}
                         >
                           <Settings2 className="h-3.5 w-3.5" />
                         </button>
@@ -681,7 +689,7 @@ function NotesPageContent() {
                           type="button"
                           title="Delete notebook"
                           onClick={() => void deleteNotebook(nb.id)}
-                          className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-500 opacity-0 hover:bg-red-950/50 hover:text-red-300 group-hover:opacity-100"
+                          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-red-950/50 hover:text-red-300 ${ROW_ACTION_VISIBILITY} group-hover:opacity-100 group-focus-within:opacity-100`}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -723,7 +731,7 @@ function NotesPageContent() {
                                   type="button"
                                   title="Delete note"
                                   onClick={() => void deleteNote(note.id)}
-                                  className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-500 opacity-0 hover:bg-red-950/50 hover:text-red-300 group-hover/note:opacity-100"
+                                  className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-red-950/50 hover:text-red-300 ${ROW_ACTION_VISIBILITY} group-hover/note:opacity-100 group-focus-within/note:opacity-100`}
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
