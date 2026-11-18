@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-import { filterPlannerStaffProfiles } from "@/lib/plannerAssignees";
+import { clientAccountIdSet, filterPlannerStaffProfiles } from "@/lib/plannerAssignees";
 import { getAuthRole } from "@/lib/server/getAuthRole";
 
 export const dynamic = "force-dynamic";
@@ -29,32 +29,64 @@ export async function GET() {
   }
 
   // Staff and team accounts only. Client logins live in profiles.role = 'client'
-  // and must never be offered as task assignees. Archived profiles stay in the
-  // database so historical tasks can still resolve names.
-  const { data, error } = await sb
+  // and on clients.user_id. Archived profiles stay in the database so historical
+  // tasks can still resolve names, but they are not picker options.
+  const [profilesResult, clientIds] = await Promise.all([
+    loadStaffProfileRows(sb),
+    loadClientAccountIds(sb),
+  ]);
+
+  if (profilesResult.error) {
+    return NextResponse.json({ error: profilesResult.error }, { status: 500 });
+  }
+
+  return NextResponse.json(
+    { data: toAssigneePayload(profilesResult.rows, clientIds) },
+    { headers: { "Cache-Control": "private, no-store" } }
+  );
+}
+
+type ServiceClient = NonNullable<ReturnType<typeof serviceSupabase>>;
+
+async function loadStaffProfileRows(
+  sb: ServiceClient
+): Promise<{ rows: AssigneeProfileRow[]; error: string | null }> {
+  const primary = await sb
     .from("profiles")
     .select("id, email, full_name, role, is_archived")
     .or("is_archived.eq.false,is_archived.is.null")
+    .not("role", "is", null)
     .not("role", "ilike", "client")
     .order("full_name");
 
-  if (error) {
-    // Older DBs without is_archived still must not return client logins.
-    if (/is_archived|column|schema|Could not find/i.test(error.message)) {
-      const retry = await sb
-        .from("profiles")
-        .select("id, email, full_name, role")
-        .not("role", "ilike", "client")
-        .order("full_name");
-      if (retry.error) {
-        return NextResponse.json({ error: retry.error.message }, { status: 500 });
-      }
-      return NextResponse.json({ data: toAssigneePayload(retry.data ?? []) });
-    }
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  if (!primary.error) {
+    return { rows: (primary.data ?? []) as AssigneeProfileRow[], error: null };
   }
 
-  return NextResponse.json({ data: toAssigneePayload(data ?? []) });
+  // Older DBs without is_archived still must not return client logins.
+  if (/is_archived|schema cache|Could not find/i.test(primary.error.message)) {
+    const retry = await sb
+      .from("profiles")
+      .select("id, email, full_name, role")
+      .not("role", "is", null)
+      .not("role", "ilike", "client")
+      .order("full_name");
+    if (retry.error) {
+      return { rows: [], error: retry.error.message };
+    }
+    return { rows: (retry.data ?? []) as AssigneeProfileRow[], error: null };
+  }
+
+  return { rows: [], error: primary.error.message };
+}
+
+async function loadClientAccountIds(sb: ServiceClient): Promise<Set<string>> {
+  const { data, error } = await sb.from("clients").select("user_id");
+  if (error) {
+    console.warn("[planner/assignees] clients lookup skipped:", error.message);
+    return new Set();
+  }
+  return clientAccountIdSet((data ?? []) as { user_id?: unknown }[]);
 }
 
 type AssigneeProfileRow = {
@@ -65,8 +97,8 @@ type AssigneeProfileRow = {
   is_archived?: boolean | null;
 };
 
-function toAssigneePayload(rows: AssigneeProfileRow[]) {
-  return filterPlannerStaffProfiles(rows).map((row) => ({
+function toAssigneePayload(rows: AssigneeProfileRow[], clientAccountIds: ReadonlySet<string>) {
+  return filterPlannerStaffProfiles(rows, clientAccountIds).map((row) => ({
     id: row.id,
     email: row.email ?? null,
     full_name: row.full_name ?? null,
