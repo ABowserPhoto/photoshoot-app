@@ -136,7 +136,10 @@ function NotesPageContent() {
     let cancelled = false;
     void (async () => {
       try {
-        const response = await fetch("/api/planner/assignees");
+        const response = await fetch("/api/planner/assignees", {
+          cache: "no-store",
+          credentials: "include",
+        });
         const payload = (await response.json().catch(() => null)) as
           | { data?: RecipientOption[]; error?: string }
           | null;

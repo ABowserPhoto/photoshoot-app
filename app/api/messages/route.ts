@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { clientAccountIdSet, isSelectablePlannerStaffProfile } from "@/lib/plannerAssignees";
 import {
   getMessageAuth,
   getMessagesSupabase,
@@ -61,11 +62,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Cannot send a message to yourself." }, { status: 400 });
   }
 
-  const { data: recipient, error: recipientError } = await sb
-    .from("profiles")
-    .select("id, full_name, email, is_archived")
-    .eq("id", recipientId)
-    .maybeSingle();
+  const [{ data: recipient, error: recipientError }, clientLink] = await Promise.all([
+    sb
+      .from("profiles")
+      .select("id, full_name, email, role, is_archived")
+      .eq("id", recipientId)
+      .maybeSingle(),
+    sb.from("clients").select("user_id").eq("user_id", recipientId).maybeSingle(),
+  ]);
 
   if (recipientError) {
     return NextResponse.json({ error: recipientError.message }, { status: 500 });
@@ -77,10 +81,19 @@ export async function POST(request: Request) {
     id: string;
     full_name?: string | null;
     email?: string | null;
+    role?: string | null;
     is_archived?: boolean;
   };
-  if (recipientRow.is_archived === true) {
-    return NextResponse.json({ error: "Recipient is archived." }, { status: 400 });
+  const linkedClientIds = clientLink.error
+    ? new Set<string>()
+    : clientAccountIdSet(
+        clientLink.data ? [clientLink.data as { user_id?: unknown }] : []
+      );
+  if (!isSelectablePlannerStaffProfile(recipientRow, linkedClientIds)) {
+    return NextResponse.json(
+      { error: "Choose an active staff account." },
+      { status: 400 }
+    );
   }
 
   const recipientLabel =

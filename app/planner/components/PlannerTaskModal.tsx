@@ -12,8 +12,7 @@ import {
   STD_TODO_ID as STD_TODO_REF,
 } from "@/lib/plannerStandardSubtasks";
 import {
-  isClientProfileRole,
-  isSelectablePlannerStaffProfile,
+  filterPlannerStaffProfiles,
   type PlannerAssignee,
 } from "@/lib/plannerAssignees";
 import { getDirectoryFromFilePath, getElectronFilePath } from "@/lib/plannerFilePath";
@@ -159,38 +158,13 @@ export default function PlannerTaskModal({
   const [newSubtaskText, setNewSubtaskText] = useState("");
   const [isFileDropzoneActive, setIsFileDropzoneActive] = useState(false);
 
-  // Keep archived staff visible when editing historical tasks. Client logins stay out
-  // of both the primary assignee menu and the collaborator list.
-  const effectiveAssigneeOptions = useMemo(() => {
-    const blockedIds = new Set(
-      assigneeOptions
-        .filter((user) => !isSelectablePlannerStaffProfile(user))
-        .map((user) => user.id)
-    );
-    const byId = new Map<string, PlannerAssignee>();
-    for (const user of assigneeOptions) {
-      if (!isSelectablePlannerStaffProfile(user)) continue;
-      byId.set(user.id, user);
-    }
-    const addHistoricalStaff = (id: string, user: PlannerAssignee | undefined) => {
-      if (!id || byId.has(id) || blockedIds.has(id) || isClientProfileRole(user?.role)) return;
-      byId.set(id, {
-        id,
-        name: user?.name ? `${user.name} (archived)` : `Archived user (${id.slice(0, 8)}…)`,
-        ...(user?.avatar ? { avatar: user.avatar } : {}),
-      });
-    };
-    if (assignedTo) {
-      addHistoricalStaff(
-        assignedTo,
-        (task?.assignedUsers ?? []).find((user) => user.id === assignedTo)
-      );
-    }
-    for (const user of assignedUsers) {
-      addHistoricalStaff(user.id, user);
-    }
-    return Array.from(byId.values()).filter((user) => !isClientProfileRole(user.role));
-  }, [assigneeOptions, assignedTo, assignedUsers, task?.assignedUsers]);
+  // Directory staff only. Saved task assignees are not merged in: a client collaborator
+  // has no role on the card, and must not become a menu option. Card initials still
+  // render from the task's saved assigned users.
+  const effectiveAssigneeOptions = useMemo(
+    () => filterPlannerStaffProfiles(assigneeOptions),
+    [assigneeOptions]
+  );
 
   const toggleCollaborator = (user: PlannerAssignee) => {
     setAssignedUsers((prev) => {

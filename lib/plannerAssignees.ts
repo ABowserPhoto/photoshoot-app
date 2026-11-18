@@ -23,23 +23,55 @@ export function isClientProfileRole(value: unknown): boolean {
 }
 
 /**
- * Active staff and team profiles that may appear in planner user pickers.
- * Client logins and archived profiles are excluded. Every other role
- * (admin, staff, editor, team, owner, and similar) stays selectable.
+ * Staff and team roles that may be offered in a user picker.
+ * Admin, editor, staff, team, owner, and any other non-client role qualify.
+ * A blank role does not: a directory row that omits `role` must not become selectable.
  */
-export function isSelectablePlannerStaffProfile(profile: {
+export function isStaffProfileRole(value: unknown): boolean {
+  const role = normalizedProfileRole(value);
+  if (!role) return false;
+  return role !== "client";
+}
+
+export function clientAccountIdSet(
+  rows: readonly { user_id?: unknown }[] | null | undefined
+): Set<string> {
+  const ids = new Set<string>();
+  for (const row of rows ?? []) {
+    if (typeof row?.user_id !== "string") continue;
+    const id = row.user_id.trim();
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+type StaffProfileShape = {
+  id?: unknown;
   role?: unknown;
   is_archived?: boolean | null;
-}): boolean {
+};
+
+/**
+ * Single source for every staff/user picker.
+ * Selectable accounts are active (not archived) and have a non-client staff role.
+ * Ids linked from `clients.user_id` are client logins even if `profiles.role` is wrong.
+ */
+export function isSelectablePlannerStaffProfile(
+  profile: StaffProfileShape,
+  clientAccountIds?: ReadonlySet<string>
+): boolean {
   if (profile.is_archived === true) return false;
-  if (isClientProfileRole(profile.role)) return false;
+  if (!isStaffProfileRole(profile.role)) return false;
+  const id = typeof profile.id === "string" ? profile.id.trim() : "";
+  if (id && clientAccountIds?.has(id)) return false;
   return true;
 }
 
-export function filterPlannerStaffProfiles<
-  T extends { role?: unknown; is_archived?: boolean | null },
->(rows: readonly T[]): T[] {
-  return rows.filter((row) => isSelectablePlannerStaffProfile(row));
+export function filterPlannerStaffProfiles<T extends StaffProfileShape>(
+  rows: readonly T[],
+  clientAccountIds?: ReadonlySet<string>
+): T[] {
+  return rows.filter((row) => isSelectablePlannerStaffProfile(row, clientAccountIds));
 }
 
 export function parseAssignedUsers(value: unknown): PlannerAssignee[] {
