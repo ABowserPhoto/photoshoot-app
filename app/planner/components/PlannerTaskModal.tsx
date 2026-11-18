@@ -11,7 +11,10 @@ import {
   STD_PREPARE_ID as STD_PREPARE_REF,
   STD_TODO_ID as STD_TODO_REF,
 } from "@/lib/plannerStandardSubtasks";
-import type { PlannerAssignee } from "@/lib/plannerAssignees";
+import {
+  filterPlannerStaffProfiles,
+  type PlannerAssignee,
+} from "@/lib/plannerAssignees";
 import { getDirectoryFromFilePath, getElectronFilePath } from "@/lib/plannerFilePath";
 
 export const STD_PREPARE_ID = STD_PREPARE_REF;
@@ -155,32 +158,13 @@ export default function PlannerTaskModal({
   const [newSubtaskText, setNewSubtaskText] = useState("");
   const [isFileDropzoneActive, setIsFileDropzoneActive] = useState(false);
 
-  // Keep archived assignees visible when editing historical tasks.
-  const effectiveAssigneeOptions = useMemo(() => {
-    const byId = new Map<string, PlannerAssignee>();
-    for (const u of assigneeOptions) {
-      byId.set(u.id, u);
-    }
-    if (assignedTo && !byId.has(assignedTo)) {
-      const fromHistory = (task?.assignedUsers ?? []).find((u) => u.id === assignedTo);
-      byId.set(assignedTo, {
-        id: assignedTo,
-        name: fromHistory?.name
-          ? `${fromHistory.name} (archived)`
-          : `Archived user (${assignedTo.slice(0, 8)}…)`,
-      });
-    }
-    for (const u of assignedUsers) {
-      if (!byId.has(u.id)) {
-        byId.set(u.id, {
-          id: u.id,
-          name: `${u.name} (archived)`,
-          ...(u.avatar ? { avatar: u.avatar } : {}),
-        });
-      }
-    }
-    return Array.from(byId.values());
-  }, [assigneeOptions, assignedTo, assignedUsers, task?.assignedUsers]);
+  // Directory staff only. Saved task assignees are not merged in: a client collaborator
+  // has no role on the card, and must not become a menu option. Card initials still
+  // render from the task's saved assigned users.
+  const effectiveAssigneeOptions = useMemo(
+    () => filterPlannerStaffProfiles(assigneeOptions),
+    [assigneeOptions]
+  );
 
   const toggleCollaborator = (user: PlannerAssignee) => {
     setAssignedUsers((prev) => {

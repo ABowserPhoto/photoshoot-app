@@ -3,6 +3,7 @@
 import { createClient } from "@supabase/supabase-js";
 
 import { canAccessModule } from "@/lib/appModules";
+import { clientAccountIdSet, filterPlannerStaffProfiles } from "@/lib/plannerAssignees";
 import { closeStaleOpenShiftsInternal } from "@/lib/server/closeStaleShifts";
 import { getAuthRole } from "@/lib/server/getAuthRole";
 import {
@@ -424,11 +425,33 @@ export async function getProductivityTeamUsers(): Promise<
     return { ok: false, error: "Database is not configured." };
   }
 
-  const profileMap = await loadProfileMap(sb);
-  const users = [...profileMap.entries()]
-    .map(([id, profile]) => ({
-      id,
-      name: profile.name,
+  const [profilesResult, clientsResult] = await Promise.all([
+    sb.from("profiles").select("id, full_name, email, role, is_archived"),
+    sb.from("clients").select("user_id"),
+  ]);
+  if (profilesResult.error) {
+    return { ok: false, error: profilesResult.error.message };
+  }
+
+  const clientAccountIds = clientsResult.error
+    ? new Set<string>()
+    : clientAccountIdSet((clientsResult.data ?? []) as { user_id?: unknown }[]);
+  const users = filterPlannerStaffProfiles(
+    (profilesResult.data ?? []) as {
+      id: string;
+      full_name: string | null;
+      email: string | null;
+      role?: string | null;
+      is_archived?: boolean | null;
+    }[],
+    clientAccountIds
+  )
+    .map((profile) => ({
+      id: profile.id,
+      name:
+        profile.full_name?.trim() ||
+        profile.email?.trim() ||
+        profile.id.slice(0, 8),
       email: profile.email,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));

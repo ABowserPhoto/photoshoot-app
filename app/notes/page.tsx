@@ -24,6 +24,7 @@ import { useSearchParams } from "next/navigation";
 import { getAllMoodboards, type MoodboardSummary } from "@/app/actions/moodboard";
 import NoteAccessControlFields from "@/app/components/NoteAccessControlFields";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
+import { isSelectablePlannerStaffProfile } from "@/lib/plannerAssignees";
 import type {
   NotebookAccessLevel,
   NotebookWithNotes,
@@ -35,6 +36,8 @@ type RecipientOption = {
   id: string;
   email: string | null;
   full_name: string | null;
+  role?: string | null;
+  is_archived?: boolean | null;
 };
 
 type NotebookFormState = {
@@ -133,12 +136,16 @@ function NotesPageContent() {
     let cancelled = false;
     void (async () => {
       try {
-        const response = await fetch("/api/planner/assignees");
+        const response = await fetch("/api/planner/assignees", {
+          cache: "no-store",
+          credentials: "include",
+        });
         const payload = (await response.json().catch(() => null)) as
           | { data?: RecipientOption[]; error?: string }
           | null;
         if (!response.ok || cancelled) return;
-        setRecipients(payload?.data ?? []);
+        const employees = (payload?.data ?? []).filter((user) => isSelectablePlannerStaffProfile(user));
+        setRecipients(employees);
       } catch {
         if (!cancelled) setRecipients([]);
       }
