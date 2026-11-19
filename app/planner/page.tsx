@@ -2533,10 +2533,10 @@ export default function PlannerPage() {
           }))}
         />
 
-        <div className="relative grid min-w-0 gap-4 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-24">
+        <div className="relative grid min-w-0 gap-4 lg:grid-cols-[392px_minmax(0,1fr)] lg:gap-24">
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute top-0 left-[calc(320px+2rem)] hidden h-[70vh] w-px -translate-x-1/2 border-l border-zinc-200 lg:block"
+            className="pointer-events-none absolute top-0 left-[calc(392px+2rem)] hidden h-[70vh] w-px -translate-x-1/2 border-l border-zinc-200 lg:block"
           />
           <aside className="planner-master-column h-[70vh] rounded-xl border border-zinc-900 p-3 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
@@ -2587,64 +2587,64 @@ export default function PlannerPage() {
                     }}
                     className="planner-master-card group cursor-pointer rounded-lg border border-zinc-700/80 shadow-sm"
                   >
-                    <div className="flex items-start justify-between gap-1.5">
-                      <div className="flex min-w-0 flex-1 items-start gap-1">
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleMasterListSubtasksPanel(task.id, task);
-                          }}
-                          className="mt-0.5 shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
-                          aria-expanded={panelExpanded}
-                          aria-label={panelExpanded ? "Collapse subtasks" : "Expand subtasks"}
-                        >
-                          <span className="block text-[10px] font-medium leading-none text-zinc-600 dark:text-zinc-400">
-                            {panelExpanded ? "▼" : "▶"}
-                          </span>
-                        </button>
-                        <h3 className="planner-master-card-title min-w-0 text-zinc-100">
+                    <div className="flex items-start gap-1">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleMasterListSubtasksPanel(task.id, task);
+                        }}
+                        className="mt-0.5 shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
+                        aria-expanded={panelExpanded}
+                        aria-label={panelExpanded ? "Collapse subtasks" : "Expand subtasks"}
+                      >
+                        <span className="block text-[10px] font-medium leading-none text-zinc-600 dark:text-zinc-400">
+                          {panelExpanded ? "▼" : "▶"}
+                        </span>
+                      </button>
+                      <div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-1 gap-y-0.5">
+                        <h3 className="planner-master-card-title w-full min-w-0 break-words text-zinc-100">
                           {task.title}
                         </h3>
-                      </div>
-                      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleDeletePost(task.id);
-                          }}
-                          className="rounded-md p-0.5 text-zinc-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-300"
-                          aria-label="Delete post"
-                          title="Delete post"
-                        >
-                          <Trash2 className="h-3 w-3" strokeWidth={2} />
-                        </button>
-                        <TaskAssigneeAvatars assignees={task.assignedUsers} />
-                        {task.label ? (
-                          <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
-                            {task.label}
-                          </span>
-                        ) : null}
-                        {statusLabel ? (
-                          <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                            {statusLabel}
-                          </span>
-                        ) : null}
-                        {isDueSoonCard ? (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700 dark:bg-orange-900/40 dark:text-orange-200">
-                            <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
-                            Due Soon
-                          </span>
-                        ) : null}
+                        <div className="flex max-w-full flex-wrap items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleDeletePost(task.id);
+                            }}
+                            className="rounded-md p-0.5 text-zinc-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-300"
+                            aria-label="Delete post"
+                            title="Delete post"
+                          >
+                            <Trash2 className="h-3 w-3" strokeWidth={2} />
+                          </button>
+                          <TaskAssigneeAvatars assignees={task.assignedUsers} />
+                          {task.label ? (
+                            <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
+                              {task.label}
+                            </span>
+                          ) : null}
+                          {statusLabel ? (
+                            <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                              {statusLabel}
+                            </span>
+                          ) : null}
+                          {isDueSoonCard ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700 dark:bg-orange-900/40 dark:text-orange-200">
+                              <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
+                              Due Soon
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
-                    {task.description.trim() ? (
-                      <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
+                    {panelExpanded && task.description.trim() ? (
+                      <p className="mt-0.5 w-full min-w-0 break-words line-clamp-2 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
                         {task.description}
                       </p>
                     ) : null}
-                    {task.dueDate ? (
+                    {panelExpanded && task.dueDate ? (
                       <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
                         Due: {new Date(task.dueDate).toLocaleString()}
                       </p>
