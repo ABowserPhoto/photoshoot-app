@@ -2587,14 +2587,14 @@ export default function PlannerPage() {
                     }}
                     className="planner-master-card group cursor-pointer rounded-lg border border-zinc-700/80 shadow-sm"
                   >
-                    <div className="flex items-start gap-1">
+                    <div className="flex items-center justify-between gap-1">
                       <button
                         type="button"
                         onClick={(event) => {
                           event.stopPropagation();
                           toggleMasterListSubtasksPanel(task.id, task);
                         }}
-                        className="mt-0.5 shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
+                        className="shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
                         aria-expanded={panelExpanded}
                         aria-label={panelExpanded ? "Collapse subtasks" : "Expand subtasks"}
                       >
@@ -2602,43 +2602,41 @@ export default function PlannerPage() {
                           {panelExpanded ? "▼" : "▶"}
                         </span>
                       </button>
-                      <div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-1 gap-y-0.5">
-                        <h3 className="planner-master-card-title w-full min-w-0 break-words text-zinc-100">
-                          {task.title}
-                        </h3>
-                        <div className="flex max-w-full flex-wrap items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              handleDeletePost(task.id);
-                            }}
-                            className="rounded-md p-0.5 text-zinc-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-300"
-                            aria-label="Delete post"
-                            title="Delete post"
-                          >
-                            <Trash2 className="h-3 w-3" strokeWidth={2} />
-                          </button>
-                          <TaskAssigneeAvatars assignees={task.assignedUsers} />
-                          {task.label ? (
-                            <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
-                              {task.label}
-                            </span>
-                          ) : null}
-                          {statusLabel ? (
-                            <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                              {statusLabel}
-                            </span>
-                          ) : null}
-                          {isDueSoonCard ? (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700 dark:bg-orange-900/40 dark:text-orange-200">
-                              <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
-                              Due Soon
-                            </span>
-                          ) : null}
-                        </div>
+                      <div className="flex min-w-0 flex-wrap items-center justify-end gap-1">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeletePost(task.id);
+                          }}
+                          className="rounded-md p-0.5 text-zinc-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-300"
+                          aria-label="Delete post"
+                          title="Delete post"
+                        >
+                          <Trash2 className="h-3 w-3" strokeWidth={2} />
+                        </button>
+                        <TaskAssigneeAvatars assignees={task.assignedUsers} />
+                        {task.label ? (
+                          <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
+                            {task.label}
+                          </span>
+                        ) : null}
+                        {statusLabel ? (
+                          <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                            {statusLabel}
+                          </span>
+                        ) : null}
+                        {isDueSoonCard ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold text-orange-700 dark:bg-orange-900/40 dark:text-orange-200">
+                            <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
+                            Due Soon
+                          </span>
+                        ) : null}
                       </div>
                     </div>
+                    <h3 className="planner-master-card-title mt-0.5 w-full min-w-0 break-words text-zinc-100">
+                      {task.title}
+                    </h3>
                     {panelExpanded && task.description.trim() ? (
                       <p className="mt-0.5 w-full min-w-0 break-words line-clamp-2 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
                         {task.description}
@@ -2780,33 +2778,37 @@ export default function PlannerPage() {
                       </div>
                     ) : null}
                     {isPlannerTimerRunning(task) ? (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          requestPauseTask(task.id);
-                        }}
-                        className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-amber-200/90 px-3 text-xs font-semibold text-amber-900 opacity-0 transition group-hover:opacity-100 hover:border-amber-400 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-100 dark:hover:border-amber-600 dark:hover:bg-amber-950/40"
-                        aria-label="Pause time tracking"
-                      >
-                        <Pause className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
-                        Pause
-                      </button>
+                      <div className={panelExpanded ? undefined : "h-0 overflow-hidden group-hover:h-auto group-hover:overflow-visible"}>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            requestPauseTask(task.id);
+                          }}
+                          className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-amber-200/90 px-3 text-xs font-semibold text-amber-900 opacity-0 transition group-hover:opacity-100 hover:border-amber-400 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-100 dark:hover:border-amber-600 dark:hover:bg-amber-950/40"
+                          aria-label="Pause time tracking"
+                        >
+                          <Pause className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
+                          Pause
+                        </button>
+                      </div>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          handleMasterListPlayClick(task);
-                        }}
-                        className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-emerald-300 px-3 text-xs font-semibold text-emerald-700 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-200 dark:hover:bg-emerald-900/30"
-                        aria-label={
-                          task.isPaused ? "Resume time tracking" : "Start time tracking"
-                        }
-                      >
-                        <Play className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
-                        {task.isPaused ? "Resume" : "Start"}
-                      </button>
+                      <div className={panelExpanded ? undefined : "h-0 overflow-hidden group-hover:h-auto group-hover:overflow-visible"}>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleMasterListPlayClick(task);
+                          }}
+                          className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-emerald-300 px-3 text-xs font-semibold text-emerald-700 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-200 dark:hover:bg-emerald-900/30"
+                          aria-label={
+                            task.isPaused ? "Resume time tracking" : "Start time tracking"
+                          }
+                        >
+                          <Play className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
+                          {task.isPaused ? "Resume" : "Start"}
+                        </button>
+                      </div>
                     )}
                   </article>
                 );
