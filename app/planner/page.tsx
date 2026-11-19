@@ -2533,10 +2533,10 @@ export default function PlannerPage() {
           }))}
         />
 
-        <div className="relative grid min-w-0 gap-4 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-24">
+        <div className="relative grid min-w-0 gap-4 lg:grid-cols-[392px_minmax(0,1fr)] lg:gap-24">
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute top-0 left-[calc(320px+2rem)] hidden h-[70vh] w-px -translate-x-1/2 border-l border-zinc-200 lg:block"
+            className="pointer-events-none absolute top-0 left-[calc(392px+2rem)] hidden h-[70vh] w-px -translate-x-1/2 border-l border-zinc-200 lg:block"
           />
           <aside className="planner-master-column h-[70vh] rounded-xl border border-zinc-900 p-3 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
@@ -2587,27 +2587,22 @@ export default function PlannerPage() {
                     }}
                     className="planner-master-card group cursor-pointer rounded-lg border border-zinc-700/80 shadow-sm"
                   >
-                    <div className="flex items-start justify-between gap-1.5">
-                      <div className="flex min-w-0 flex-1 items-start gap-1">
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleMasterListSubtasksPanel(task.id, task);
-                          }}
-                          className="mt-0.5 shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
-                          aria-expanded={panelExpanded}
-                          aria-label={panelExpanded ? "Collapse subtasks" : "Expand subtasks"}
-                        >
-                          <span className="block text-[10px] font-medium leading-none text-zinc-600 dark:text-zinc-400">
-                            {panelExpanded ? "▼" : "▶"}
-                          </span>
-                        </button>
-                        <h3 className="planner-master-card-title min-w-0 text-zinc-100">
-                          {task.title}
-                        </h3>
-                      </div>
-                      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                    <div className="flex items-center justify-between gap-1">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleMasterListSubtasksPanel(task.id, task);
+                        }}
+                        className="shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
+                        aria-expanded={panelExpanded}
+                        aria-label={panelExpanded ? "Collapse subtasks" : "Expand subtasks"}
+                      >
+                        <span className="block text-[10px] font-medium leading-none text-zinc-600 dark:text-zinc-400">
+                          {panelExpanded ? "▼" : "▶"}
+                        </span>
+                      </button>
+                      <div className="flex min-w-0 flex-wrap items-center justify-end gap-1">
                         <button
                           type="button"
                           onClick={(event) => {
@@ -2639,12 +2634,15 @@ export default function PlannerPage() {
                         ) : null}
                       </div>
                     </div>
-                    {task.description.trim() ? (
-                      <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
+                    <h3 className="planner-master-card-title mt-0.5 w-full min-w-0 break-words text-zinc-100">
+                      {task.title}
+                    </h3>
+                    {panelExpanded && task.description.trim() ? (
+                      <p className="mt-0.5 w-full min-w-0 break-words line-clamp-2 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
                         {task.description}
                       </p>
                     ) : null}
-                    {task.dueDate ? (
+                    {panelExpanded && task.dueDate ? (
                       <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
                         Due: {new Date(task.dueDate).toLocaleString()}
                       </p>
@@ -2680,7 +2678,7 @@ export default function PlannerPage() {
                           return (
                             <div
                               key={subtask.id}
-                              className="flex items-start gap-1.5 rounded-md border border-zinc-200 bg-zinc-50/80 px-1.5 py-1 dark:border-zinc-700 dark:bg-zinc-900/50"
+                              className="flex items-start gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-1"
                             >
                               <input
                                 type="checkbox"
@@ -2689,7 +2687,7 @@ export default function PlannerPage() {
                                 onChange={(event) =>
                                   onMasterListSubtaskToggle(task, subtask, event.target.checked)
                                 }
-                                className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded border-zinc-400 ${checkboxLockedClass}`}
+                                className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded border border-zinc-500 bg-zinc-900 accent-zinc-200 ${checkboxLockedClass}`}
                               />
                               <input
                                 value={subtask.title}
@@ -2740,7 +2738,9 @@ export default function PlannerPage() {
                                     }
                                   })();
                                 }}
-                                className="min-w-0 flex-1 border-0 bg-transparent p-0 text-xs text-zinc-800 outline-none focus:ring-0 dark:text-zinc-100"
+                                className={`min-w-0 flex-1 border-0 bg-transparent p-0 text-xs outline-none focus:ring-0 ${
+                                  subtask.isCompleted ? "text-zinc-300" : "text-zinc-100"
+                                }`}
                               />
                               {subtask.isStandard || subtasksReadOnly ? null : (
                                 <button
@@ -2766,12 +2766,12 @@ export default function PlannerPage() {
                               }))
                             }
                             placeholder="Add custom subtask"
-                            className="min-w-0 flex-1 rounded border border-zinc-200 bg-white px-2 py-1 text-xs text-zinc-800 outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                            className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none placeholder:text-zinc-400"
                           />
                           <button
                             type="button"
                             onClick={() => addCustomSubtaskFromMaster(task.id, masterListSubtaskDraft[task.id] ?? "")}
-                            className="shrink-0 rounded bg-zinc-900 px-2 py-1 text-xs font-semibold text-white dark:bg-zinc-100 dark:text-zinc-900"
+                            className="shrink-0 rounded border border-zinc-500 bg-zinc-800 px-2 py-1 text-xs font-semibold text-zinc-100"
                           >
                             Add
                           </button>
@@ -2780,33 +2780,37 @@ export default function PlannerPage() {
                       </div>
                     ) : null}
                     {isPlannerTimerRunning(task) ? (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          requestPauseTask(task.id);
-                        }}
-                        className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-amber-200/90 px-3 text-xs font-semibold text-amber-900 opacity-0 transition group-hover:opacity-100 hover:border-amber-400 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-100 dark:hover:border-amber-600 dark:hover:bg-amber-950/40"
-                        aria-label="Pause time tracking"
-                      >
-                        <Pause className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
-                        Pause
-                      </button>
+                      <div className={panelExpanded ? undefined : "h-0 overflow-hidden group-hover:h-auto group-hover:overflow-visible"}>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            requestPauseTask(task.id);
+                          }}
+                          className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-amber-200/90 px-3 text-xs font-semibold text-amber-900 opacity-0 transition group-hover:opacity-100 hover:border-amber-400 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-100 dark:hover:border-amber-600 dark:hover:bg-amber-950/40"
+                          aria-label="Pause time tracking"
+                        >
+                          <Pause className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
+                          Pause
+                        </button>
+                      </div>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          handleMasterListPlayClick(task);
-                        }}
-                        className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-emerald-300 px-3 text-xs font-semibold text-emerald-700 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-200 dark:hover:bg-emerald-900/30"
-                        aria-label={
-                          task.isPaused ? "Resume time tracking" : "Start time tracking"
-                        }
-                      >
-                        <Play className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
-                        {task.isPaused ? "Resume" : "Start"}
-                      </button>
+                      <div className={panelExpanded ? undefined : "h-0 overflow-hidden group-hover:h-auto group-hover:overflow-visible"}>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleMasterListPlayClick(task);
+                          }}
+                          className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-emerald-300 px-3 text-xs font-semibold text-emerald-700 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-200 dark:hover:bg-emerald-900/30"
+                          aria-label={
+                            task.isPaused ? "Resume time tracking" : "Start time tracking"
+                          }
+                        >
+                          <Play className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
+                          {task.isPaused ? "Resume" : "Start"}
+                        </button>
+                      </div>
                     )}
                   </article>
                 );
