@@ -4,9 +4,12 @@ import { NextResponse } from "next/server";
 import { buildCompanyLtvMap, normalizeCompanyKey } from "@/lib/crmClientLtv";
 import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 import { loadReminderDatesByCompanyId } from "@/lib/server/contactReminderDates";
+import { deleteCrmClient } from "@/lib/server/deleteCrmClient";
+import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
 import { pushClientToLexoffice, type ContactPerson } from "@/lib/server/lexofficeContacts";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 type ClientRow = {
   id: string;
@@ -22,6 +25,7 @@ type ClientRow = {
   lexoffice_contact_id?: string | null;
   contact_persons?: ContactPerson[] | null;
   is_approved?: boolean | null;
+  user_id?: string | null;
 };
 
 export type CrmClientRecord = {
@@ -36,6 +40,7 @@ export type CrmClientRecord = {
   lifetimeRevenue: number;
   reminderDates: string[];
   isApproved: boolean;
+  hasLogin: boolean;
 };
 
 function serviceSupabase() {
@@ -98,6 +103,7 @@ function mapClientRow(
     lifetimeRevenue: companyKey ? (ltvByCompany.get(companyKey) ?? 0) : 0,
     reminderDates: reminderDatesByCompany.get(row.id) ?? [],
     isApproved: row.is_approved === true,
+    hasLogin: Boolean(row.user_id?.trim()),
   };
 }
 
@@ -363,6 +369,9 @@ export async function DELETE(request: Request) {
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
+  if (!access.auth.isAdmin) {
+    return NextResponse.json({ error: "Only an admin can delete a client." }, { status: 403 });
+  }
 
   let body: { id?: unknown };
   try {
@@ -384,10 +393,25 @@ export async function DELETE(request: Request) {
     );
   }
 
-  const { error } = await supabase.from("clients").delete().eq("id", id);
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
+  const caller = await getAdminAreaAuth();
+  const result = await deleteCrmClient(supabase, id, caller.userId);
+  if (!result.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: result.error,
+        clientDeleted: result.clientDeleted,
+        loginDeleted: result.loginDeleted,
+      },
+      { status: result.status }
+    );
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    clientDeleted: true,
+    login: result.login,
+    loginDeleted: result.loginDeleted,
+    loginMessage: result.loginMessage,
+  });
 }

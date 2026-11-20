@@ -27,6 +27,7 @@ export type CrmClient = {
   lifetimeRevenue: number;
   reminderDates?: string[];
   isApproved: boolean;
+  hasLogin: boolean;
 };
 
 type ClientFormState = {
@@ -76,6 +77,8 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
   const [mergeTargetId, setMergeTargetId] = useState("");
   const [merging, setMerging] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [clientPendingDelete, setClientPendingDelete] = useState<CrmClient | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [approvingId, setApprovingId] = useState<string | null>(null);
 
   const mergeTargetOptions = useMemo(() => {
@@ -263,15 +266,22 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
     }
   };
 
-  const handleDeleteClient = async (client: CrmClient) => {
-    const confirmed = window.confirm(
-      "Are you sure you want to delete this client? Tasks linked to this client will lose their connection."
-    );
-    if (!confirmed) {
+  const closeDeleteModal = () => {
+    if (deletingId) {
+      return;
+    }
+    setClientPendingDelete(null);
+    setDeleteError(null);
+  };
+
+  const handleDeleteClient = async () => {
+    const client = clientPendingDelete;
+    if (!client) {
       return;
     }
 
     setDeletingId(client.id);
+    setDeleteError(null);
     onError(null);
     try {
       const response = await fetch("/api/admin/crm/clients", {
@@ -280,14 +290,42 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
         credentials: "include",
         body: JSON.stringify({ id: client.id }),
       });
-      const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
-      if (!response.ok) {
-        throw new Error(json?.error ?? `Delete failed (${response.status})`);
+      const json = (await response.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        clientDeleted?: boolean;
+        login?: "removed" | "none" | "kept";
+        loginMessage?: string | null;
+      } | null;
+      if (!response.ok || json?.ok === false) {
+        const message = json?.error ?? `Delete failed (${response.status})`;
+        if (json?.clientDeleted) {
+          setClientPendingDelete(null);
+          setDeleteError(null);
+          await loadClients();
+        } else {
+          setDeleteError(message);
+        }
+        onError(message);
+        return;
       }
-      onToast("Client deleted.");
+      setClientPendingDelete(null);
+      setDeleteError(null);
+      if (json?.login === "kept" && json.loginMessage) {
+        onError(`Client deleted. ${json.loginMessage}`);
+        onToast("Client deleted. The website login was kept.");
+      } else if (json?.login === "removed") {
+        onToast(
+          json.loginMessage ? `Client deleted. ${json.loginMessage}` : "Client deleted. Their website login was removed."
+        );
+      } else {
+        onToast("Client deleted.");
+      }
       await loadClients();
     } catch (err) {
-      onError(err instanceof Error ? err.message : "Failed to delete client.");
+      const message = err instanceof Error ? err.message : "Failed to delete client.";
+      setDeleteError(message);
+      onError(message);
     } finally {
       setDeletingId(null);
     }
@@ -580,7 +618,10 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                         </button>
                         <button
                           type="button"
-                          onClick={() => void handleDeleteClient(client)}
+                          onClick={() => {
+                            setDeleteError(null);
+                            setClientPendingDelete(client);
+                          }}
                           disabled={deletingId === client.id}
                           title="Delete client"
                           className="inline-flex items-center rounded-lg border border-red-500/40 p-1.5 text-red-200 transition hover:bg-red-950/40 disabled:cursor-not-allowed disabled:opacity-50"
@@ -783,6 +824,53 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                 className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
               >
                 {saving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {clientPendingDelete ? (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-client-modal-title"
+            className="w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 id="delete-client-modal-title" className="text-lg font-semibold text-white">
+              Delete client
+            </h3>
+            <p className="mt-3 text-sm text-zinc-300">
+              Delete <span className="font-semibold text-white">{clientPendingDelete.companyName}</span>?
+            </p>
+            <p className="mt-3 text-sm text-zinc-300">
+              {clientPendingDelete.hasLogin
+                ? "Their website login and profile will also be removed when that login belongs only to this client, so the email can be used to sign up again. Staff, admin, owner, and team logins are never removed, including when a client record uses the same email."
+                : "No website login is linked to this client. Only the CRM record will be removed."}
+            </p>
+            <p className="mt-3 text-xs text-zinc-500">
+              Tasks and bookings stay in the archive. Tasks linked to this client will lose their connection.
+            </p>
+            {deleteError ? <p className="mt-3 text-sm text-red-300">{deleteError}</p> : null}
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeDeleteModal}
+                disabled={deletingId === clientPendingDelete.id}
+                className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-semibold text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteClient()}
+                disabled={deletingId === clientPendingDelete.id}
+                className="rounded-lg border border-red-500/40 bg-red-950/40 px-4 py-2 text-sm font-semibold text-red-100 transition hover:bg-red-950/70 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {deletingId === clientPendingDelete.id ? "Deleting…" : "Delete client"}
               </button>
             </div>
           </div>

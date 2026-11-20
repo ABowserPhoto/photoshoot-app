@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { spawnCliWithDiagnostics } from "@/lib/server/spawnCli";
+import { CliProcessError, spawnCliWithDiagnostics } from "@/lib/server/spawnCli";
 
 import { PHOTOS_ROOT } from "@/lib/photosPaths";
 import { resolvePublicOrigin } from "@/lib/publicOrigin";
@@ -206,23 +206,47 @@ export async function POST(request: Request) {
             .toString(16)
             .slice(2)}.jpg`
         );
+        if (inputs.length === 0) {
+          const emptyMessage = `Bracket ${bracketIndex} has no input files for SNS-HDR.`;
+          console.error("Merge CLI Error:", emptyMessage);
+          throw new Error(emptyMessage);
+        }
+        if (fs.existsSync(tempOutFile)) {
+          await fs.promises.unlink(tempOutFile);
+        }
+        if (fs.existsSync(outFile)) {
+          console.log(
+            `[auto-merge] Removing existing 3_Merged file so SNS-HDR overwrites it: ${path.basename(outFile)}`
+          );
+          await fs.promises.unlink(outFile);
+        }
         const snsArgs = ["-preset", snsPreset, "-srgb", "-o", tempOutFile, ...inputs];
         const constructedCommandString = `${quoteArg(SNS_HDR_PATH)} ${snsArgs.map(quoteArg).join(" ")}`;
-        console.log(`EXECUTING: ${constructedCommandString}`);
-        await spawnCliWithDiagnostics(SNS_HDR_PATH, snsArgs, {
-          logPrefix: "[CLI SNS-HDR]",
-          envVar: "SNSHDR_PATH",
-          label: "SNS-HDR",
-          context: {
-            bracketIndex,
-            localFolderName,
-            outFile,
-            tempOutFile,
-            inputs,
-            snsPreset,
-            commandPreview: constructedCommandString,
-          },
-        });
+        console.log(`EXECUTING (${inputs.length} files): ${constructedCommandString}`);
+        try {
+          await spawnCliWithDiagnostics(SNS_HDR_PATH, snsArgs, {
+            logPrefix: "[CLI SNS-HDR]",
+            envVar: "SNSHDR_PATH",
+            label: "SNS-HDR",
+            stdinText: "y\n",
+            emitMergeCliError: true,
+            context: {
+              bracketIndex,
+              localFolderName,
+              outFile,
+              tempOutFile,
+              inputs,
+              snsPreset,
+              commandPreview: constructedCommandString,
+            },
+          });
+        } catch (error) {
+          const stderr = error instanceof CliProcessError ? error.stderr : "";
+          if (!(error instanceof CliProcessError)) {
+            console.error("Merge CLI Error:", stderr || (error instanceof Error ? error.message : String(error)));
+          }
+          throw error;
+        }
         if (fs.existsSync(outFile)) {
           await fs.promises.unlink(outFile);
         }
