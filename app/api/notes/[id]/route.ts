@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { contentWriteConflicts } from "@/lib/notesPlace";
 import {
   canViewNote,
   getNotesAuth,
@@ -108,11 +109,42 @@ export async function PATCH(request: Request, context: RouteContext) {
     updated_at: new Date().toISOString(),
   };
 
-  if (typeof (body as { title?: unknown }).title === "string") {
-    patch.title = (body as { title: string }).title.trim() || "Untitled";
+  const writesTitle = typeof (body as { title?: unknown }).title === "string";
+  const writesBody = typeof (body as { content?: unknown }).content === "string";
+  const nextTitle = writesTitle
+    ? (body as { title: string }).title.trim() || "Untitled"
+    : existingRow.title;
+  const nextContent = writesBody ? (body as { content: string }).content : existingRow.content;
+  const expectedUpdatedAt =
+    typeof (body as { expectedUpdatedAt?: unknown }).expectedUpdatedAt === "string"
+      ? (body as { expectedUpdatedAt: string }).expectedUpdatedAt
+      : null;
+  if (
+    contentWriteConflicts({
+      expectedUpdatedAt,
+      serverUpdatedAt: existingRow.updated_at,
+      serverTitle: existingRow.title,
+      serverContent: existingRow.content,
+      nextTitle,
+      nextContent,
+      writesContent: writesTitle || writesBody,
+    })
+  ) {
+    return NextResponse.json(
+      {
+        error: "Note was updated somewhere else.",
+        conflict: true,
+        note: mapNote(existingRow),
+      },
+      { status: 409 }
+    );
   }
-  if (typeof (body as { content?: unknown }).content === "string") {
-    patch.content = (body as { content: string }).content;
+
+  if (writesTitle) {
+    patch.title = nextTitle;
+  }
+  if (writesBody) {
+    patch.content = nextContent;
   }
   if (typeof (body as { notebookId?: unknown }).notebookId === "string") {
     const notebookId = (body as { notebookId: string }).notebookId.trim();

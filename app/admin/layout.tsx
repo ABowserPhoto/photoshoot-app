@@ -10,6 +10,7 @@ import {
   moduleForPathname,
   type AppModule,
 } from "@/lib/appModules";
+import { loginHrefWithRedirect } from "@/lib/authRefresh";
 import { permissionDeniedRedirectPath } from "@/lib/permissionDenied";
 
 /**
@@ -48,7 +49,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       return;
     }
     if (!authenticated) {
-      router.replace("/login");
+      router.replace(
+        loginHrefWithRedirect(`${window.location.pathname}${window.location.search}`)
+      );
       return;
     }
     if (!allowed) {
@@ -63,6 +66,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     }
     setChecked(true);
   }, [allowed, authenticated, accessibleModules, isAdmin, isLoading, router]);
+
+  if (isLoading && checked && allowed) {
+    return children;
+  }
 
   if (isLoading || !authenticated || !checked || !allowed) {
     return (

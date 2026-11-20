@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
@@ -9,6 +9,7 @@ import {
   firstAccessibleHref,
   moduleForPathname,
 } from "@/lib/appModules";
+import { loginHrefWithRedirect, shouldKeepModuleTreeMounted } from "@/lib/authRefresh";
 
 function isUnguardedPath(pathname: string): boolean {
   if (pathname === "/login" || pathname.startsWith("/login/")) return true;
@@ -40,9 +41,27 @@ export default function ModuleAccessGuard({ children }: { children: React.ReactN
       pathname,
       search,
     });
+  const [hasShownModule, setHasShownModule] = useState(false);
+  if (!authenticated) {
+    if (hasShownModule) setHasShownModule(false);
+  } else if (!skip && !isLoading && allowed && !hasShownModule) {
+    setHasShownModule(true);
+  }
+  const keepMounted = shouldKeepModuleTreeMounted({
+    isLoading,
+    authenticated,
+    allowed,
+    hasShownModule,
+  });
 
   useEffect(() => {
-    if (skip || isLoading || !authenticated) {
+    if (skip || isLoading) {
+      return;
+    }
+    if (!authenticated) {
+      router.replace(
+        loginHrefWithRedirect(`${window.location.pathname}${window.location.search}`)
+      );
       return;
     }
     if (allowed) {
@@ -58,7 +77,7 @@ export default function ModuleAccessGuard({ children }: { children: React.ReactN
     );
   }, [allowed, authenticated, accessibleModules, isAdmin, isLoading, router, skip]);
 
-  if (skip) {
+  if (skip || keepMounted) {
     return <>{children}</>;
   }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Extension, InputRule } from "@tiptap/core";
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
@@ -31,6 +31,10 @@ type RichTextEditorProps = {
   onChange?: (html: string) => void;
   editable?: boolean;
   className?: string;
+  /** Applied once per note, after the editor content is in place. */
+  initialScrollTop?: number;
+  scrollRestoreKey?: string;
+  onScrollPosition?: (scrollTop: number) => void;
 };
 
 /**
@@ -112,7 +116,15 @@ export default function RichTextEditor({
   onChange,
   editable = true,
   className = "",
+  initialScrollTop = 0,
+  scrollRestoreKey,
+  onScrollPosition,
 }: RichTextEditorProps) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const onScrollPositionRef = useRef(onScrollPosition);
+  useEffect(() => {
+    onScrollPositionRef.current = onScrollPosition;
+  }, [onScrollPosition]);
   const editor = useEditor({
     immediatelyRender: false,
     editable,
@@ -158,6 +170,22 @@ export default function RichTextEditor({
       editor.commands.setContent(next, { emitUpdate: false });
     }
   }, [content, editor]);
+
+  useEffect(() => {
+    if (!editor || !scrollRestoreKey || initialScrollTop <= 0) return;
+    let cancelled = false;
+    const apply = () => {
+      if (cancelled) return;
+      const node = scrollerRef.current;
+      if (node) node.scrollTop = initialScrollTop;
+    };
+    apply();
+    const frame = window.requestAnimationFrame(apply);
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
+    };
+  }, [editor, initialScrollTop, scrollRestoreKey]);
 
   const toolbar = useEditorState({
     editor,
@@ -299,7 +327,11 @@ export default function RichTextEditor({
           </ToolbarButton>
         </div>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div
+        ref={scrollerRef}
+        className="min-h-0 flex-1 overflow-y-auto"
+        onScroll={(event) => onScrollPositionRef.current?.(event.currentTarget.scrollTop)}
+      >
         <EditorContent editor={editor} />
       </div>
       <p className="border-t border-zinc-800 px-3 py-1.5 text-[11px] text-zinc-500">
