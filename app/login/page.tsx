@@ -1,11 +1,13 @@
 "use client";
 
 import { FormEvent, Suspense, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
 import { handleClockIn } from "@/app/actions/shifts";
 import { ELECTRON_IPC, getIpcRenderer } from "@/lib/electronIpc";
+import { FORGOT_PASSWORD_PATH } from "@/lib/passwordReset";
 import { supabase } from "@/lib/supabaseClient";
 
 function LoginForm() {
@@ -131,6 +133,12 @@ function LoginForm() {
               required
             />
           </label>
+          <Link
+            href={FORGOT_PASSWORD_PATH}
+            className="block text-center text-sm text-zinc-400 transition-colors hover:text-white"
+          >
+            Passwort vergessen? / Forgot password?
+          </Link>
           <button
             type="submit"
             disabled={isLoading}
