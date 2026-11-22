@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { createClient } from "@supabase/supabase-js";
+import { assertSocialStaff } from "@/lib/server/assertSocialStaff";
 import { fetchWithTimeout } from "@/lib/server/fetchWithTimeout";
 
 export const dynamic = "force-dynamic";
@@ -14,9 +15,16 @@ type TokenSuccess = {
   refresh_token?: string;
   open_id?: string;
   expires_in?: number;
+  refresh_expires_in?: number;
   token_type?: string;
   scope?: string;
 };
+
+function expiryFromSeconds(seconds: unknown): string | null {
+  const value = typeof seconds === "number" ? seconds : Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return new Date(Date.now() + value * 1000).toISOString();
+}
 
 function getPublicAppOrigin(request: NextRequest): string {
   const fromEnv =
@@ -106,6 +114,11 @@ export async function GET(request: NextRequest) {
     return finish(request, { tiktok_error: "missing_state_profile" });
   }
 
+  const auth = await assertSocialStaff();
+  if (!auth.ok) {
+    return finish(request, { tiktok_error: "not_authenticated" });
+  }
+
   const pkceVerifier = request.cookies.get(PKCE_COOKIE)?.value?.trim() ?? "";
   if (!pkceVerifier) {
     return finish(request, { tiktok_error: "missing_pkce_verifier" });
@@ -180,6 +193,9 @@ export async function GET(request: NextRequest) {
       tiktok_access_token: accessToken,
       tiktok_refresh_token: refreshToken,
       tiktok_open_id: openId,
+      tiktok_token_expires_at: expiryFromSeconds(tokenJson.expires_in),
+      tiktok_refresh_expires_at: expiryFromSeconds(tokenJson.refresh_expires_in),
+      tiktok_scope: tokenJson.scope?.trim() || null,
     })
     .eq("id", profileId);
 
