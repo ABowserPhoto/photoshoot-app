@@ -201,12 +201,15 @@ async function topInstagramPosts(
   const ranked = [...rows]
     .filter((row) => typeof row.id === "string")
     .sort((left, right) => mediaScore(right) - mediaScore(left))
-    .slice(0, 4);
+    .slice(0, 12);
+  const insightIds = new Set(ranked.slice(0, 4).map((row) => String(row.id)));
 
   const posts: SocialTopPost[] = [];
   for (const row of ranked) {
     const id = String(row.id);
-    const insights = await graphGet(`/${id}/insights`, accessToken, { metric: MEDIA_METRICS.join(",") });
+    const insights = insightIds.has(id)
+      ? await graphGet(`/${id}/insights`, accessToken, { metric: MEDIA_METRICS.join(",") })
+      : { ok: false as const, json: null };
     const parsed = insights.ok ? mapInsightTotals(parseGraphInsights(insights.json).totals) : {};
     const likes = numberField(row, "like_count");
     const comments = numberField(row, "comments_count");
