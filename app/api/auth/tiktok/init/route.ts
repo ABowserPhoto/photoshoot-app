@@ -2,6 +2,9 @@ import crypto from "node:crypto";
 
 import { NextRequest, NextResponse } from "next/server";
 
+import { assertSocialStaff } from "@/lib/server/assertSocialStaff";
+import { TIKTOK_OAUTH_SCOPES } from "@/lib/socialOAuthScopes";
+
 export const dynamic = "force-dynamic";
 
 const PKCE_COOKIE = "tiktok_pkce_verifier";
@@ -43,6 +46,11 @@ function redirectSchedulerError(request: NextRequest, message: string) {
  * Starts TikTok OAuth with PKCE: stores code_verifier in HttpOnly cookie and redirects to authorize.
  */
 export async function GET(request: NextRequest) {
+  const auth = await assertSocialStaff();
+  if (!auth.ok) {
+    return redirectSchedulerError(request, "not_authenticated");
+  }
+
   const profileId = request.nextUrl.searchParams.get("profileId")?.trim() ?? "";
   if (!profileId) {
     return redirectSchedulerError(request, "missing_profile_id");
@@ -63,7 +71,7 @@ export async function GET(request: NextRequest) {
       redirectUri,
     );
   }
-  const tiktokScopes = "user.info.basic,video.publish";
+  const tiktokScopes = TIKTOK_OAUTH_SCOPES;
 
   const authUrl = new URL("https://www.tiktok.com/v2/auth/authorize/");
   authUrl.search = [

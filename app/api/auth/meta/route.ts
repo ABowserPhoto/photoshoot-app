@@ -216,6 +216,7 @@ export async function GET(request: NextRequest) {
 
   const accounts = withIg.map((page) => ({
     pageName: page.name ?? "Facebook Page",
+    pageId: page.id?.trim() || null,
     igUsername: page.instagram_business_account?.username ?? null,
     igAccountId: page.instagram_business_account!.id!.trim(),
     pageAccessToken: page.access_token!.trim(),

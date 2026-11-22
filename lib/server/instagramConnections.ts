@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 
 export type InstagramConnectionInput = {
   pageName: string;
+  pageId?: string | null;
   igUsername: string | null;
   igAccountId: string;
   pageAccessToken: string;
@@ -70,6 +71,7 @@ export async function upsertInstagramConnectionsForProfile(
         ig_account_id: account.igAccountId.trim(),
         ig_username: account.igUsername?.trim() || null,
         page_name: account.pageName?.trim() || null,
+        page_id: account.pageId?.trim() || null,
         access_token: account.pageAccessToken.trim(),
         updated_at: now,
       },
