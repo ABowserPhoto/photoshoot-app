@@ -2,6 +2,7 @@
 
 import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 import { parseCompanyAddress } from "@/lib/parseCompanyAddress";
+import { parsePricingTier } from "@/lib/pricingTiers";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
 
 const LEXOFFICE_CONTACTS_URL = "https://api.lexoffice.io/v1/contacts";
@@ -201,7 +202,7 @@ async function postLexofficeContact(body: Record<string, unknown>): Promise<stri
   return lexofficeId;
 }
 
-export async function approveClient(clientId: string): Promise<ApproveClientResult> {
+export async function approveClient(clientId: string, pricingTier: string): Promise<ApproveClientResult> {
   const access = await assertModuleAccess("crm");
   if (!access.ok) {
     return { ok: false, error: access.error };
@@ -210,6 +211,11 @@ export async function approveClient(clientId: string): Promise<ApproveClientResu
   const id = clientId.trim();
   if (!id) {
     return { ok: false, error: "Client id is required." };
+  }
+
+  const tier = parsePricingTier(pricingTier);
+  if (!tier) {
+    return { ok: false, error: "Choose a pricing tier before approving this client." };
   }
 
   const supabase = createSupabaseAdminClient();
@@ -237,7 +243,7 @@ export async function approveClient(clientId: string): Promise<ApproveClientResu
 
   const { error: approvalError } = await supabase
     .from("clients")
-    .update({ is_approved: true })
+    .update({ is_approved: true, pricing_tier: tier })
     .eq("id", id);
 
   if (approvalError) {
@@ -246,14 +252,14 @@ export async function approveClient(clientId: string): Promise<ApproveClientResu
 
   const { data: confirmed, error: confirmError } = await supabase
     .from("clients")
-    .select("is_approved")
+    .select("is_approved, pricing_tier")
     .eq("id", id)
     .maybeSingle();
 
   if (confirmError) {
     return { ok: false, error: confirmError.message };
   }
-  if (confirmed?.is_approved !== true) {
+  if (confirmed?.is_approved !== true || confirmed.pricing_tier !== tier) {
     return {
       ok: false,
       error: "Approval was not saved. A staff account is required to approve clients.",

@@ -4,8 +4,10 @@ import { GitMerge, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import ReminderDraftedMarker from "@/app/admin/crm/ReminderDraftedMarker";
+import PricingTierPicker from "@/app/admin/crm/PricingTierPicker";
 import { approveClient } from "@/app/actions/approveClient";
 import { formatEuro } from "@/lib/adminStatsFormat";
+import { pricingTierLabel, type PricingTier } from "@/lib/pricingTiers";
 
 export type ContactPerson = {
   id: string;
@@ -28,6 +30,7 @@ export type CrmClient = {
   reminderDates?: string[];
   isApproved: boolean;
   hasLogin: boolean;
+  pricingTier: PricingTier | null;
 };
 
 type ClientFormState = {
@@ -40,6 +43,7 @@ type ClientFormState = {
   lexoffice_id: string;
   contact_persons: ContactPerson[];
   is_approved: boolean;
+  pricing_tier: PricingTier | null;
 };
 
 const EMPTY_FORM: ClientFormState = {
@@ -52,7 +56,44 @@ const EMPTY_FORM: ClientFormState = {
   lexoffice_id: "",
   contact_persons: [],
   is_approved: true,
+  pricing_tier: null,
 };
+
+function pricingTierTone(tier: PricingTier): string {
+  switch (tier) {
+    case "standard":
+      return "bg-violet-500/15 text-violet-200";
+    case "legacy":
+      return "bg-sky-500/15 text-sky-200";
+    case "corporate":
+      return "bg-emerald-500/15 text-emerald-200";
+    default: {
+      const exhaustive: never = tier;
+      return exhaustive;
+    }
+  }
+}
+
+function PricingTierBadge({ client }: { client: CrmClient }) {
+  if (!client.isApproved) {
+    return <span className="text-xs text-zinc-500">—</span>;
+  }
+  if (!client.pricingTier) {
+    return (
+      <span className="inline-flex rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-200">
+        No tier
+      </span>
+    );
+  }
+
+  const tone = pricingTierTone(client.pricingTier);
+
+  return (
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${tone}`}>
+      {pricingTierLabel(client.pricingTier)}
+    </span>
+  );
+}
 
 function newContactPerson(): ContactPerson {
   return { id: crypto.randomUUID(), name: "", email: "", phone: "", role: "" };
@@ -80,6 +121,11 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
   const [clientPendingDelete, setClientPendingDelete] = useState<CrmClient | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [clientPendingApproval, setClientPendingApproval] = useState<CrmClient | null>(null);
+  const [approvalTier, setApprovalTier] = useState<PricingTier | null>(null);
+  const [tierEditClient, setTierEditClient] = useState<CrmClient | null>(null);
+  const [tierDraft, setTierDraft] = useState<PricingTier | null>(null);
+  const [savingTier, setSavingTier] = useState(false);
 
   const mergeTargetOptions = useMemo(() => {
     if (!selectedSourceClient) {
@@ -137,9 +183,19 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
   }, [onError]);
 
   useEffect(() => {
-    if (active) {
-      void loadClients();
+    if (!active) {
+      return;
     }
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (!cancelled) {
+        await loadClients();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [active, loadClients]);
 
   const handleSyncLexoffice = async () => {
@@ -190,6 +246,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
       lexoffice_id: client.lexofficeId,
       contact_persons: client.contactPersons.length > 0 ? client.contactPersons : [],
       is_approved: client.isApproved,
+      pricing_tier: client.pricingTier,
     });
     setModalOpen(true);
   };
@@ -230,6 +287,13 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
       onError("Company name is required.");
       return;
     }
+    if (form.id && form.is_approved) {
+      const existing = clients.find((client) => client.id === form.id);
+      if (existing && !existing.isApproved && !form.pricing_tier) {
+        onError("Choose a pricing tier before approving this client.");
+        return;
+      }
+    }
 
     setSaving(true);
     onError(null);
@@ -248,6 +312,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
           billing_address: form.billing_address.trim(),
           lexoffice_id: form.lexoffice_id.trim(),
           contact_persons: validPersons,
+          pricing_tier: form.pricing_tier,
           ...(form.id ? { is_approved: form.is_approved } : {}),
         }),
       });
@@ -331,11 +396,30 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
     }
   };
 
-  const handleApproveClient = async (client: CrmClient) => {
+  const openApprovalModal = (client: CrmClient) => {
+    setApprovalTier(client.pricingTier);
+    setClientPendingApproval(client);
+  };
+
+  const closeApprovalModal = () => {
+    if (approvingId) {
+      return;
+    }
+    setClientPendingApproval(null);
+    setApprovalTier(null);
+  };
+
+  const handleApproveClient = async () => {
+    const client = clientPendingApproval;
+    if (!client || !approvalTier) {
+      onError("Choose a pricing tier before approving this client.");
+      return;
+    }
+
     setApprovingId(client.id);
     onError(null);
     try {
-      const result = await approveClient(client.id);
+      const result = await approveClient(client.id, approvalTier);
       if (!result.ok) {
         throw new Error(result.error);
       }
@@ -348,11 +432,60 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
       } else {
         onToast(`${client.companyName} approved.`);
       }
+      setClientPendingApproval(null);
+      setApprovalTier(null);
       await loadClients();
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to approve client.");
     } finally {
       setApprovingId(null);
+    }
+  };
+
+  const openTierModal = (client: CrmClient) => {
+    setTierDraft(client.pricingTier);
+    setTierEditClient(client);
+  };
+
+  const closeTierModal = () => {
+    if (savingTier) {
+      return;
+    }
+    setTierEditClient(null);
+    setTierDraft(null);
+  };
+
+  const handleSaveTier = async () => {
+    if (!tierEditClient || !tierDraft) {
+      onError("Choose a pricing tier.");
+      return;
+    }
+
+    setSavingTier(true);
+    onError(null);
+    try {
+      const response = await fetch("/api/admin/crm/clients", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ id: tierEditClient.id, pricing_tier: tierDraft }),
+      });
+      const json = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!response.ok || !json?.ok) {
+        throw new Error(json?.error ?? `Failed to update pricing tier (${response.status})`);
+      }
+      const savedTier = tierDraft;
+      const savedId = tierEditClient.id;
+      setClients((prev) =>
+        prev.map((client) => (client.id === savedId ? { ...client, pricingTier: savedTier } : client))
+      );
+      setTierEditClient(null);
+      setTierDraft(null);
+      onToast("Pricing tier updated.");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to update pricing tier.");
+    } finally {
+      setSavingTier(false);
     }
   };
 
@@ -488,7 +621,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                   </div>
                   <button
                     type="button"
-                    onClick={() => void handleApproveClient(client)}
+                    onClick={() => openApprovalModal(client)}
                     disabled={approvingId === client.id}
                     className="inline-flex h-8 items-center rounded-lg bg-amber-500 px-3 text-xs font-semibold text-zinc-950 hover:bg-amber-400 disabled:opacity-50"
                   >
@@ -511,6 +644,9 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                   Status
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Pricing
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
                   Contact(s)
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
@@ -530,19 +666,19 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
             <tbody className="divide-y divide-zinc-800">
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-zinc-400">
+                  <td colSpan={8} className="px-4 py-8 text-center text-zinc-400">
                     Loading clients…
                   </td>
                 </tr>
               ) : clients.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-zinc-500">
+                  <td colSpan={8} className="px-4 py-8 text-center text-zinc-500">
                     No clients yet. Add your first client profile.
                   </td>
                 </tr>
               ) : filteredClients.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-zinc-500">
+                  <td colSpan={8} className="px-4 py-8 text-center text-zinc-500">
                     No clients found matching &ldquo;{searchTerm.trim()}&rdquo;.
                   </td>
                 </tr>
@@ -568,6 +704,21 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                           Pending
                         </span>
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <PricingTierBadge client={client} />
+                        {client.isApproved ? (
+                          <button
+                            type="button"
+                            onClick={() => openTierModal(client)}
+                            disabled={savingTier || deletingId === client.id}
+                            className="inline-flex items-center rounded-lg border border-zinc-600 px-2 py-1 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {client.pricingTier ? "Change" : "Assign"}
+                          </button>
+                        ) : null}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-zinc-300">
                       {client.contactPersons.length > 0 ? (
@@ -599,7 +750,7 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                         {client.isApproved ? null : (
                           <button
                             type="button"
-                            onClick={() => void handleApproveClient(client)}
+                            onClick={() => openApprovalModal(client)}
                             disabled={approvingId === client.id || deletingId === client.id}
                             className="inline-flex items-center rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
                           >
@@ -713,6 +864,22 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                   className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-500"
                 />
               </label>
+
+              <div>
+                <span className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Pricing tier
+                </span>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Website booking prices follow this tier. No tier means the client sees no prices.
+                </p>
+                <div className="mt-2">
+                  <PricingTierPicker
+                    value={form.pricing_tier}
+                    onChange={(pricingTier) => setForm((prev) => ({ ...prev, pricing_tier: pricingTier }))}
+                    disabled={saving}
+                  />
+                </div>
+              </div>
 
               {form.id ? (
                 <div className="flex items-center justify-between gap-4 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-3">
@@ -871,6 +1038,104 @@ export default function ClientManagerSection({ active, onToast, onError }: Clien
                 className="rounded-lg border border-red-500/40 bg-red-950/40 px-4 py-2 text-sm font-semibold text-red-100 transition hover:bg-red-950/70 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {deletingId === clientPendingDelete.id ? "Deleting…" : "Delete client"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {clientPendingApproval ? (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="approve-client-modal-title"
+            className="w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 id="approve-client-modal-title" className="text-lg font-semibold text-white">
+              Approve client
+            </h3>
+            <p className="mt-3 text-sm text-zinc-300">
+              Approve <span className="font-semibold text-white">{clientPendingApproval.companyName}</span> and choose
+              the prices they see on the website.
+            </p>
+            <div className="mt-5">
+              <span className="block text-xs font-semibold uppercase tracking-wide text-zinc-400">Pricing tier</span>
+              <div className="mt-2">
+                <PricingTierPicker
+                  value={approvalTier}
+                  onChange={setApprovalTier}
+                  disabled={approvingId === clientPendingApproval.id}
+                />
+              </div>
+            </div>
+            <p className="mt-3 text-xs text-zinc-500">
+              Standard, Legacy, and Corporate use different price lists. A client with no tier sees no prices.
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeApprovalModal}
+                disabled={approvingId === clientPendingApproval.id}
+                className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-semibold text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleApproveClient()}
+                disabled={!approvalTier || approvingId === clientPendingApproval.id}
+                className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {approvingId === clientPendingApproval.id ? "Approving…" : "Approve"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {tierEditClient ? (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pricing-tier-modal-title"
+            className="w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 id="pricing-tier-modal-title" className="text-lg font-semibold text-white">
+              Pricing tier
+            </h3>
+            <p className="mt-3 text-sm text-zinc-300">
+              Set the tier for <span className="font-semibold text-white">{tierEditClient.companyName}</span>.
+            </p>
+            <div className="mt-5">
+              <PricingTierPicker value={tierDraft} onChange={setTierDraft} disabled={savingTier} />
+            </div>
+            {!tierEditClient.pricingTier ? (
+              <p className="mt-3 text-xs font-semibold text-amber-200">No tier — this client currently sees no prices.</p>
+            ) : (
+              <p className="mt-3 text-xs text-zinc-500">
+                Current tier: {pricingTierLabel(tierEditClient.pricingTier)}. Website booking prices update immediately.
+              </p>
+            )}
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeTierModal}
+                disabled={savingTier}
+                className="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-semibold text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSaveTier()}
+                disabled={savingTier || !tierDraft}
+                className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+              >
+                {savingTier ? "Saving…" : "Save tier"}
               </button>
             </div>
           </div>
