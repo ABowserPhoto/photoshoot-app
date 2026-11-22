@@ -124,7 +124,7 @@ export async function fetchTikTokMetrics(input: {
 
   const topPosts = [...source]
     .sort((left, right) => (right.view_count ?? 0) - (left.view_count ?? 0))
-    .slice(0, 4)
+    .slice(0, 20)
     .map((video) => toPost(key, video));
 
   const metrics = withDerivedMetrics(metricsFromRecord(totals), []);

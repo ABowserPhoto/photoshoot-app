@@ -38,6 +38,7 @@ import {
   getTodayDateInput,
   minDateTimeLocalValue,
 } from "@/lib/schedulerDateUtils";
+import { indexEngagementByCaption, lookupEngagementByCaption, type PostEngagementCounts } from "@/lib/postEngagement";
 import { META_OAUTH_SCOPES } from "@/lib/socialOAuthScopes";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -492,6 +493,9 @@ export default function SchedulerPage() {
   const [mobileConfigOpen, setMobileConfigOpen] = useState(false);
   const [continuityOpen, setContinuityOpen] = useState(false);
   const [clientView, setClientView] = useState<"schedule" | "metrics">("schedule");
+  const [cachedPostEngagement, setCachedPostEngagement] = useState<
+    Array<{ title: string; counts: PostEngagementCounts }>
+  >([]);
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const syncingFromDbRef = useRef(false);
 
@@ -575,6 +579,42 @@ export default function SchedulerPage() {
     });
     setMetaOAuthHref(`https://www.facebook.com/v19.0/dialog/oauth?${qs.toString()}`);
   }, [activeProfileId]);
+
+  useEffect(() => {
+    const clientId = activeClientId.trim();
+    const isClient = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId);
+    const controller = new AbortController();
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      if (!isClient) {
+        setCachedPostEngagement([]);
+        return;
+      }
+      try {
+        const response = await fetch(`/api/social/post-metrics?clientId=${encodeURIComponent(clientId)}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const payload = (await response.json().catch(() => null)) as {
+          posts?: Array<{ title?: string; counts?: PostEngagementCounts }>;
+        } | null;
+        if (cancelled || !response.ok || !Array.isArray(payload?.posts)) return;
+        setCachedPostEngagement(
+          payload.posts.flatMap((post) =>
+            post && typeof post.title === "string" && post.counts ? [{ title: post.title, counts: post.counts }] : []
+          )
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [activeClientId, clientView]);
 
   useEffect(() => {
     return () => {
@@ -1394,6 +1434,10 @@ export default function SchedulerPage() {
     () => clients.find((client) => client.id === activeClientId)?.name ?? "Client",
     [clients, activeClientId]
   );
+  const engagementByCaption = useMemo(
+    () => indexEngagementByCaption(cachedPostEngagement),
+    [cachedPostEngagement]
+  );
   const activeProfile = useMemo(
     () => profiles.find((profile) => profile.id === activeProfileId) ?? null,
     [profiles, activeProfileId]
@@ -2199,6 +2243,11 @@ export default function SchedulerPage() {
                       onEdit={setEditingSlotIndex}
                       onNativeDrop={handleDrop}
                       platformIcon={getPlatformIcon}
+                      engagement={
+                        slot?.status === "published"
+                          ? lookupEngagementByCaption(engagementByCaption, slot.caption)?.counts ?? null
+                          : null
+                      }
                     />
                   );
                 })}

@@ -13,6 +13,8 @@ import {
   YAxis,
 } from "recharts";
 
+import PostEngagementOverlay from "@/app/components/PostEngagementOverlay";
+import { postEngagementFromMetrics } from "@/lib/postEngagement";
 import {
   aggregateAccounts,
   defaultRange,
@@ -502,17 +504,20 @@ function TopPostCard({ post }: { post: SocialTopPost }) {
       </div>
     </div>
   );
+  const counts = postEngagementFromMetrics(post.metrics);
+  const className = "group relative block overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 hover:border-zinc-600";
   if (!post.permalink) {
-    return <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">{body}</div>;
+    return (
+      <div className={className}>
+        {body}
+        <PostEngagementOverlay counts={counts} tile={false} />
+      </div>
+    );
   }
   return (
-    <a
-      href={post.permalink}
-      target="_blank"
-      rel="noreferrer"
-      className="block rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 hover:border-zinc-600"
-    >
+    <a href={post.permalink} target="_blank" rel="noreferrer" className={className}>
       {body}
+      <PostEngagementOverlay counts={counts} tile={false} />
     </a>
   );
 }
