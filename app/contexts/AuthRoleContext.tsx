@@ -1,11 +1,12 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { handleClockOut } from "@/app/actions/shifts";
 import type { AppModule } from "@/lib/appModules";
 import { canAccessModule } from "@/lib/appModules";
+import { loginHrefWithRedirect, shouldReloadAuthRoleOnEvent } from "@/lib/authRefresh";
 import type { UserRole } from "@/lib/authRole";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -36,6 +37,12 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
   const [accessibleModules, setAccessibleModules] = useState<AppModule[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [tick, setTick] = useState(0);
+  const userIdRef = useRef<string | null>(null);
+  const hasResolvedRef = useRef(false);
+
+  useEffect(() => {
+    userIdRef.current = user?.id ?? null;
+  }, [user]);
 
   const refresh = useCallback(() => {
     setTick((n) => n + 1);
@@ -50,7 +57,13 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
     }
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(() => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      // auth-js emits SIGNED_IN on every hidden → visible recovery, and
+      // TOKEN_REFRESHED when the access token rotates. Reloading here used to
+      // flip isLoading and unmount the open module.
+      if (!shouldReloadAuthRoleOnEvent(event, session?.user?.id ?? null, userIdRef.current)) {
+        return;
+      }
       refresh();
     });
     return () => {
@@ -62,7 +75,10 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
 
     async function load() {
-      setIsLoading(true);
+      const background = hasResolvedRef.current;
+      if (!background) {
+        setIsLoading(true);
+      }
       try {
         const res = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" });
         const json = (await res.json().catch(() => null)) as {
@@ -111,6 +127,7 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
         }
       } finally {
         if (!cancelled) {
+          hasResolvedRef.current = true;
           setIsLoading(false);
         }
       }
@@ -149,7 +166,9 @@ export function AuthRoleProvider({ children }: { children: React.ReactNode }) {
       setIsAdmin(false);
       setAccessibleModules([]);
       setIsLoading(false);
-      router.push("/login");
+      const returnTo =
+        typeof window === "undefined" ? "/" : `${window.location.pathname}${window.location.search}`;
+      router.push(loginHrefWithRedirect(returnTo));
       router.refresh();
     }
   }, [router]);

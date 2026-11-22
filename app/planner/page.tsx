@@ -19,6 +19,8 @@ import {
   appendCreatorCollaboratorIfMissing,
   appendCurrentUserIfMissing,
   ensurePrimaryInAssignedUsers,
+  filterPlannerStaffProfiles,
+  isSelectablePlannerStaffProfile,
   isStudioTaskUnassigned,
   isUserOnStudioTask,
   parseAssignedUsers,
@@ -37,12 +39,38 @@ import PlannerTaskModal, {
   STD_PREPARE_ID,
   STD_TODO_ID,
   type PlannerModalSaveInput,
+  type PlannerPhotoshootOption,
   type PlannerSubTask,
   type PlannerTaskLabel,
   type PlannerTemplateOption,
 } from "./components/PlannerTaskModal";
 import PlannerCompletionPathModal from "./components/PlannerCompletionPathModal";
 import PlannerPauseTaskModal from "./components/PlannerPauseTaskModal";
+
+type PhotoshootLinkRow = {
+  id: string;
+  title?: string | null;
+  company_name?: string | null;
+  photoshoot_type?: string | null;
+  shoot_location?: string | null;
+  status?: string | null;
+  is_archived?: boolean | null;
+};
+
+function isCompletedWorkflowStatus(status: string | null | undefined): boolean {
+  return (status ?? "").trim().toLowerCase().replace(/[\s_]+/g, "-") === "completed";
+}
+
+function formatPhotoshootLinkLabel(row: PhotoshootLinkRow): string {
+  const parts = [row.photoshoot_type, row.company_name, row.shoot_location]
+    .map((part) => (typeof part === "string" ? part.trim() : ""))
+    .filter(Boolean);
+  const base =
+    parts.join(" · ") ||
+    (typeof row.title === "string" && row.title.trim() ? row.title.trim() : "") ||
+    "Untitled photoshoot";
+  return isCompletedWorkflowStatus(row.status) ? `${base} (Completed)` : base;
+}
 
 type MoveTaskOptions = {
   startNowFromMaster?: boolean;
@@ -90,6 +118,8 @@ type ProfileRow = {
   id: string;
   email: string | null;
   full_name: string | null;
+  role?: string | null;
+  is_archived?: boolean | null;
 };
 
 type StudioTaskRow = {
@@ -412,7 +442,12 @@ function derivePlannerIsPaused(
 
 function profileRowToAssignee(row: ProfileRow): PlannerAssignee {
   const name = row.full_name?.trim() || row.email?.trim() || row.id;
-  return { id: row.id, name };
+  return {
+    id: row.id,
+    name,
+    ...(typeof row.role === "string" ? { role: row.role } : {}),
+    ...(row.is_archived === true ? { is_archived: true } : {}),
+  };
 }
 
 function mapRowToTask(row: StudioTaskRow): PlannerTask {
@@ -465,6 +500,7 @@ export default function PlannerPage() {
   const [taskCounter, setTaskCounter] = useState(1);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [photoshootOptions, setPhotoshootOptions] = useState<PlannerPhotoshootOption[]>([]);
   const [templates, setTemplates] = useState<PlannerTemplateOption[]>([]);
   const [clockSec, setClockSec] = useState(() => Math.floor(Date.now() / 1000));
   const [loadingTasks, setLoadingTasks] = useState(true);
@@ -532,7 +568,6 @@ export default function PlannerPage() {
 
       const { data: authData } = await supabase.auth.getUser();
       const uid = authData.user?.id ?? null;
-      const sessionUserLabel = authData.user?.user_metadata?.full_name ?? authData.user?.email ?? "You";
       if (isMounted) {
         setPlannerUserId(uid);
       }
@@ -587,12 +622,10 @@ export default function PlannerPage() {
         }
       } else {
         const profileRows = (profilesResult.data ?? []) as ProfileRow[];
-        const assignees = [...profileRows]
+        // Drop client and archived rows again in case the directory response regresses.
+        const assignees = filterPlannerStaffProfiles(profileRows)
           .map(profileRowToAssignee)
           .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
-        if (uid && !assignees.some((assignee) => assignee.id === uid)) {
-          assignees.push({ id: uid, name: String(sessionUserLabel).trim() || "You" });
-        }
         if (isMounted) {
           setProfileAssignees(assignees);
         }
@@ -825,16 +858,32 @@ export default function PlannerPage() {
     [board.completed]
   );
 
+  const staffAssignees = useMemo(
+    () => profileAssignees.filter((assignee) => isSelectablePlannerStaffProfile(assignee)),
+    [profileAssignees]
+  );
+  const staffAssigneeIds = useMemo(
+    () => new Set(staffAssignees.map((assignee) => assignee.id)),
+    [staffAssignees]
+  );
+  if (
+    !loadingTasks &&
+    adminAssigneeFilter !== "all" &&
+    !staffAssigneeIds.has(adminAssigneeFilter)
+  ) {
+    setAdminAssigneeFilter("all");
+  }
+
   const currentPlannerMember = useMemo((): PlannerAssignee | null => {
     if (!plannerUserId) {
       return null;
     }
-    const fromProfiles = profileAssignees.find((p) => p.id === plannerUserId);
+    const fromProfiles = staffAssignees.find((p) => p.id === plannerUserId);
     if (fromProfiles) {
       return fromProfiles;
     }
     return { id: plannerUserId, name: "You" };
-  }, [plannerUserId, profileAssignees]);
+  }, [plannerUserId, staffAssignees]);
 
   const formatDuration = (seconds: number): string => {
     const safe = Math.max(0, Math.floor(seconds));
@@ -925,6 +974,7 @@ export default function PlannerPage() {
       file_locations: string[] | null;
       client_name: string | null;
       total_fee: number | null;
+      photoshoot_id: string | null;
     }>
   ) => {
     if (!supabase) {
@@ -1409,7 +1459,7 @@ export default function PlannerPage() {
       assignedTo: payload.assignedTo ?? null,
       label: payload.label,
       isAutoGenerated: false,
-      photoshootId: null,
+      photoshootId: payload.photoshootId ?? null,
       startedAtSec: null,
       elapsedSeconds: 0,
       isPaused: false,
@@ -1465,7 +1515,7 @@ export default function PlannerPage() {
             client_name: normalizedClientName || null,
             total_fee: normalizedTotalFee,
             is_auto_generated: false,
-            photoshoot_id: null,
+            photoshoot_id: payload.photoshootId ?? null,
             order_index: options?.initialOrderIndex ?? 0,
           })
           .select("*")
@@ -1492,7 +1542,7 @@ export default function PlannerPage() {
               client_name: normalizedClientName || null,
               total_fee: normalizedTotalFee,
               is_auto_generated: false,
-              photoshoot_id: null,
+              photoshoot_id: payload.photoshootId ?? null,
               order_index: options?.initialOrderIndex ?? 0,
             })
             .select("*")
@@ -1609,6 +1659,7 @@ export default function PlannerPage() {
       assignedUsers: activeTask.assignedUsers,
       clientName: activeTask.clientName,
       totalFee: activeTask.totalFee,
+      photoshootId: activeTask.photoshootId,
     };
   }, [isCreateModalOpen, activeTask]);
 
@@ -1760,6 +1811,64 @@ export default function PlannerPage() {
   const modalOpen = isCreateModalOpen || activeTask !== null;
   const modalKey = isCreateModalOpen ? "create-task" : activeTask?.id ?? "no-task";
 
+  useEffect(() => {
+    if (!modalOpen || !supabase) {
+      return;
+    }
+
+    let cancelled = false;
+    const selectedId = isCreateModalOpen ? null : activeTask?.photoshootId ?? null;
+
+    const loadPhotoshoots = async () => {
+      const { data, error } = await supabase
+        .from("tasks")
+        .select("id, title, company_name, photoshoot_type, shoot_location, status, is_archived")
+        .or("is_archived.is.null,is_archived.eq.false")
+        .neq("status", "Completed")
+        .order("photoshoot_date", { ascending: false, nullsFirst: false })
+        .limit(400);
+
+      if (cancelled) {
+        return;
+      }
+      if (error) {
+        console.warn("[planner] photoshoots:", error.message);
+        setPhotoshootOptions([]);
+        return;
+      }
+
+      const options: PlannerPhotoshootOption[] = [];
+      for (const row of (data ?? []) as PhotoshootLinkRow[]) {
+        if (row.is_archived === true || isCompletedWorkflowStatus(row.status)) {
+          continue;
+        }
+        options.push({ id: String(row.id), label: formatPhotoshootLinkLabel(row) });
+      }
+
+      if (selectedId && !options.some((option) => option.id === selectedId)) {
+        const { data: current } = await supabase
+          .from("tasks")
+          .select("id, title, company_name, photoshoot_type, shoot_location, status")
+          .eq("id", selectedId)
+          .maybeSingle();
+        if (!cancelled && current) {
+          const record = current as PhotoshootLinkRow;
+          options.unshift({ id: String(record.id), label: formatPhotoshootLinkLabel(record) });
+        }
+      }
+
+      if (cancelled) {
+        return;
+      }
+      setPhotoshootOptions(options);
+    };
+
+    void loadPhotoshoots();
+    return () => {
+      cancelled = true;
+    };
+  }, [modalOpen, isCreateModalOpen, activeTask?.photoshootId]);
+
   const updateTask = (taskId: string, updates: PlannerModalSaveInput) => {
     const loc = taskLookup.get(taskId);
     const effective: PlannerModalSaveInput =
@@ -1799,6 +1908,7 @@ export default function PlannerPage() {
                 assignedUsers: nextAssignedUsers,
                 clientName: normalizedClientName,
                 totalFee: normalizedTotalFee,
+                photoshootId: effective.photoshootId ?? null,
               }
             : task
         );
@@ -1821,6 +1931,7 @@ export default function PlannerPage() {
           assigned_users: serializeAssignedUsers(nextAssignedUsers),
           client_name: normalizedClientName || null,
           total_fee: normalizedTotalFee,
+          photoshoot_id: effective.photoshootId ?? null,
         });
         setPersistenceError(null);
       } catch (error) {
@@ -2391,7 +2502,7 @@ export default function PlannerPage() {
                     className="h-9 rounded-md border border-zinc-300 bg-white px-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                   >
                     <option value="all">All employees</option>
-                    {profileAssignees.map((assignee) => (
+                    {staffAssignees.map((assignee) => (
                       <option key={assignee.id} value={assignee.id}>
                         {assignee.name}
                       </option>
@@ -2422,7 +2533,11 @@ export default function PlannerPage() {
           }))}
         />
 
-        <div className="grid min-w-0 gap-4 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-8">
+        <div className="relative grid min-w-0 gap-4 lg:grid-cols-[392px_minmax(0,1fr)] lg:gap-24">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute top-0 left-[calc(392px+2rem)] hidden h-[70vh] w-px -translate-x-1/2 border-l border-zinc-200 lg:block"
+          />
           <aside className="planner-master-column h-[70vh] rounded-xl border border-zinc-900 p-3 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Master To-Do List</h2>
@@ -2472,27 +2587,22 @@ export default function PlannerPage() {
                     }}
                     className="planner-master-card group cursor-pointer rounded-lg border border-zinc-700/80 shadow-sm"
                   >
-                    <div className="flex items-start justify-between gap-1.5">
-                      <div className="flex min-w-0 flex-1 items-start gap-1">
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleMasterListSubtasksPanel(task.id, task);
-                          }}
-                          className="mt-0.5 shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
-                          aria-expanded={panelExpanded}
-                          aria-label={panelExpanded ? "Collapse subtasks" : "Expand subtasks"}
-                        >
-                          <span className="block text-[10px] font-medium leading-none text-zinc-600 dark:text-zinc-400">
-                            {panelExpanded ? "▼" : "▶"}
-                          </span>
-                        </button>
-                        <h3 className="planner-master-card-title min-w-0 text-zinc-100">
-                          {task.title}
-                        </h3>
-                      </div>
-                      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                    <div className="flex items-center justify-between gap-1">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleMasterListSubtasksPanel(task.id, task);
+                        }}
+                        className="shrink-0 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
+                        aria-expanded={panelExpanded}
+                        aria-label={panelExpanded ? "Collapse subtasks" : "Expand subtasks"}
+                      >
+                        <span className="block text-[10px] font-medium leading-none text-zinc-600 dark:text-zinc-400">
+                          {panelExpanded ? "▼" : "▶"}
+                        </span>
+                      </button>
+                      <div className="flex min-w-0 flex-wrap items-center justify-end gap-1">
                         <button
                           type="button"
                           onClick={(event) => {
@@ -2524,12 +2634,15 @@ export default function PlannerPage() {
                         ) : null}
                       </div>
                     </div>
-                    {task.description.trim() ? (
-                      <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
+                    <h3 className="planner-master-card-title mt-0.5 w-full min-w-0 break-words text-zinc-100">
+                      {task.title}
+                    </h3>
+                    {panelExpanded && task.description.trim() ? (
+                      <p className="mt-0.5 w-full min-w-0 break-words line-clamp-2 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
                         {task.description}
                       </p>
                     ) : null}
-                    {task.dueDate ? (
+                    {panelExpanded && task.dueDate ? (
                       <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
                         Due: {new Date(task.dueDate).toLocaleString()}
                       </p>
@@ -2565,7 +2678,7 @@ export default function PlannerPage() {
                           return (
                             <div
                               key={subtask.id}
-                              className="flex items-start gap-1.5 rounded-md border border-zinc-200 bg-zinc-50/80 px-1.5 py-1 dark:border-zinc-700 dark:bg-zinc-900/50"
+                              className="flex items-start gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-1"
                             >
                               <input
                                 type="checkbox"
@@ -2574,7 +2687,7 @@ export default function PlannerPage() {
                                 onChange={(event) =>
                                   onMasterListSubtaskToggle(task, subtask, event.target.checked)
                                 }
-                                className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded border-zinc-400 ${checkboxLockedClass}`}
+                                className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded border border-zinc-500 bg-zinc-900 accent-zinc-200 ${checkboxLockedClass}`}
                               />
                               <input
                                 value={subtask.title}
@@ -2625,7 +2738,9 @@ export default function PlannerPage() {
                                     }
                                   })();
                                 }}
-                                className="min-w-0 flex-1 border-0 bg-transparent p-0 text-xs text-zinc-800 outline-none focus:ring-0 dark:text-zinc-100"
+                                className={`min-w-0 flex-1 border-0 bg-transparent p-0 text-xs outline-none focus:ring-0 ${
+                                  subtask.isCompleted ? "text-zinc-300" : "text-zinc-100"
+                                }`}
                               />
                               {subtask.isStandard || subtasksReadOnly ? null : (
                                 <button
@@ -2651,12 +2766,12 @@ export default function PlannerPage() {
                               }))
                             }
                             placeholder="Add custom subtask"
-                            className="min-w-0 flex-1 rounded border border-zinc-200 bg-white px-2 py-1 text-xs text-zinc-800 outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                            className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none placeholder:text-zinc-400"
                           />
                           <button
                             type="button"
                             onClick={() => addCustomSubtaskFromMaster(task.id, masterListSubtaskDraft[task.id] ?? "")}
-                            className="shrink-0 rounded bg-zinc-900 px-2 py-1 text-xs font-semibold text-white dark:bg-zinc-100 dark:text-zinc-900"
+                            className="shrink-0 rounded border border-zinc-500 bg-zinc-800 px-2 py-1 text-xs font-semibold text-zinc-100"
                           >
                             Add
                           </button>
@@ -2665,33 +2780,37 @@ export default function PlannerPage() {
                       </div>
                     ) : null}
                     {isPlannerTimerRunning(task) ? (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          requestPauseTask(task.id);
-                        }}
-                        className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-amber-200/90 px-3 text-xs font-semibold text-amber-900 opacity-0 transition group-hover:opacity-100 hover:border-amber-400 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-100 dark:hover:border-amber-600 dark:hover:bg-amber-950/40"
-                        aria-label="Pause time tracking"
-                      >
-                        <Pause className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
-                        Pause
-                      </button>
+                      <div className={panelExpanded ? undefined : "h-0 overflow-hidden group-hover:h-auto group-hover:overflow-visible"}>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            requestPauseTask(task.id);
+                          }}
+                          className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-amber-200/90 px-3 text-xs font-semibold text-amber-900 opacity-0 transition group-hover:opacity-100 hover:border-amber-400 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-100 dark:hover:border-amber-600 dark:hover:bg-amber-950/40"
+                          aria-label="Pause time tracking"
+                        >
+                          <Pause className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
+                          Pause
+                        </button>
+                      </div>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          handleMasterListPlayClick(task);
-                        }}
-                        className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-emerald-300 px-3 text-xs font-semibold text-emerald-700 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-200 dark:hover:bg-emerald-900/30"
-                        aria-label={
-                          task.isPaused ? "Resume time tracking" : "Start time tracking"
-                        }
-                      >
-                        <Play className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
-                        {task.isPaused ? "Resume" : "Start"}
-                      </button>
+                      <div className={panelExpanded ? undefined : "h-0 overflow-hidden group-hover:h-auto group-hover:overflow-visible"}>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleMasterListPlayClick(task);
+                          }}
+                          className="mt-3 inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-emerald-300 px-3 text-xs font-semibold text-emerald-700 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-200 dark:hover:bg-emerald-900/30"
+                          aria-label={
+                            task.isPaused ? "Resume time tracking" : "Start time tracking"
+                          }
+                        >
+                          <Play className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
+                          {task.isPaused ? "Resume" : "Start"}
+                        </button>
+                      </div>
                     )}
                   </article>
                 );
@@ -2704,8 +2823,7 @@ export default function PlannerPage() {
             </div>
           </aside>
 
-          <div className="min-w-0 overflow-x-auto pb-3 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-black [&::-webkit-scrollbar-thumb]:bg-zinc-600">
-            <div className="inline-flex min-w-max flex-nowrap gap-4">
+          <div className="flex w-full min-w-0 flex-nowrap items-stretch gap-4 overflow-x-auto pb-3 [scrollbar-color:#4a4a4a_#000000] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-black [&::-webkit-scrollbar-thumb]:bg-zinc-600">
               {COLUMN_CONFIG.map((column) => {
                 const isActive = activeDropColumn === column.id;
                 const isCollapsed = isColumnCollapsed(column.id);
@@ -2721,8 +2839,10 @@ export default function PlannerPage() {
                       event.preventDefault();
                       handleDrop(column.id);
                     }}
-                    className={`h-[70vh] shrink-0 rounded-xl border bg-white p-3 shadow-sm transition-all dark:bg-zinc-900 ${
-                      isCollapsed ? "w-12 min-w-[3rem]" : "min-w-[300px] w-[300px]"
+                    className={`h-[70vh] rounded-xl border bg-white p-3 shadow-sm transition-all dark:bg-zinc-900 ${
+                      isCollapsed
+                        ? "w-12 min-w-[3rem] shrink-0"
+                        : "max-lg:w-[300px] max-lg:min-w-[300px] max-lg:shrink-0 lg:w-auto lg:min-w-[16rem] lg:flex-1"
                     } ${
                       isActive
                         ? "border-zinc-500 bg-zinc-100/80 dark:border-zinc-500 dark:bg-zinc-800/80"
@@ -2737,7 +2857,7 @@ export default function PlannerPage() {
                       ) : (
                         <>
                           <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{column.title}</h2>
-                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 lg:ml-auto dark:bg-zinc-800 dark:text-zinc-300">
                             {board[column.id].length}
                           </span>
                         </>
@@ -2895,7 +3015,6 @@ export default function PlannerPage() {
                   </section>
                 );
               })}
-            </div>
           </div>
         </div>
       </main>
@@ -2931,7 +3050,8 @@ export default function PlannerPage() {
         task={modalTaskPayload}
         mode={modalMode}
         templates={templates}
-        assigneeOptions={profileAssignees}
+        photoshootOptions={photoshootOptions}
+        assigneeOptions={staffAssignees}
         isOpen={modalOpen}
         isAdmin={isAdmin}
         onClose={closeTaskModal}

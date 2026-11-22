@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@supabase/supabase-js";
 
-import { getAuthRole } from "@/lib/server/getAuthRole";
+import { assertSocialStaff } from "@/lib/server/assertSocialStaff";
 import {
   clearInstagramConnectionsForProfile,
   listInstagramConnectionsForProfile,
@@ -22,6 +22,12 @@ export type InstagramConnectedAccount = InstagramConnectionRecord & {
 type ActionOk<T = void> = T extends void ? { ok: true } : { ok: true } & T;
 type ActionErr = { ok: false; error: string };
 
+async function requireSocialStaff(): Promise<ActionErr | null> {
+  const auth = await assertSocialStaff();
+  if (!auth.ok) return { ok: false, error: "Unauthorized" };
+  return null;
+}
+
 function serviceSupabase() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
@@ -36,10 +42,8 @@ function serviceSupabase() {
 export async function getInstagramConnections(
   profileId: string
 ): Promise<ActionOk<{ accounts: InstagramConnectedAccount[] }> | ActionErr> {
-  const auth = await getAuthRole();
-  if (!auth.authenticated) {
-    return { ok: false, error: "Unauthorized" };
-  }
+  const denied = await requireSocialStaff();
+  if (denied) return denied;
 
   const pid = profileId.trim();
   if (!pid) {
@@ -98,10 +102,8 @@ export async function saveInstagramConnection(
   igAccountId: string,
   accessToken: string
 ): Promise<ActionOk | ActionErr> {
-  const auth = await getAuthRole();
-  if (!auth.authenticated) {
-    return { ok: false, error: "Unauthorized" };
-  }
+  const denied = await requireSocialStaff();
+  if (denied) return denied;
 
   const pid = profileId.trim();
   const ig = igAccountId.trim();
@@ -130,10 +132,8 @@ export async function saveAllInstagramConnections(
   profileId: string,
   accounts: MetaIgAccountOption[]
 ): Promise<ActionOk<{ count: number }> | ActionErr> {
-  const auth = await getAuthRole();
-  if (!auth.authenticated) {
-    return { ok: false, error: "Unauthorized" };
-  }
+  const denied = await requireSocialStaff();
+  if (denied) return denied;
 
   const pid = profileId.trim();
   if (!pid) {
@@ -153,10 +153,8 @@ export async function disconnectInstagramAccount(
   profileId: string,
   igAccountId: string
 ): Promise<ActionOk | ActionErr> {
-  const auth = await getAuthRole();
-  if (!auth.authenticated) {
-    return { ok: false, error: "Unauthorized" };
-  }
+  const denied = await requireSocialStaff();
+  if (denied) return denied;
 
   const pid = profileId.trim();
   const ig = igAccountId.trim();
@@ -174,10 +172,8 @@ export async function disconnectInstagramAccount(
 }
 
 export async function disconnectInstagram(profileId: string): Promise<ActionOk | ActionErr> {
-  const auth = await getAuthRole();
-  if (!auth.authenticated) {
-    return { ok: false, error: "Unauthorized" };
-  }
+  const denied = await requireSocialStaff();
+  if (denied) return denied;
 
   const pid = profileId.trim();
   if (!pid) {
@@ -194,10 +190,8 @@ export async function disconnectInstagram(profileId: string): Promise<ActionOk |
 }
 
 export async function disconnectTikTok(profileId: string): Promise<ActionOk | ActionErr> {
-  const auth = await getAuthRole();
-  if (!auth.authenticated) {
-    return { ok: false, error: "Unauthorized" };
-  }
+  const denied = await requireSocialStaff();
+  if (denied) return denied;
 
   const pid = profileId.trim();
   if (!pid) {
@@ -215,6 +209,11 @@ export async function disconnectTikTok(profileId: string): Promise<ActionOk | Ac
       tiktok_access_token: null,
       tiktok_refresh_token: null,
       tiktok_open_id: null,
+      tiktok_token_expires_at: null,
+      tiktok_refresh_expires_at: null,
+      tiktok_scope: null,
+      tiktok_display_name: null,
+      tiktok_username: null,
     })
     .eq("id", pid);
 
@@ -227,11 +226,82 @@ export async function disconnectTikTok(profileId: string): Promise<ActionOk | Ac
   return { ok: true };
 }
 
-export async function deleteClientProfile(profileId: string): Promise<ActionOk | ActionErr> {
-  const auth = await getAuthRole();
-  if (!auth.authenticated) {
-    return { ok: false, error: "Unauthorized" };
+export type LinkedInOrganization = {
+  organizationId: string;
+  name: string | null;
+  vanityName: string | null;
+};
+
+export async function getLinkedInOrganizations(
+  profileId: string
+): Promise<ActionOk<{ organizations: LinkedInOrganization[] }> | ActionErr> {
+  const denied = await requireSocialStaff();
+  if (denied) return denied;
+  const pid = profileId.trim();
+  if (!pid) return { ok: false, error: "Missing profile id." };
+
+  const supabase = serviceSupabase();
+  if (!supabase) return { ok: false, error: "Database is not configured." };
+
+  const { data, error } = await supabase
+    .from("linkedin_connected_organizations")
+    .select("organization_id, organization_name, vanity_name")
+    .eq("profile_id", pid)
+    .order("organization_name", { ascending: true });
+  if (error) {
+    if (/does not exist|schema cache/i.test(error.message)) {
+      return { ok: true, organizations: [] };
+    }
+    return { ok: false, error: error.message };
   }
+  return {
+    ok: true,
+    organizations: (data ?? []).map((row) => ({
+      organizationId: String(row.organization_id),
+      name: typeof row.organization_name === "string" ? row.organization_name : null,
+      vanityName: typeof row.vanity_name === "string" ? row.vanity_name : null,
+    })),
+  };
+}
+
+export async function disconnectLinkedIn(profileId: string): Promise<ActionOk | ActionErr> {
+  const denied = await requireSocialStaff();
+  if (denied) return denied;
+  const pid = profileId.trim();
+  if (!pid) return { ok: false, error: "Missing profile id." };
+
+  const supabase = serviceSupabase();
+  if (!supabase) return { ok: false, error: "Database is not configured." };
+
+  const { error: orgError } = await supabase.from("linkedin_connected_organizations").delete().eq("profile_id", pid);
+  if (orgError && !/does not exist|schema cache/i.test(orgError.message)) {
+    console.error("[disconnectLinkedIn] organizations", orgError);
+    return { ok: false, error: orgError.message };
+  }
+
+  const { error } = await supabase
+    .from("social_profiles")
+    .update({
+      linkedin_access_token: null,
+      linkedin_refresh_token: null,
+      linkedin_token_expires_at: null,
+      linkedin_refresh_expires_at: null,
+      linkedin_member_id: null,
+      linkedin_scope: null,
+    })
+    .eq("id", pid);
+  if (error) {
+    console.error("[disconnectLinkedIn]", error);
+    return { ok: false, error: error.message };
+  }
+
+  revalidatePath("/scheduler");
+  return { ok: true };
+}
+
+export async function deleteClientProfile(profileId: string): Promise<ActionOk | ActionErr> {
+  const denied = await requireSocialStaff();
+  if (denied) return denied;
 
   const pid = profileId.trim();
   if (!pid) {

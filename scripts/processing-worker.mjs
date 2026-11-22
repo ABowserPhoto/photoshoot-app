@@ -184,6 +184,65 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function mergedOutputIsUsable(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Already-selected brackets skip preview regen, which only knows one preview
+ * filename. If 2_Selects only received that file, copy the rest of the matching
+ * 1_Raw bracket so HDR still gets every exposure (typically 5).
+ */
+async function backfillSelectsBracketFilesFromRaw(taskRoot, taskBracketSize) {
+  const rawDir = path.join(taskRoot, "1_Raw");
+  const selectsDir = path.join(taskRoot, "2_Selects");
+  if (!fs.existsSync(rawDir) || !fs.existsSync(selectsDir)) {
+    return [];
+  }
+
+  const selectsNames = new Set(readNaturallySortedImageFiles(selectsDir).map((name) => lookupBasename(name)));
+  if (selectsNames.size === 0) {
+    return [];
+  }
+
+  const rawBrackets = await buildTimestampBracketsFromDir(rawDir, {
+    taskBracketSize: groupingSizeForCopy(taskBracketSize),
+  });
+  const copied = [];
+  for (const bracket of rawBrackets) {
+    if (!bracket.some((name) => selectsNames.has(lookupBasename(name)))) {
+      continue;
+    }
+    for (const name of bracket) {
+      const key = lookupBasename(name);
+      if (!key || selectsNames.has(key)) {
+        continue;
+      }
+      const src = path.join(rawDir, name);
+      const dest = path.join(selectsDir, name);
+      if (!fs.existsSync(src)) {
+        logWorkerSkip(name, "raw bracket sibling missing on disk while backfilling 2_Selects for merge");
+        continue;
+      }
+      fs.copyFileSync(src, dest);
+      selectsNames.add(key);
+      copied.push(name);
+      console.log(
+        `[worker] Backfilled ${name} into 2_Selects so merge receives the full raw bracket (preview skip does not drop exposures).`
+      );
+    }
+  }
+  if (copied.length > 0) {
+    console.log(`[worker] Backfilled ${copied.length} exposure(s) into 2_Selects before HDR merge:`, copied);
+  }
+  return copied;
+}
+
 /**
  * Returns the expected merged-output filename for a bracket, matching the
  * naming logic in app/services/processingEngine.ts `mergedOutputFileName`.
@@ -713,6 +772,10 @@ function logWorkerSkip(filename, reason) {
   console.log(`[Worker Skip] Skipping ${filename}: Reason = ${reason}`);
 }
 
+function chunkSourceFiles(chunk) {
+  return Array.isArray(chunk) ? chunk.filter((name) => typeof name === "string" && name.trim()) : [];
+}
+
 function buildDirBasenameLookup(dir) {
   const map = new Map();
   if (!fs.existsSync(dir)) {
@@ -1036,9 +1099,19 @@ async function syncTaskPreviews(supabase, taskRow) {
         skippedName,
         `already selected (preview regen skipped, chunk ${chunkIndex}; does not skip merge)`
       );
+      // Preview regen stops here. Keep every exposure on the preview row so a later
+      // selection/merge still receives the full bracket, not just the preview file.
+      const sourceFiles = chunkSourceFiles(chunk);
       if (existing?.previewUrl) {
-        nextItems.push(existing);
+        nextItems.push({
+          ...existing,
+          sourceFiles,
+        });
       }
+      console.log(
+        `[worker] Preview skip kept ${sourceFiles.length} raw file(s) for chunk ${chunkIndex} (merge still uses this full list):`,
+        sourceFiles
+      );
       selectedSkippedCount += 1;
       continue;
     }
@@ -1070,6 +1143,7 @@ async function syncTaskPreviews(supabase, taskRow) {
             firstFilename,
             previewUrl,
             storagePath,
+            sourceFiles: chunkSourceFiles(chunk),
           });
           processedCount += 1;
           continue;
@@ -1085,6 +1159,7 @@ async function syncTaskPreviews(supabase, taskRow) {
             firstFilename,
             previewUrl,
             storagePath,
+            sourceFiles: chunkSourceFiles(chunk),
           });
           processedCount += 1;
           reusedFromStorageCount += 1;
@@ -1110,6 +1185,7 @@ async function syncTaskPreviews(supabase, taskRow) {
         firstFilename,
         previewUrl: uploaded.previewUrl,
         storagePath: uploaded.storagePath,
+        sourceFiles: chunkSourceFiles(chunk),
       });
       processedCount += 1;
     } catch (error) {
@@ -1754,6 +1830,14 @@ async function processTaskLocally(task) {
   const selectsDir = path.join(taskRoot, "2_Selects");
   const taskBracketSize = task.bracket_size ?? null;
   const groupingSize = groupingSizeForCopy(taskBracketSize);
+  try {
+    await backfillSelectsBracketFilesFromRaw(taskRoot, taskBracketSize);
+  } catch (error) {
+    console.error(
+      `[worker] Raw bracket backfill failed for task ${task.id}; merge will use files already in 2_Selects:`,
+      error instanceof Error ? error.message : error
+    );
+  }
   console.info(
     `[worker] Grouping ${selectsDir} into brackets (taskBracketSize=${taskBracketSize ?? "auto"}, groupingSize=${groupingSize ?? "auto"})...`
   );
@@ -1795,12 +1879,14 @@ async function processTaskLocally(task) {
   let expectedComfyJobs = 0;
 
   for (let photoIndex = 0; photoIndex < totalItems; photoIndex += 1) {
-    // ── Resume check: skip brackets already merged in a previous run ─────────
-    const firstFileInGroup = brackets[photoIndex]?.[0];
+    // Preview "already selected" skips watermarking only. Merge always gets the
+    // full bracket that grouping resolved (5 exposures stay 5 files).
+    const bracketFiles = chunkSourceFiles(brackets[photoIndex]);
+    const firstFileInGroup = bracketFiles[0];
     if (firstFileInGroup) {
       const expectedBaseName = mergedOutputFileName(firstFileInGroup, photoIndex + 1, totalItems);
       const expectedOutFile = path.join(taskRoot, "3_Merged", expectedBaseName);
-      if (fs.existsSync(expectedOutFile) && !forceRemerge) {
+      if (mergedOutputIsUsable(expectedOutFile) && !forceRemerge) {
         logWorkerSkip(
           expectedBaseName,
           `output already exists in 3_Merged (resume cache). Re-queue merge to overwrite.`
@@ -1814,9 +1900,18 @@ async function processTaskLocally(task) {
         );
       }
     }
-    // ── End resume check ──────────────────────────────────────────────────────
 
-    console.log(`[Worker] Task ${task.id}: Merging photo ${photoIndex + 1} of ${totalItems}...`);
+    console.log(
+      `[Worker] Task ${task.id}: Merging photo ${photoIndex + 1} of ${totalItems} with ${bracketFiles.length} file(s):`,
+      bracketFiles
+    );
+    if (bracketFiles.length === 0) {
+      failedItems += 1;
+      console.error(
+        `[worker] Bracket ${photoIndex + 1} has no raw files to merge (preview skip must not drop the file list).`
+      );
+      continue;
+    }
     try {
       const response = await fetchWithTimeout(
         url,
@@ -1830,7 +1925,9 @@ async function processTaskLocally(task) {
             taskId: String(task.id),
             local_folder_name: task.local_folder_name,
             bracketIndex: photoIndex,
-            bracket_size: taskBracketSize,
+            bracket_size: groupingSize,
+            totalBrackets: totalItems,
+            files: bracketFiles,
             forceRemerge,
           }),
         },
@@ -1880,6 +1977,7 @@ async function processTaskLocally(task) {
         `[worker] process-single-item request failed for task ${task.id} bracket ${photoIndex}`
       );
       const cause = err instanceof Error && err.cause instanceof Error ? err.cause : err;
+      console.error("Merge CLI Error:", message);
       console.error(message, cause ?? err);
       // Continue with next bracket/photo set even when this one fails.
       continue;

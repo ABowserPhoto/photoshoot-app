@@ -2,11 +2,20 @@ import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 import { buildCompanyLtvMap, normalizeCompanyKey } from "@/lib/crmClientLtv";
+import {
+  parsePricingTier,
+  readPricingTierField,
+  resolveClientPricingTier,
+  type PricingTier,
+} from "@/lib/pricingTiers";
 import { assertModuleAccess } from "@/lib/server/assertModuleAccess";
 import { loadReminderDatesByCompanyId } from "@/lib/server/contactReminderDates";
+import { deleteCrmClient } from "@/lib/server/deleteCrmClient";
+import { getAdminAreaAuth } from "@/lib/server/getAdminAreaAuth";
 import { pushClientToLexoffice, type ContactPerson } from "@/lib/server/lexofficeContacts";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 type ClientRow = {
   id: string;
@@ -22,6 +31,8 @@ type ClientRow = {
   lexoffice_contact_id?: string | null;
   contact_persons?: ContactPerson[] | null;
   is_approved?: boolean | null;
+  user_id?: string | null;
+  pricing_tier?: string | null;
 };
 
 export type CrmClientRecord = {
@@ -36,6 +47,8 @@ export type CrmClientRecord = {
   lifetimeRevenue: number;
   reminderDates: string[];
   isApproved: boolean;
+  hasLogin: boolean;
+  pricingTier: PricingTier | null;
 };
 
 function serviceSupabase() {
@@ -98,6 +111,8 @@ function mapClientRow(
     lifetimeRevenue: companyKey ? (ltvByCompany.get(companyKey) ?? 0) : 0,
     reminderDates: reminderDatesByCompany.get(row.id) ?? [],
     isApproved: row.is_approved === true,
+    hasLogin: Boolean(row.user_id?.trim()),
+    pricingTier: parsePricingTier(row.pricing_tier),
   };
 }
 
@@ -150,6 +165,7 @@ type ClientUpsertBody = {
   lexoffice_id?: unknown;
   contact_persons?: unknown;
   is_approved?: unknown;
+  pricing_tier?: unknown;
 };
 
 export async function POST(request: Request) {
@@ -195,17 +211,41 @@ export async function POST(request: Request) {
 
   const clientId = typeof body.id === "string" ? body.id.trim() : "";
   const requestedApproval = typeof body.is_approved === "boolean" ? body.is_approved : null;
-  let nextApproved = requestedApproval ?? true;
-  if (requestedApproval === null && clientId) {
-    const { data: existing } = await supabase
+  let existingApproval: { is_approved?: boolean | null; pricing_tier?: string | null } | null = null;
+  if (clientId) {
+    const { data: existing, error: existingError } = await supabase
       .from("clients")
-      .select("is_approved")
+      .select("is_approved, pricing_tier")
       .eq("id", clientId)
       .maybeSingle();
-    nextApproved = existing?.is_approved === true;
+    if (existingError) {
+      return NextResponse.json({ error: existingError.message }, { status: 400 });
+    }
+    if (!existing) {
+      return NextResponse.json({ error: "Client not found." }, { status: 404 });
+    }
+    existingApproval = existing;
   }
 
-  const record = { ...payload, is_approved: nextApproved };
+  const wasApproved = existingApproval?.is_approved === true;
+  const nextApproved = requestedApproval ?? (clientId ? wasApproved : true);
+  const tierField = readPricingTierField(body);
+  const tierResult = resolveClientPricingTier({
+    requiresTier: Boolean(clientId) && !wasApproved && nextApproved,
+    field: tierField,
+    existing: parsePricingTier(existingApproval?.pricing_tier),
+  });
+  if (!tierResult.ok) {
+    return NextResponse.json({ error: tierResult.error }, { status: 400 });
+  }
+
+  // Omit the column on create/upsert unless a tier was chosen, so a Lexoffice
+  // match cannot clear a tier that was already assigned.
+  const record = {
+    ...payload,
+    is_approved: nextApproved,
+    ...(clientId || tierField.status === "tier" ? { pricing_tier: tierResult.tier } : {}),
+  };
 
   // Pending clients stay local until booking access is turned on.
   const lexofficePushPromise = !nextApproved
@@ -358,10 +398,69 @@ export async function POST(request: Request) {
   return NextResponse.json({ ok: true, client: mapClientRow(data as ClientRow, ltvByCompany) }, { status: 201 });
 }
 
+export async function PATCH(request: Request) {
+  const access = await assertModuleAccess("crm");
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
+  }
+
+  let body: { id?: unknown; pricing_tier?: unknown };
+  try {
+    body = (await request.json()) as { id?: unknown; pricing_tier?: unknown };
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
+
+  const id = typeof body.id === "string" ? body.id.trim() : "";
+  const tier = parsePricingTier(body.pricing_tier);
+  if (!id) {
+    return NextResponse.json({ error: "id is required." }, { status: 400 });
+  }
+  if (!tier) {
+    return NextResponse.json(
+      { error: "pricing_tier must be standard, legacy, or corporate." },
+      { status: 400 }
+    );
+  }
+
+  const supabase = serviceSupabase();
+  if (!supabase) {
+    return NextResponse.json(
+      { error: "Supabase admin client is not configured. Set SUPABASE_SERVICE_ROLE_KEY." },
+      { status: 503 }
+    );
+  }
+
+  const { data, error } = await supabase
+    .from("clients")
+    .update({ pricing_tier: tier })
+    .eq("id", id)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 400 });
+  }
+  if (!data) {
+    return NextResponse.json({ error: "Client not found." }, { status: 404 });
+  }
+
+  const { data: tasks } = await supabase
+    .from("tasks")
+    .select(
+      "company_name, client, expected_revenue, is_paid, credit_note_paid, is_credit_note, status, services, products, discount, tax_percentage, amount_type"
+    );
+  const ltvByCompany = buildCompanyLtvMap((tasks ?? []) as Record<string, unknown>[]);
+  return NextResponse.json({ ok: true, client: mapClientRow(data as ClientRow, ltvByCompany) });
+}
+
 export async function DELETE(request: Request) {
   const access = await assertModuleAccess("crm");
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
+  }
+  if (!access.auth.isAdmin) {
+    return NextResponse.json({ error: "Only an admin can delete a client." }, { status: 403 });
   }
 
   let body: { id?: unknown };
@@ -384,10 +483,25 @@ export async function DELETE(request: Request) {
     );
   }
 
-  const { error } = await supabase.from("clients").delete().eq("id", id);
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
+  const caller = await getAdminAreaAuth();
+  const result = await deleteCrmClient(supabase, id, caller.userId);
+  if (!result.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: result.error,
+        clientDeleted: result.clientDeleted,
+        loginDeleted: result.loginDeleted,
+      },
+      { status: result.status }
+    );
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    clientDeleted: true,
+    login: result.login,
+    loginDeleted: result.loginDeleted,
+    loginMessage: result.loginMessage,
+  });
 }

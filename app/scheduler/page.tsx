@@ -23,6 +23,7 @@ import { publishToInstagram } from "@/app/actions/publish-instagram";
 import { publishToTikTok } from "@/app/actions/publish-tiktok";
 import SchedulerFeedSlot from "@/app/components/SchedulerFeedSlot";
 import SocialConnectionsModal from "@/app/components/SocialConnectionsModal";
+import SocialMetricsPanel from "@/app/components/SocialMetricsPanel";
 import type { SchedulerSocialProfileRow } from "@/lib/schedulerSocialProfile";
 import {
   normalizeInstagramPostType,
@@ -37,6 +38,8 @@ import {
   getTodayDateInput,
   minDateTimeLocalValue,
 } from "@/lib/schedulerDateUtils";
+import { indexEngagementByCaption, lookupEngagementByCaption, type PostEngagementCounts } from "@/lib/postEngagement";
+import { META_OAUTH_SCOPES } from "@/lib/socialOAuthScopes";
 import { supabase } from "@/lib/supabaseClient";
 
 const SLOT_COUNT = 12;
@@ -52,7 +55,7 @@ const DAY_OPTIONS = [
   { key: 0, label: "Su" },
 ] as const;
 
-type Platform = "instagram" | "tiktok";
+type Platform = "instagram" | "tiktok" | "linkedin";
 
 type Slot = {
   id: string;
@@ -263,6 +266,9 @@ function toDisplayPlatform(platform: string | null | undefined): string {
   if (normalized === "tiktok" || normalized === "tik tok") {
     return "TikTok";
   }
+  if (normalized === "linkedin") {
+    return "LinkedIn";
+  }
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
@@ -282,6 +288,13 @@ function getPlatformIcon(platform: string | null | undefined, className = "h-3.5
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className={className} aria-hidden="true">
         <path d="M14 4v8.5a3.5 3.5 0 1 1-3.5-3.5" />
         <path d="M14 7a5 5 0 0 0 4 2" />
+      </svg>
+    );
+  }
+  if (normalized === "linkedin") {
+    return (
+      <svg viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+        <path d="M6.5 9H4v11h2.5V9zM5.2 4C4.4 4 3.8 4.6 3.8 5.4s.6 1.4 1.4 1.4 1.5-.6 1.5-1.4S6 4 5.2 4zM20 20h-2.5v-5.6c0-1.6-.6-2.6-2-2.6-1 0-1.6.7-1.9 1.4-.1.2-.1.6-.1.9V20H11V9h2.4v1.5c.4-.7 1.3-1.8 3.2-1.8 2.3 0 4 1.5 4 4.8V20z" />
       </svg>
     );
   }
@@ -479,6 +492,10 @@ export default function SchedulerPage() {
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
   const [mobileConfigOpen, setMobileConfigOpen] = useState(false);
   const [continuityOpen, setContinuityOpen] = useState(false);
+  const [clientView, setClientView] = useState<"schedule" | "metrics">("schedule");
+  const [cachedPostEngagement, setCachedPostEngagement] = useState<
+    Array<{ title: string; counts: PostEngagementCounts }>
+  >([]);
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const syncingFromDbRef = useRef(false);
 
@@ -515,6 +532,29 @@ export default function SchedulerPage() {
         window.alert(`TikTok connection failed: ${tiktokErr}`);
       }
       window.history.replaceState({}, "", "/scheduler");
+      return;
+    }
+    if (params.get("linkedin_connected") === "1") {
+      setProfilesRefreshKey((k) => k + 1);
+      setSocialConnectionsOpen(true);
+      setClientView("metrics");
+      const warning = params.get("linkedin_warning");
+      window.alert(
+        warning === "no_organization"
+          ? "LinkedIn connected, but no administered company page was found. Metrics are available for organization pages only."
+          : "LinkedIn connected successfully."
+      );
+      window.history.replaceState({}, "", "/scheduler");
+      return;
+    }
+    const linkedinErr = params.get("linkedin_error");
+    if (linkedinErr) {
+      try {
+        window.alert(`LinkedIn connection failed: ${decodeURIComponent(linkedinErr)}`);
+      } catch {
+        window.alert(`LinkedIn connection failed: ${linkedinErr}`);
+      }
+      window.history.replaceState({}, "", "/scheduler");
     }
   }, []);
 
@@ -527,8 +567,7 @@ export default function SchedulerPage() {
     const base =
       process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") || window.location.origin;
     const redirectUri = `${base}/api/auth/meta`;
-    const scope =
-      "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement,business_management";
+    const scope = META_OAUTH_SCOPES;
     const qs = new URLSearchParams({
       client_id: appId,
       redirect_uri: redirectUri,
@@ -540,6 +579,42 @@ export default function SchedulerPage() {
     });
     setMetaOAuthHref(`https://www.facebook.com/v19.0/dialog/oauth?${qs.toString()}`);
   }, [activeProfileId]);
+
+  useEffect(() => {
+    const clientId = activeClientId.trim();
+    const isClient = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId);
+    const controller = new AbortController();
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      if (!isClient) {
+        setCachedPostEngagement([]);
+        return;
+      }
+      try {
+        const response = await fetch(`/api/social/post-metrics?clientId=${encodeURIComponent(clientId)}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const payload = (await response.json().catch(() => null)) as {
+          posts?: Array<{ title?: string; counts?: PostEngagementCounts }>;
+        } | null;
+        if (cancelled || !response.ok || !Array.isArray(payload?.posts)) return;
+        setCachedPostEngagement(
+          payload.posts.flatMap((post) =>
+            post && typeof post.title === "string" && post.counts ? [{ title: post.title, counts: post.counts }] : []
+          )
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [activeClientId, clientView]);
 
   useEffect(() => {
     return () => {
@@ -1359,6 +1434,10 @@ export default function SchedulerPage() {
     () => clients.find((client) => client.id === activeClientId)?.name ?? "Client",
     [clients, activeClientId]
   );
+  const engagementByCaption = useMemo(
+    () => indexEngagementByCaption(cachedPostEngagement),
+    [cachedPostEngagement]
+  );
   const activeProfile = useMemo(
     () => profiles.find((profile) => profile.id === activeProfileId) ?? null,
     [profiles, activeProfileId]
@@ -1975,6 +2054,47 @@ export default function SchedulerPage() {
           ) : null}
         </div>
 
+        <div className="mb-4 flex flex-wrap gap-2" role="tablist" aria-label={`${activeClientName} views`}>
+          {(
+            [
+              ["schedule", "Schedule"],
+              ["metrics", "Metrics"],
+            ] as const
+          ).map(([id, label]) => {
+            const selected = clientView === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                onClick={() => setClientView(id)}
+                className={`rounded-md border px-4 py-2 text-xs font-semibold ${
+                  selected
+                    ? "border-zinc-200 bg-zinc-100 text-zinc-900"
+                    : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {clientView === "metrics" ? (
+          <SocialMetricsPanel
+            key={activeClientId || "none"}
+            clientId={activeClientId}
+            clientName={activeClientName}
+            onManageConnections={() => {
+              if (!activeProfileId) {
+                window.alert("Add an account for this client before connecting a platform.");
+                return;
+              }
+              setSocialConnectionsOpen(true);
+            }}
+          />
+        ) : (
         <div className="relative mx-auto flex w-full max-w-full flex-col items-stretch justify-start py-2 md:mt-8 md:h-[85vh] md:items-center md:justify-center">
           <button
             type="button"
@@ -2123,6 +2243,11 @@ export default function SchedulerPage() {
                       onEdit={setEditingSlotIndex}
                       onNativeDrop={handleDrop}
                       platformIcon={getPlatformIcon}
+                      engagement={
+                        slot?.status === "published"
+                          ? lookupEngagementByCaption(engagementByCaption, slot.caption)?.counts ?? null
+                          : null
+                      }
                     />
                   );
                 })}
@@ -2141,6 +2266,7 @@ export default function SchedulerPage() {
             </DndContext>
           </div>
         </div>
+        )}
       </section>
 
       {editingSlotIndex !== null && editingSlot ? (
@@ -2362,6 +2488,7 @@ export default function SchedulerPage() {
                 >
                   <option value="instagram">Instagram</option>
                   <option value="tiktok">TikTok</option>
+                  <option value="linkedin">LinkedIn</option>
                 </select>
               </label>
 

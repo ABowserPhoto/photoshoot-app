@@ -12,17 +12,9 @@ import {
 import { normalizeRole } from "@/lib/authRole";
 import { deriveGateToken, timingSafeEqualHex } from "@/lib/gateToken";
 import { GATE_COOKIE } from "@/lib/authCookies";
+import { isUnauthenticatedAppPath } from "@/lib/passwordReset";
+import { redirectAfterRecoveryExchange } from "@/lib/recoveryExchange";
 import { getSupabasePublicEnv, getSupabaseServiceRoleKey } from "@/lib/supabaseEnv";
-
-function isPublicRoute(pathname: string): boolean {
-  if (pathname === "/login") {
-    return true;
-  }
-  if (pathname === "/gallery" || pathname.startsWith("/gallery/")) {
-    return true;
-  }
-  return false;
-}
 
 function isStaticAsset(pathname: string): boolean {
   return /\.(?:webp|png|jpg|jpeg|gif|svg|ico|woff2?|txt|xml|json)$/i.test(pathname);
@@ -97,7 +89,14 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (isPublicRoute(pathname)) {
+  // Exchange a recovery code before the public-route return so the session
+  // cookie is written on this host, including preview deployments.
+  const recoveryRedirect = await redirectAfterRecoveryExchange(request);
+  if (recoveryRedirect) {
+    return recoveryRedirect;
+  }
+
+  if (isUnauthenticatedAppPath(pathname)) {
     return NextResponse.next();
   }
 

@@ -24,6 +24,16 @@ import { useSearchParams } from "next/navigation";
 import { getAllMoodboards, type MoodboardSummary } from "@/app/actions/moodboard";
 import NoteAccessControlFields from "@/app/components/NoteAccessControlFields";
 import { useAuthRole } from "@/app/contexts/AuthRoleContext";
+import {
+  decideSaveConflict,
+  forgetNotePlace,
+  notesSearchWithNoteId,
+  readNotesPlace,
+  resolveOpenedNote,
+  upsertNotePlace,
+  writeNotesPlace,
+} from "@/lib/notesPlace";
+import { isSelectablePlannerStaffProfile } from "@/lib/plannerAssignees";
 import type {
   NotebookAccessLevel,
   NotebookWithNotes,
@@ -35,6 +45,8 @@ type RecipientOption = {
   id: string;
   email: string | null;
   full_name: string | null;
+  role?: string | null;
+  is_archived?: boolean | null;
 };
 
 type NotebookFormState = {
@@ -52,6 +64,14 @@ const RichTextEditor = dynamic(() => import("@/app/components/RichTextEditor"), 
   ),
 });
 
+/**
+ * Sidebar row actions stay hover-reveal for a mouse on md+ screens.
+ * Touch (`hover: none` / `pointer: coarse`) and the narrow layout always show them,
+ * with a 36px target. Keyboard focus inside the row reveals them too.
+ */
+const ROW_ACTION_VISIBILITY =
+  "opacity-0 max-md:opacity-100 [@media(hover:none)]:h-9 [@media(hover:none)]:w-9 [@media(hover:none)]:opacity-100 [@media(pointer:coarse)]:h-9 [@media(pointer:coarse)]:w-9 [@media(pointer:coarse)]:opacity-100";
+
 type FullNote = NoteRecord;
 
 function toErrorMessage(error: unknown, fallback: string) {
@@ -60,9 +80,40 @@ function toErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+const NOTE_CONFLICT_MESSAGE =
+  "This note changed somewhere else. Your unsaved text is still here and was not written over the newer copy.";
+
+function notesStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function readNoteIdFromLocation(): string | null {
+  if (typeof window === "undefined") return null;
+  const id = new URLSearchParams(window.location.search).get("noteId")?.trim();
+  return id || null;
+}
+
+function replaceNotesQuery(noteId: string | null) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  const nextSearch = notesSearchWithNoteId(url.search, noteId);
+  const next = `${url.pathname}${nextSearch}${url.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next === current) return;
+  window.history.replaceState(window.history.state, "", next);
+}
+
 function NotesPageContent() {
   const searchParams = useSearchParams();
-  const noteIdParam = searchParams.get("noteId");
+  const routerNoteId = searchParams.get("noteId")?.trim() || null;
+  // The address bar is updated with history.replaceState so opening a note does
+  // not remount the page. After that, location is ahead of useSearchParams.
+  const noteIdParam = readNoteIdFromLocation() || routerNoteId;
   const { isAdmin } = useAuthRole();
 
   const [notebooks, setNotebooks] = useState<NotebookWithNotes[]>([]);
@@ -70,9 +121,9 @@ function NotesPageContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(noteIdParam);
   const [activeNote, setActiveNote] = useState<FullNote | null>(null);
-  const [noteLoading, setNoteLoading] = useState(false);
+  const [noteLoading, setNoteLoading] = useState(Boolean(noteIdParam));
   const [titleDraft, setTitleDraft] = useState("");
   const [contentDraft, setContentDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -90,9 +141,108 @@ function NotesPageContent() {
   const [sendingMessage, setSendingMessage] = useState(false);
   const [sendFeedback, setSendFeedback] = useState<string | null>(null);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [editorScrollTop, setEditorScrollTop] = useState(0);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const placeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeNoteIdRef = useRef<string | null>(null);
   const openedNoteParamRef = useRef<string | null>(null);
+  const titleDraftRef = useRef("");
+  const contentDraftRef = useRef("");
+  const baseUpdatedAtRef = useRef("");
+  const baseTitleRef = useRef("");
+  const baseContentRef = useRef("");
+  const scrollTopRef = useRef(0);
+  const conflictRef = useRef(false);
+  const scheduleSaveRef = useRef<(noteId: string, title: string, content: string) => void>(() => {});
+
+  const capturePlace = useCallback((noteId: string | null) => {
+    if (!noteId || !baseUpdatedAtRef.current) return;
+    const storage = notesStorage();
+    writeNotesPlace(
+      storage,
+      upsertNotePlace(readNotesPlace(storage), {
+        noteId,
+        title: titleDraftRef.current,
+        content: contentDraftRef.current,
+        baseUpdatedAt: baseUpdatedAtRef.current,
+        baseTitle: baseTitleRef.current,
+        baseContent: baseContentRef.current,
+        scrollTop: scrollTopRef.current,
+      })
+    );
+  }, []);
+
+  const queuePlaceSave = useCallback(() => {
+    if (placeTimerRef.current) clearTimeout(placeTimerRef.current);
+    placeTimerRef.current = setTimeout(() => {
+      placeTimerRef.current = null;
+      capturePlace(activeNoteIdRef.current);
+    }, 200);
+  }, [capturePlace]);
+
+  const commitSavedPlace = useCallback(
+    (
+      noteId: string,
+      saved: { title: string; content: string; updatedAt: string },
+      sent: { title?: string; content?: string }
+    ) => {
+      const storage = notesStorage();
+      const place = readNotesPlace(storage);
+      const stored = place.drafts[noteId];
+      const isActive = activeNoteIdRef.current === noteId;
+      const baseTitle =
+        sent.title !== undefined
+          ? saved.title
+          : isActive
+            ? baseTitleRef.current
+            : (stored?.baseTitle ?? saved.title);
+      const baseContent =
+        sent.content !== undefined
+          ? sent.content
+          : isActive
+            ? baseContentRef.current
+            : (stored?.baseContent ?? saved.content);
+      writeNotesPlace(
+        storage,
+        upsertNotePlace(place, {
+          noteId,
+          title: isActive ? titleDraftRef.current : (stored?.title ?? saved.title),
+          content: isActive ? contentDraftRef.current : (stored?.content ?? saved.content),
+          baseUpdatedAt: saved.updatedAt,
+          baseTitle,
+          baseContent,
+          scrollTop: isActive
+            ? scrollTopRef.current
+            : (place.scroll[noteId] ?? stored?.scrollTop ?? 0),
+        })
+      );
+    },
+    []
+  );
+
+  const forgetPlace = useCallback((noteId: string) => {
+    const storage = notesStorage();
+    writeNotesPlace(storage, forgetNotePlace(readNotesPlace(storage), noteId));
+  }, []);
+
+  const clearOpenNote = useCallback(() => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    if (placeTimerRef.current) clearTimeout(placeTimerRef.current);
+    setSelectedNoteId(null);
+    setActiveNote(null);
+    setTitleDraft("");
+    setContentDraft("");
+    titleDraftRef.current = "";
+    contentDraftRef.current = "";
+    baseUpdatedAtRef.current = "";
+    baseTitleRef.current = "";
+    baseContentRef.current = "";
+    scrollTopRef.current = 0;
+    conflictRef.current = false;
+    activeNoteIdRef.current = null;
+    openedNoteParamRef.current = null;
+    replaceNotesQuery(null);
+  }, []);
 
   const loadNotebooks = useCallback(async () => {
     setError(null);
@@ -133,12 +283,16 @@ function NotesPageContent() {
     let cancelled = false;
     void (async () => {
       try {
-        const response = await fetch("/api/planner/assignees");
+        const response = await fetch("/api/planner/assignees", {
+          cache: "no-store",
+          credentials: "include",
+        });
         const payload = (await response.json().catch(() => null)) as
           | { data?: RecipientOption[]; error?: string }
           | null;
         if (!response.ok || cancelled) return;
-        setRecipients(payload?.data ?? []);
+        const employees = (payload?.data ?? []).filter((user) => isSelectablePlannerStaffProfile(user));
+        setRecipients(employees);
       } catch {
         if (!cancelled) setRecipients([]);
       }
@@ -199,9 +353,20 @@ function NotesPageContent() {
   ]);
 
   const selectNote = useCallback(async (noteId: string) => {
+    replaceNotesQuery(noteId);
+    openedNoteParamRef.current = noteId;
+    if (activeNoteIdRef.current === noteId) return;
+
+    if (placeTimerRef.current) {
+      clearTimeout(placeTimerRef.current);
+      placeTimerRef.current = null;
+    }
+    capturePlace(activeNoteIdRef.current);
+
     setSelectedNoteId(noteId);
     setIsMobileSidebarOpen(false);
     activeNoteIdRef.current = noteId;
+    conflictRef.current = false;
     setNoteLoading(true);
     setSaveError(null);
     try {
@@ -213,10 +378,48 @@ function NotesPageContent() {
         throw new Error(payload?.error || `Failed to load note (${response.status}).`);
       }
       if (activeNoteIdRef.current !== noteId) return;
-      setActiveNote(payload.note);
-      setTitleDraft(payload.note.title);
-      setContentDraft(payload.note.content || "");
+      const place = readNotesPlace(notesStorage());
+      const draft = place.drafts[noteId] ?? null;
+      const resolved = resolveOpenedNote({
+        server: {
+          title: payload.note.title,
+          content: payload.note.content || "",
+          updatedAt: payload.note.updatedAt,
+        },
+        draft,
+        scrollTop: place.scroll[noteId] ?? draft?.scrollTop ?? 0,
+      });
+      titleDraftRef.current = resolved.title;
+      contentDraftRef.current = resolved.content;
+      baseUpdatedAtRef.current = resolved.baseUpdatedAt;
+      baseTitleRef.current = resolved.baseTitle;
+      baseContentRef.current = resolved.baseContent;
+      scrollTopRef.current = resolved.scrollTop;
+      setEditorScrollTop(resolved.scrollTop);
+      setActiveNote({ ...payload.note, title: resolved.title, content: resolved.content });
+      setTitleDraft(resolved.title);
+      setContentDraft(resolved.content);
       setExpanded((prev) => ({ ...prev, [payload.note!.notebookId]: true }));
+      if (resolved.clearDraft || resolved.pendingSave || resolved.conflict) {
+        writeNotesPlace(
+          notesStorage(),
+          upsertNotePlace(place, {
+            noteId,
+            title: resolved.title,
+            content: resolved.content,
+            baseUpdatedAt: resolved.baseUpdatedAt,
+            baseTitle: resolved.baseTitle,
+            baseContent: resolved.baseContent,
+            scrollTop: resolved.scrollTop,
+          })
+        );
+      }
+      if (resolved.conflict) {
+        conflictRef.current = true;
+        setSaveError(NOTE_CONFLICT_MESSAGE);
+      } else if (resolved.pendingSave) {
+        scheduleSaveRef.current(noteId, resolved.title, resolved.content);
+      }
     } catch (err) {
       if (activeNoteIdRef.current === noteId) {
         setSaveError(toErrorMessage(err, "Failed to load note."));
@@ -227,12 +430,12 @@ function NotesPageContent() {
         setNoteLoading(false);
       }
     }
-  }, []);
+  }, [capturePlace]);
 
   useEffect(() => {
     const id = noteIdParam?.trim();
     if (!id || loading) return;
-    if (openedNoteParamRef.current === id) return;
+    if (openedNoteParamRef.current === id || activeNoteIdRef.current === id) return;
     openedNoteParamRef.current = id;
     void selectNote(id);
   }, [noteIdParam, loading, selectNote]);
@@ -248,74 +451,170 @@ function NotesPageContent() {
         moodboardId?: string | null;
       }
     ) => {
-      setSaving(true);
-      setSaveError(null);
-      try {
-        const response = await fetch(`/api/notes/${noteId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(patch),
-        });
-        const payload = (await response.json().catch(() => null)) as
-          | { note?: FullNote; error?: string }
-          | null;
-        if (!response.ok || !payload?.note) {
-          throw new Error(payload?.error || `Save failed (${response.status}).`);
+      const applySavedNote = (saved: FullNote, sent: typeof patch) => {
+        const writesText = sent.title !== undefined || sent.content !== undefined;
+        if (writesText) {
+          baseUpdatedAtRef.current = saved.updatedAt;
+          if (sent.title !== undefined) {
+            baseTitleRef.current = saved.title;
+            if (titleDraftRef.current === sent.title) {
+              titleDraftRef.current = saved.title;
+              setTitleDraft(saved.title);
+            }
+          }
+          if (sent.content !== undefined) {
+            baseContentRef.current = sent.content;
+          }
+          conflictRef.current = false;
+        } else if (activeNoteIdRef.current === noteId) {
+          baseUpdatedAtRef.current = saved.updatedAt;
         }
         if (activeNoteIdRef.current === noteId) {
-          setActiveNote(payload.note);
-          setTitleDraft(payload.note.title);
+          const patchTouchedAccess =
+            sent.accessLevel !== undefined || sent.assignedUserIds !== undefined;
+          const patchTouchedMoodboard = Object.prototype.hasOwnProperty.call(sent, "moodboardId");
+          setActiveNote((prev) => {
+            if (!prev || prev.id !== noteId) return saved;
+            return {
+              ...saved,
+              title: titleDraftRef.current,
+              content: contentDraftRef.current,
+              accessLevel: patchTouchedAccess ? saved.accessLevel : prev.accessLevel,
+              assignedUserIds: patchTouchedAccess ? saved.assignedUserIds : prev.assignedUserIds,
+              moodboardId: patchTouchedMoodboard ? saved.moodboardId : prev.moodboardId,
+            };
+          });
         }
         setNotebooks((prev) =>
           prev.map((nb) => {
-            if (nb.id !== payload.note!.notebookId) {
+            if (nb.id !== saved.notebookId) {
               return {
                 ...nb,
                 notes: nb.notes.filter((n) => n.id !== noteId),
               };
             }
             const summary: NoteSummary = {
-              id: payload.note!.id,
-              notebookId: payload.note!.notebookId,
-              title: payload.note!.title,
-              visibility: payload.note!.visibility,
-              accessLevel: payload.note!.accessLevel,
-              assignedUserIds: payload.note!.assignedUserIds,
-              moodboardId: payload.note!.moodboardId,
-              updatedAt: payload.note!.updatedAt,
-              createdAt: payload.note!.createdAt,
+              id: saved.id,
+              notebookId: saved.notebookId,
+              title: saved.title,
+              visibility: saved.visibility,
+              accessLevel: saved.accessLevel,
+              assignedUserIds: saved.assignedUserIds,
+              moodboardId: saved.moodboardId,
+              updatedAt: saved.updatedAt,
+              createdAt: saved.createdAt,
             };
-            const notes = [
-              summary,
-              ...nb.notes.filter((n) => n.id !== noteId),
-            ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-            return { ...nb, notes, updatedAt: payload.note!.updatedAt };
+            const notes = [summary, ...nb.notes.filter((n) => n.id !== noteId)].sort((a, b) =>
+              b.updatedAt.localeCompare(a.updatedAt)
+            );
+            return { ...nb, notes, updatedAt: saved.updatedAt };
           })
         );
+        commitSavedPlace(noteId, saved, sent);
+      };
+
+      const run = async (nextPatch: typeof patch, allowRetry: boolean) => {
+        const response = await fetch(`/api/notes/${noteId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...nextPatch,
+            expectedUpdatedAt: baseUpdatedAtRef.current,
+          }),
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | { note?: FullNote; error?: string; conflict?: boolean }
+          | null;
+        if (response.status === 409 && payload?.note && payload.conflict) {
+          const decision = decideSaveConflict({
+            serverTitle: payload.note.title,
+            serverContent: payload.note.content || "",
+            localTitle: titleDraftRef.current,
+            localContent: contentDraftRef.current,
+            baseTitle: baseTitleRef.current,
+            baseContent: baseContentRef.current,
+          });
+          if (decision === "apply-server") {
+            baseUpdatedAtRef.current = payload.note.updatedAt;
+            baseTitleRef.current = payload.note.title;
+            baseContentRef.current = payload.note.content || "";
+            conflictRef.current = false;
+            capturePlace(noteId);
+            return;
+          }
+          if (decision === "retry" && allowRetry) {
+            baseUpdatedAtRef.current = payload.note.updatedAt;
+            baseTitleRef.current = payload.note.title;
+            baseContentRef.current = payload.note.content || "";
+            await run(
+              {
+                ...nextPatch,
+                title: titleDraftRef.current,
+                content: contentDraftRef.current,
+              },
+              false
+            );
+            return;
+          }
+          if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+          conflictRef.current = true;
+          setSaveError(NOTE_CONFLICT_MESSAGE);
+          capturePlace(noteId);
+          return;
+        }
+        if (!response.ok || !payload?.note) {
+          throw new Error(payload?.error || `Save failed (${response.status}).`);
+        }
+        applySavedNote(payload.note, nextPatch);
+      };
+
+      setSaving(true);
+      setSaveError(null);
+      try {
+        await run(patch, true);
       } catch (err) {
         setSaveError(toErrorMessage(err, "Failed to save note."));
       } finally {
         setSaving(false);
       }
     },
-    []
+    [capturePlace, commitSavedPlace]
   );
 
   const scheduleSave = useCallback(
     (noteId: string, title: string, content: string) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      if (conflictRef.current) return;
       saveTimerRef.current = setTimeout(() => {
         void persistNote(noteId, { title, content });
       }, 600);
     },
     [persistNote]
   );
+  useEffect(() => {
+    scheduleSaveRef.current = scheduleSave;
+  }, [scheduleSave]);
 
   useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    const flush = () => {
+      if (placeTimerRef.current) {
+        clearTimeout(placeTimerRef.current);
+        placeTimerRef.current = null;
+      }
+      capturePlace(activeNoteIdRef.current);
     };
-  }, []);
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      flush();
+    };
+  }, [capturePlace]);
 
   const closeCreateNotebookModal = useCallback(() => {
     setIsCreateNotebookModalOpen(false);
@@ -516,17 +815,15 @@ function NotesPageContent() {
             notes: nb.notes.filter((n) => n.id !== noteId),
           }))
         );
+        forgetPlace(noteId);
         if (selectedNoteId === noteId) {
-          setSelectedNoteId(null);
-          setActiveNote(null);
-          setTitleDraft("");
-          setContentDraft("");
+          clearOpenNote();
         }
       } catch (err) {
         setError(toErrorMessage(err, "Failed to delete note."));
       }
     },
-    [selectedNoteId]
+    [clearOpenNote, forgetPlace, selectedNoteId]
   );
 
   const deleteNotebook = useCallback(
@@ -542,17 +839,17 @@ function NotesPageContent() {
         }
         const removed = notebooks.find((nb) => nb.id === notebookId);
         setNotebooks((prev) => prev.filter((nb) => nb.id !== notebookId));
+        for (const note of removed?.notes ?? []) {
+          forgetPlace(note.id);
+        }
         if (removed?.notes.some((n) => n.id === selectedNoteId)) {
-          setSelectedNoteId(null);
-          setActiveNote(null);
-          setTitleDraft("");
-          setContentDraft("");
+          clearOpenNote();
         }
       } catch (err) {
         setError(toErrorMessage(err, "Failed to delete notebook."));
       }
     },
-    [notebooks, selectedNoteId]
+    [clearOpenNote, forgetPlace, notebooks, selectedNoteId]
   );
 
   const selectedNotebook = useMemo(() => {
@@ -655,7 +952,7 @@ function NotesPageContent() {
                         type="button"
                         title="New note"
                         onClick={() => void createNote(nb.id)}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-400 opacity-0 hover:bg-zinc-800 hover:text-zinc-100 group-hover:opacity-100"
+                        className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 ${ROW_ACTION_VISIBILITY} group-hover:opacity-100 group-focus-within:opacity-100`}
                       >
                         <Plus className="h-3.5 w-3.5" />
                       </button>
@@ -664,7 +961,7 @@ function NotesPageContent() {
                           type="button"
                           title="Notebook settings"
                           onClick={() => openEditNotebookModal(nb)}
-                          className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-400 opacity-0 hover:bg-zinc-800 hover:text-zinc-100 group-hover:opacity-100"
+                          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 ${ROW_ACTION_VISIBILITY} group-hover:opacity-100 group-focus-within:opacity-100`}
                         >
                           <Settings2 className="h-3.5 w-3.5" />
                         </button>
@@ -674,7 +971,7 @@ function NotesPageContent() {
                           type="button"
                           title="Delete notebook"
                           onClick={() => void deleteNotebook(nb.id)}
-                          className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-500 opacity-0 hover:bg-red-950/50 hover:text-red-300 group-hover:opacity-100"
+                          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-red-950/50 hover:text-red-300 ${ROW_ACTION_VISIBILITY} group-hover:opacity-100 group-focus-within:opacity-100`}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -716,7 +1013,7 @@ function NotesPageContent() {
                                   type="button"
                                   title="Delete note"
                                   onClick={() => void deleteNote(note.id)}
-                                  className="inline-flex h-7 w-7 items-center justify-center rounded text-zinc-500 opacity-0 hover:bg-red-950/50 hover:text-red-300 group-hover/note:opacity-100"
+                                  className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-red-950/50 hover:text-red-300 ${ROW_ACTION_VISIBILITY} group-hover/note:opacity-100 group-focus-within/note:opacity-100`}
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
@@ -773,10 +1070,25 @@ function NotesPageContent() {
               Open notebooks
             </button>
           </div>
-        ) : noteLoading || !activeNote ? (
+        ) : noteLoading ? (
           <div className="flex flex-1 items-center justify-center gap-2 text-sm text-zinc-500">
             <Loader2 className="h-4 w-4 animate-spin" />
             Loading note…
+          </div>
+        ) : !activeNote ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+            <FileText className="h-10 w-10 text-zinc-600" />
+            <p className="text-sm font-medium text-zinc-300">Could not open this note</p>
+            <p className="max-w-sm text-xs text-red-300">
+              {saveError || "It may have been deleted."}
+            </p>
+            <button
+              type="button"
+              onClick={clearOpenNote}
+              className="mt-2 inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-100 hover:bg-zinc-800"
+            >
+              Back to notes
+            </button>
           </div>
         ) : (
           <>
@@ -803,8 +1115,10 @@ function NotesPageContent() {
                   value={titleDraft}
                   onChange={(event) => {
                     const next = event.target.value;
+                    titleDraftRef.current = next;
                     setTitleDraft(next);
-                    scheduleSave(activeNote.id, next, contentDraft);
+                    scheduleSave(activeNote.id, next, contentDraftRef.current);
+                    queuePlaceSave();
                   }}
                   placeholder="Untitled"
                   className="w-full bg-transparent text-xl font-semibold text-zinc-50 outline-none placeholder:text-zinc-600"
@@ -906,9 +1220,17 @@ function NotesPageContent() {
               <RichTextEditor
                 key={activeNote.id}
                 content={contentDraft}
+                initialScrollTop={editorScrollTop}
+                scrollRestoreKey={activeNote.id}
+                onScrollPosition={(scrollTop) => {
+                  scrollTopRef.current = scrollTop;
+                  queuePlaceSave();
+                }}
                 onChange={(html) => {
+                  contentDraftRef.current = html;
                   setContentDraft(html);
-                  scheduleSave(activeNote.id, titleDraft, html);
+                  scheduleSave(activeNote.id, titleDraftRef.current, html);
+                  queuePlaceSave();
                 }}
               />
             </div>

@@ -38,6 +38,22 @@ type PhotoshootType =
   | "Mini Session"
   | "Event";
 type ItemType = "Service" | "Product";
+
+type PlannerTaskLinkOption = {
+  id: string;
+  label: string;
+};
+
+function formatPlannerTaskLinkLabel(
+  title: string | null | undefined,
+  clientName: string | null | undefined,
+  status?: string | null
+): string {
+  const name = typeof title === "string" && title.trim() ? title.trim() : "Untitled task";
+  const client = typeof clientName === "string" ? clientName.trim() : "";
+  const base = client ? `${name} · ${client}` : name;
+  return (status ?? "").trim().toLowerCase() === "completed" ? `${base} (Completed)` : base;
+}
 type PreviewPreference = "first" | "middle" | "last";
 
 function splitContactPerson(fullName: string): { firstName: string; lastName: string } {
@@ -309,7 +325,10 @@ function HomeContent() {
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploadTask, setUploadTask] = useState<BoardTask | null>(null);
-  const [allBoardTasks, setAllBoardTasks] = useState<BoardTask[]>([]);
+  const [plannerTaskOptions, setPlannerTaskOptions] = useState<PlannerTaskLinkOption[]>([]);
+  const [linkedPlannerTaskId, setLinkedPlannerTaskId] = useState<string | null>(null);
+  const initialLinkedPlannerTaskIdRef = useRef<string | null>(null);
+  const plannerLinkReadyRef = useRef(false);
   const [linkedItemId, setLinkedItemId] = useState<string | null>(null);
   const [localOpenPath, setLocalOpenPath] = useState("");
   const [softwareToast, setSoftwareToast] = useState<{ message: string; isError: boolean } | null>(null);
@@ -885,8 +904,122 @@ function HomeContent() {
     setPreservedTaskTitle("");
     setFormError(null);
     setLinkedItemId(null);
+    setLinkedPlannerTaskId(null);
+    initialLinkedPlannerTaskIdRef.current = null;
+    plannerLinkReadyRef.current = false;
     setLocalOpenPath("");
     setSoftwareToast(null);
+  };
+
+  useEffect(() => {
+    if (!showBookingModal || !supabase) {
+      plannerLinkReadyRef.current = false;
+      return;
+    }
+
+    let cancelled = false;
+    plannerLinkReadyRef.current = false;
+    setLinkedPlannerTaskId(null);
+    initialLinkedPlannerTaskIdRef.current = null;
+
+    const loadPlannerTasks = async () => {
+      const { data, error } = await supabase
+        .from("studio_tasks")
+        .select("id, title, client_name, status")
+        .neq("status", "completed")
+        .neq("status", "template")
+        .order("title", { ascending: true });
+
+      if (cancelled) {
+        return;
+      }
+
+      if (error) {
+        console.warn("[booking] planner tasks:", error.message);
+        setPlannerTaskOptions([]);
+        setLinkedPlannerTaskId(null);
+        initialLinkedPlannerTaskIdRef.current = null;
+        plannerLinkReadyRef.current = true;
+        return;
+      }
+
+      const options: PlannerTaskLinkOption[] = (data ?? []).map((row) => ({
+        id: String(row.id),
+        label: formatPlannerTaskLinkLabel(row.title, row.client_name, row.status),
+      }));
+
+      let selectedId: string | null = null;
+      if (editingTaskId) {
+        const { data: linkedRows, error: linkedError } = await supabase
+          .from("studio_tasks")
+          .select("id, title, client_name, status")
+          .eq("photoshoot_id", editingTaskId)
+          .order("order_index", { ascending: true });
+
+        if (!cancelled && !linkedError && linkedRows && linkedRows.length > 0) {
+          const preferred =
+            linkedRows.find((row) => {
+              const status = String(row.status ?? "").trim().toLowerCase();
+              return status !== "completed" && status !== "template";
+            }) ?? linkedRows[0];
+          selectedId = String(preferred.id);
+          if (!options.some((option) => option.id === selectedId)) {
+            options.unshift({
+              id: selectedId,
+              label: formatPlannerTaskLinkLabel(preferred.title, preferred.client_name, preferred.status),
+            });
+          }
+        }
+      }
+
+      if (cancelled) {
+        return;
+      }
+      setPlannerTaskOptions(options);
+      setLinkedPlannerTaskId(selectedId);
+      initialLinkedPlannerTaskIdRef.current = selectedId;
+      plannerLinkReadyRef.current = true;
+    };
+
+    void loadPlannerTasks();
+    return () => {
+      cancelled = true;
+    };
+  }, [showBookingModal, editingTaskId]);
+
+  const syncLinkedPlannerTask = async (bookingId: string): Promise<string | null> => {
+    if (!supabase || !plannerLinkReadyRef.current) {
+      return null;
+    }
+    const previousId = initialLinkedPlannerTaskIdRef.current;
+    const nextId = linkedPlannerTaskId;
+    if (previousId === nextId) {
+      return null;
+    }
+
+    if (previousId) {
+      const { error } = await supabase
+        .from("studio_tasks")
+        .update({ photoshoot_id: null })
+        .eq("id", previousId)
+        .eq("photoshoot_id", bookingId);
+      if (error) {
+        return error.message;
+      }
+    }
+
+    if (nextId) {
+      const { error } = await supabase
+        .from("studio_tasks")
+        .update({ photoshoot_id: bookingId })
+        .eq("id", nextId);
+      if (error) {
+        return error.message;
+      }
+    }
+
+    initialLinkedPlannerTaskIdRef.current = nextId;
+    return null;
   };
 
   const closeModal = () => {
@@ -1310,6 +1443,11 @@ function HomeContent() {
         setFormError(error.message);
         return;
       }
+      const linkError = await syncLinkedPlannerTask(editingTaskId);
+      if (linkError) {
+        setFormError(`Booking saved, but the planner task link failed: ${linkError}`);
+        return;
+      }
       closeModal();
       setRefreshSignal((prev) => prev + 1);
       await loadReferenceData();
@@ -1421,6 +1559,11 @@ function HomeContent() {
         setFormError(updateBody?.error ?? `Could not update booking (HTTP ${updateResponse.status}).`);
         return;
       }
+      const linkError = await syncLinkedPlannerTask(editingTaskId);
+      if (linkError) {
+        setFormError(`Booking saved, but the planner task link failed: ${linkError}`);
+        return;
+      }
     } else {
       const createResponse = await fetch("/api/tasks/create", {
         method: "POST",
@@ -1434,6 +1577,14 @@ function HomeContent() {
       if (!createResponse.ok) {
         setFormError(createBody?.error ?? `Could not create booking (HTTP ${createResponse.status}).`);
         return;
+      }
+      const createdId = typeof createBody?.id === "string" ? createBody.id : "";
+      if (createdId && linkedPlannerTaskId) {
+        const linkError = await syncLinkedPlannerTask(createdId);
+        if (linkError) {
+          setFormError(`Booking created, but the planner task link failed: ${linkError}`);
+          return;
+        }
       }
     }
 
@@ -1651,7 +1802,6 @@ function HomeContent() {
                 onTaskMoved={handleTaskMoved}
                 onEditedIntercept={handleEditedIntercept}
                 showArchived={showArchiveView}
-                onBoardChange={setAllBoardTasks}
               />
             </div>
             <div className="min-w-0">
@@ -1666,7 +1816,6 @@ function HomeContent() {
               onTaskMoved={handleTaskMoved}
               onEditedIntercept={handleEditedIntercept}
               showArchived={showArchiveView}
-              onBoardChange={setAllBoardTasks}
             />
           </div>
         )}
@@ -2403,29 +2552,26 @@ function HomeContent() {
                       ) : null}
                     </div>
                     <label className="sm:col-span-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                      Link to Shoot / Task
+                      Link Task
                       <select
-                        value={linkedItemId ?? ""}
-                        onChange={(event) => setLinkedItemId(event.target.value || null)}
+                        value={linkedPlannerTaskId ?? ""}
+                        onChange={(event) => setLinkedPlannerTaskId(event.target.value || null)}
                         className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                       >
                         <option value="">— No link —</option>
-                        {allBoardTasks
-                          .filter((t) => t.id !== editingTaskId)
-                          .map((t) => (
-                            <option key={t.id} value={t.id}>
-                              {[t.photoshootType, t.companyName, t.shootLocation].filter(Boolean).join(" · ") || t.taskTitle || t.id}
-                            </option>
-                          ))}
+                        {plannerTaskOptions.map((task) => (
+                          <option key={task.id} value={task.id}>
+                            {task.label}
+                          </option>
+                        ))}
                       </select>
-                      {linkedItemId ? (() => {
-                        const linked = allBoardTasks.find((t) => t.id === linkedItemId);
-                        return linked ? (
-                          <span className="mt-1 inline-flex items-center gap-1 rounded-md border border-violet-400/50 bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-700 dark:border-violet-600/40 dark:bg-violet-950/30 dark:text-violet-300">
-                            🔗 Linked to: {[linked.photoshootType, linked.companyName, linked.shootLocation].filter(Boolean).join(" · ") || linked.taskTitle || linked.id}
-                          </span>
-                        ) : null;
-                      })() : null}
+                      {linkedPlannerTaskId ? (
+                        <span className="mt-1 inline-flex items-center gap-1 rounded-md border border-violet-400/50 bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-700 dark:border-violet-600/40 dark:bg-violet-950/30 dark:text-violet-300">
+                          🔗 Linked to:{" "}
+                          {plannerTaskOptions.find((task) => task.id === linkedPlannerTaskId)?.label ??
+                            "Planner task"}
+                        </span>
+                      ) : null}
                     </label>
                   </div>
                 ) : null}

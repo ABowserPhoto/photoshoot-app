@@ -4,6 +4,9 @@ import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { AlertCircle, Trash2 } from "lucide-react";
 import type { DragEvent, ReactNode } from "react";
 
+import PostEngagementOverlay from "@/app/components/PostEngagementOverlay";
+import type { PostEngagementCounts } from "@/lib/postEngagement";
+
 type FeedSlot = {
   id: string;
   fileUrl: string;
@@ -28,6 +31,7 @@ type SchedulerFeedSlotProps = {
   onEdit: (index: number) => void;
   onNativeDrop: (localIndex: number, event: DragEvent<HTMLDivElement>) => void;
   platformIcon: (platform: string, className?: string) => ReactNode;
+  engagement?: PostEngagementCounts | null;
 };
 
 export default function SchedulerFeedSlot({
@@ -42,6 +46,7 @@ export default function SchedulerFeedSlot({
   onEdit,
   onNativeDrop,
   platformIcon,
+  engagement = null,
 }: SchedulerFeedSlotProps) {
   const isEmpty = slot === null;
 
@@ -138,7 +143,8 @@ export default function SchedulerFeedSlot({
               <AlertCircle className="h-3.5 w-3.5 text-red-500" aria-hidden />
             </span>
           ) : null}
-          <span className="absolute bottom-2 left-2 right-2 rounded bg-black/70 px-2 py-0.5 text-[10px] font-medium leading-snug text-zinc-100">
+          {slot.status === "published" ? <PostEngagementOverlay counts={engagement ?? null} /> : null}
+          <span className="pointer-events-none absolute bottom-2 left-2 right-2 z-[2] rounded bg-black/70 px-2 py-0.5 text-[10px] font-medium leading-snug text-zinc-100">
             {scheduledLabel}
           </span>
         </>

@@ -11,7 +11,10 @@ import {
   STD_PREPARE_ID as STD_PREPARE_REF,
   STD_TODO_ID as STD_TODO_REF,
 } from "@/lib/plannerStandardSubtasks";
-import type { PlannerAssignee } from "@/lib/plannerAssignees";
+import {
+  filterPlannerStaffProfiles,
+  type PlannerAssignee,
+} from "@/lib/plannerAssignees";
 import { getDirectoryFromFilePath, getElectronFilePath } from "@/lib/plannerFilePath";
 
 export const STD_PREPARE_ID = STD_PREPARE_REF;
@@ -30,6 +33,11 @@ export function createStandardPlannerSubtasks(taskTitle: string): PlannerSubTask
 }
 
 export type PlannerTaskLabel = "Studio" | "Photoshoot" | "Social Media" | null;
+
+export type PlannerPhotoshootOption = {
+  id: string;
+  label: string;
+};
 
 export type PlannerModalTask = {
   id: string;
@@ -51,6 +59,7 @@ export type PlannerModalTask = {
   assignedUsers?: PlannerAssignee[];
   clientName?: string;
   totalFee?: number | null;
+  photoshootId?: string | null;
 };
 
 export type PlannerModalSaveInput = {
@@ -65,6 +74,7 @@ export type PlannerModalSaveInput = {
   assignedUsers: PlannerAssignee[];
   clientName: string;
   totalFee: number | null;
+  photoshootId: string | null;
 };
 
 export type PlannerTemplateOption = {
@@ -80,6 +90,7 @@ type PlannerTaskModalProps = {
   isOpen: boolean;
   mode: "create" | "edit";
   templates: PlannerTemplateOption[];
+  photoshootOptions: PlannerPhotoshootOption[];
   assigneeOptions: PlannerAssignee[];
   isAdmin?: boolean;
   onClose: () => void;
@@ -109,6 +120,7 @@ export default function PlannerTaskModal({
   isOpen,
   mode,
   templates,
+  photoshootOptions,
   assigneeOptions,
   isAdmin = false,
   onClose,
@@ -141,36 +153,18 @@ export default function PlannerTaskModal({
   const [totalFeeInput, setTotalFeeInput] = useState(
     task?.totalFee != null && Number.isFinite(task.totalFee) ? String(task.totalFee) : ""
   );
+  const [photoshootId, setPhotoshootId] = useState<string | null>(task?.photoshootId ?? null);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [newSubtaskText, setNewSubtaskText] = useState("");
   const [isFileDropzoneActive, setIsFileDropzoneActive] = useState(false);
 
-  // Keep archived assignees visible when editing historical tasks.
-  const effectiveAssigneeOptions = useMemo(() => {
-    const byId = new Map<string, PlannerAssignee>();
-    for (const u of assigneeOptions) {
-      byId.set(u.id, u);
-    }
-    if (assignedTo && !byId.has(assignedTo)) {
-      const fromHistory = (task?.assignedUsers ?? []).find((u) => u.id === assignedTo);
-      byId.set(assignedTo, {
-        id: assignedTo,
-        name: fromHistory?.name
-          ? `${fromHistory.name} (archived)`
-          : `Archived user (${assignedTo.slice(0, 8)}…)`,
-      });
-    }
-    for (const u of assignedUsers) {
-      if (!byId.has(u.id)) {
-        byId.set(u.id, {
-          id: u.id,
-          name: `${u.name} (archived)`,
-          ...(u.avatar ? { avatar: u.avatar } : {}),
-        });
-      }
-    }
-    return Array.from(byId.values());
-  }, [assigneeOptions, assignedTo, assignedUsers, task?.assignedUsers]);
+  // Directory staff only. Saved task assignees are not merged in: a client collaborator
+  // has no role on the card, and must not become a menu option. Card initials still
+  // render from the task's saved assigned users.
+  const effectiveAssigneeOptions = useMemo(
+    () => filterPlannerStaffProfiles(assigneeOptions),
+    [assigneeOptions]
+  );
 
   const toggleCollaborator = (user: PlannerAssignee) => {
     setAssignedUsers((prev) => {
@@ -199,6 +193,7 @@ export default function PlannerTaskModal({
       setTotalFeeInput(
         task.totalFee != null && Number.isFinite(task.totalFee) ? String(task.totalFee) : ""
       );
+      setPhotoshootId(task.photoshootId ?? null);
     } else if (isCreateMode) {
       setTitle("");
       setDescription("");
@@ -211,6 +206,7 @@ export default function PlannerTaskModal({
       setAssignedUsers([]);
       setClientName("");
       setTotalFeeInput("");
+      setPhotoshootId(null);
     }
   }, [isOpen, task, isCreateMode]);
 
@@ -372,6 +368,7 @@ export default function PlannerTaskModal({
       assignedUsers: nextCollaborators,
       clientName: clientName.trim(),
       totalFee: parseTotalFee(totalFeeInput),
+      photoshootId,
     };
     if (isCreateMode) {
       onCreate(payload);
@@ -413,6 +410,7 @@ export default function PlannerTaskModal({
       assignedUsers,
       clientName: clientName.trim(),
       totalFee: parseTotalFee(totalFeeInput),
+      photoshootId: null,
     });
   };
 
@@ -543,6 +541,25 @@ export default function PlannerTaskModal({
             />
           </label>
         </div>
+
+        <label className="mt-4 block text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          Link Photoshoot
+          <select
+            value={photoshootId ?? ""}
+            onChange={(event) => setPhotoshootId(event.target.value || null)}
+            className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-normal normal-case tracking-normal text-zinc-900 outline-none ring-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+          >
+            <option value="">— No photoshoot —</option>
+            {photoshootId && !photoshootOptions.some((option) => option.id === photoshootId) ? (
+              <option value={photoshootId}>Linked photoshoot</option>
+            ) : null}
+            {photoshootOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
 
         <fieldset className="mt-4">
           <legend className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
