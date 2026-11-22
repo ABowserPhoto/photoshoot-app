@@ -41,13 +41,28 @@ export default function PostEngagementOverlay({
   return (
     <>
       {tile ? (
-        <span className="pointer-events-none absolute bottom-8 left-2 right-2 z-[1] truncate rounded bg-black/70 px-2 py-0.5 text-[10px] font-medium leading-snug text-zinc-100 md:hidden">
+        <span className="pointer-events-none absolute left-1/2 top-1/2 z-[3] max-w-[calc(100%-1rem)] -translate-x-1/2 -translate-y-1/2 rounded bg-black/70 px-2 py-0.5 text-center text-[10px] font-medium leading-snug text-zinc-100 md:hidden">
           {mobile}
         </span>
       ) : null}
-      <div className="pointer-events-none absolute inset-0 z-[1] hidden flex-col justify-end bg-gradient-to-t from-black/80 via-black/25 to-transparent p-2 pb-7 opacity-0 transition-opacity duration-200 group-hover:opacity-100 md:flex">
-        {primaryLine ? <p className="text-[11px] font-semibold leading-snug text-zinc-50">{primaryLine}</p> : null}
-        {extraLine ? <p className="mt-0.5 text-[10px] font-medium leading-snug text-zinc-200">{extraLine}</p> : null}
+      <div
+        className={`pointer-events-none absolute inset-0 z-[3] hidden opacity-0 transition-opacity duration-200 group-hover:opacity-100 md:flex ${
+          tile
+            ? "items-center justify-center px-2 text-center"
+            : "flex-col justify-end bg-gradient-to-t from-black/80 via-black/25 to-transparent p-2 pb-7"
+        }`}
+      >
+        {tile ? (
+          <div className="max-w-full rounded bg-black/70 px-2 py-1">
+            {primaryLine ? <p className="text-[11px] font-semibold leading-snug text-zinc-50">{primaryLine}</p> : null}
+            {extraLine ? <p className="mt-0.5 text-[10px] font-medium leading-snug text-zinc-200">{extraLine}</p> : null}
+          </div>
+        ) : (
+          <>
+            {primaryLine ? <p className="text-[11px] font-semibold leading-snug text-zinc-50">{primaryLine}</p> : null}
+            {extraLine ? <p className="mt-0.5 text-[10px] font-medium leading-snug text-zinc-200">{extraLine}</p> : null}
+          </>
+        )}
       </div>
     </>
   );
