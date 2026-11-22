@@ -10,10 +10,10 @@ import {
   moduleForPathname,
 } from "@/lib/appModules";
 import { loginHrefWithRedirect, shouldKeepModuleTreeMounted } from "@/lib/authRefresh";
+import { isUnauthenticatedAppPath } from "@/lib/passwordReset";
 
 function isUnguardedPath(pathname: string): boolean {
-  if (pathname === "/login" || pathname.startsWith("/login/")) return true;
-  if (pathname === "/gallery" || pathname.startsWith("/gallery/")) return true;
+  if (isUnauthenticatedAppPath(pathname)) return true;
   if (pathname === "/desktop-widget" || pathname.startsWith("/desktop-widget/")) return true;
   return false;
 }
