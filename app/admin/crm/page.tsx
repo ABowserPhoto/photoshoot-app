@@ -9,11 +9,12 @@ import { formatEuro } from "@/lib/adminStatsFormat";
 import type { UnpaidBillingItem } from "@/lib/crmUnpaidBilling";
 import { normalizeReminderDates } from "@/lib/crmReminderDates";
 import ClientManagerSection from "@/app/admin/crm/ClientManagerSection";
+import PricingEditorSection from "@/app/admin/crm/PricingEditorSection";
 import ReminderDraftedMarker from "@/app/admin/crm/ReminderDraftedMarker";
 import UserManagementSection from "@/app/admin/crm/UserManagementSection";
 import CreditNoteUploadModal from "@/app/components/CreditNoteUploadModal";
 
-type CrmTab = "billing" | "clients" | "users";
+type CrmTab = "billing" | "clients" | "pricing" | "users";
 type CrmToast = { message: string; variant: "success" | "error" };
 
 const REMINDER_FETCH_TIMEOUT_MS = 110_000;
@@ -50,6 +51,7 @@ function matchesUnpaidBillingSearch(item: UnpaidBillingItem, query: string): boo
 const TAB_ITEMS: { id: CrmTab; label: string }[] = [
   { id: "billing", label: "Unpaid Billing" },
   { id: "clients", label: "Client Manager" },
+  { id: "pricing", label: "Preise / Pricing" },
   { id: "users", label: "User Management" },
 ];
 
@@ -94,18 +96,23 @@ export default function AdminCrmPage() {
     }
   }, []);
 
+  const visibleTab = !authLoading && !isAdmin && activeTab === "users" ? "billing" : activeTab;
+
   useEffect(() => {
-    if (authLoading) {
+    if (authLoading || visibleTab !== "billing") {
       return;
     }
-    if (!isAdmin && activeTab === "users") {
-      setActiveTab("billing");
-      return;
-    }
-    if (activeTab === "billing") {
-      void loadUnpaid();
-    }
-  }, [activeTab, authLoading, isAdmin, loadUnpaid]);
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (!cancelled) {
+        await loadUnpaid();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, loadUnpaid, visibleTab]);
 
   const showToast = useCallback((message: string, variant: CrmToast["variant"] = "success") => {
     setToast({ message, variant });
@@ -242,7 +249,7 @@ export default function AdminCrmPage() {
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-violet-400">Admin CRM</p>
             <h1 className="mt-1 text-3xl font-semibold tracking-tight text-white">Billing & clients</h1>
             <p className="mt-2 max-w-2xl text-sm text-zinc-400">
-              Manage unpaid invoices, client relationships, and team access from one place.
+              Manage unpaid invoices, client relationships, pricing tiers, and team access from one place.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -265,7 +272,7 @@ export default function AdminCrmPage() {
 
         <nav className="flex flex-wrap gap-2 border-b border-zinc-800 pb-1">
           {TAB_ITEMS.filter((tab) => tab.id !== "users" || isAdmin).map((tab) => {
-            const isActive = activeTab === tab.id;
+            const isActive = visibleTab === tab.id;
             return (
               <button
                 key={tab.id}
@@ -289,7 +296,7 @@ export default function AdminCrmPage() {
           </div>
         ) : null}
 
-        {activeTab === "billing" ? (
+        {visibleTab === "billing" ? (
           <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 sm:p-6">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -453,17 +460,25 @@ export default function AdminCrmPage() {
           </section>
         ) : null}
 
-        {activeTab === "clients" ? (
+        {visibleTab === "clients" ? (
           <ClientManagerSection
-            active={activeTab === "clients"}
+            active={visibleTab === "clients"}
             onToast={(message) => showToast(message)}
             onError={setError}
           />
         ) : null}
 
-        {activeTab === "users" && isAdmin ? (
+        {visibleTab === "pricing" ? (
+          <PricingEditorSection
+            active={visibleTab === "pricing"}
+            onToast={(message) => showToast(message)}
+            onError={setError}
+          />
+        ) : null}
+
+        {visibleTab === "users" && isAdmin ? (
           <UserManagementSection
-            active={activeTab === "users"}
+            active={visibleTab === "users"}
             onToast={(message) => showToast(message)}
             onError={setError}
           />
