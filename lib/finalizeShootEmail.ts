@@ -1,3 +1,4 @@
+import { billingSignatureHtml, billingSignaturePlainLines } from "@/lib/billingMailbox";
 import { resolveFinalEmailCoverImageUrl } from "@/lib/emailTemplateAssets";
 
 function escapeHtml(value: string): string {
@@ -235,8 +236,7 @@ export function buildSeparateInvoiceEmailHtml(input: {
     ${linkBlock}
     <p>Vielen Dank für die gute Zusammenarbeit!</p>
     <p>Viele Grüße,<br>
-    Aaron Bowser<br>
-    Aaron Bowser Photography</p>
+    ${billingSignatureHtml()}</p>
   </div>
 </body>
 </html>`;
@@ -265,8 +265,7 @@ export function buildSeparateInvoiceEmailPlainText(input: {
     "Vielen Dank für die gute Zusammenarbeit!",
     "",
     "Viele Grüße,",
-    "Aaron Bowser",
-    "Aaron Bowser Photography"
+    ...billingSignaturePlainLines()
   );
   return lines.join("\n");
 }

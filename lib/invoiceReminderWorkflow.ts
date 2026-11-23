@@ -238,7 +238,7 @@ export async function createInvoiceReminderDraftForTask(
     reminder.bodyHtml,
     pdfBuffer,
     attachmentFileName,
-    { plainTextFallback: reminder.bodyPlain }
+    { plainTextFallback: reminder.bodyPlain, mailbox: "billing" }
   );
 
   const recorded = await recordContactReminderDraft(supabase, {
@@ -338,7 +338,7 @@ export async function createInvoiceReminderDraftForLexofficeInvoice(
     reminder.bodyHtml,
     pdfBuffer,
     attachmentFileName,
-    { plainTextFallback: reminder.bodyPlain }
+    { plainTextFallback: reminder.bodyPlain, mailbox: "billing" }
   );
 
   const recorded = await recordContactReminderDraft(supabase, {

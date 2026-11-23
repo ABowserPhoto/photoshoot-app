@@ -182,7 +182,7 @@ export default function AdminCrmPage() {
               : row
           )
         );
-        showToast(json.message ?? "HTML Draft created in Gmail!");
+        showToast(json.message ?? "Reminder draft saved in the billing mailbox.");
       }
     } catch (err) {
       console.error("[crm] generate reminder failed:", err);

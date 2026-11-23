@@ -119,7 +119,7 @@ export async function POST(request: Request) {
         invoiceNumber: result.invoiceNumber,
         crmContactId: result.crmContactId,
         reminderDates: result.reminderDates,
-        message: "HTML Draft created in Gmail!",
+        message: "Reminder draft saved in the billing mailbox.",
       });
     }
 
@@ -166,7 +166,7 @@ export async function POST(request: Request) {
       invoiceNumber: result.invoiceNumber,
       crmContactId: result.crmContactId,
       reminderDates: result.reminderDates,
-      message: "HTML Draft created in Gmail!",
+      message: "Reminder draft saved in the billing mailbox.",
     });
   } catch (error) {
     console.error("[generate-reminder] Unhandled error:", error);
