@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start -H 0.0.0.0",
     "lint": "eslint",
+    "test": "node --experimental-strip-types --import ./lib/registerTestAlias.mjs --test lib/*.test.ts",
     "worker": "node ./scripts/processing-worker.mjs",
     "dev:electron": "wait-on http://localhost:3000 && electron .",
     "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",

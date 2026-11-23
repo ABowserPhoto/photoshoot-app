@@ -1,3 +1,5 @@
+import { billingSignaturePlainLines } from "@/lib/billingMailbox";
+
 export type InvoiceReminderEmailDraft = {
   subject: string;
   bodyPlain: string;
@@ -93,8 +95,7 @@ export function generateInvoiceReminderEmail(input: {
     "Sollten Sie den Betrag in der Zwischenzeit bereits überwiesen haben, betrachten Sie diese Nachricht bitte als gegenstandslos.",
     "",
     "Viele Grüße,",
-    "Aaron Bowser",
-    "Aaron Bowser Photography",
+    ...billingSignaturePlainLines(),
   ].join("\n");
 
   return {

@@ -1547,7 +1547,7 @@ export default function KanbanBoard({
           message: payload.skippedInvoice
             ? "Drive folder created & draft saved (no invoice)."
             : payload.separateInvoiceEmail
-              ? "Invoice created — 2 Gmail drafts ready (gallery + invoice)."
+              ? "Invoice created — 2 Gmail drafts ready (gallery in the studio mailbox, invoice in the billing mailbox)."
               : "Invoice created & draft saved!",
           variant: "success",
         });

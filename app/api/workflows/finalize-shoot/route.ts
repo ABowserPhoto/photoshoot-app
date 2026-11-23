@@ -390,17 +390,15 @@ export async function POST(request: Request) {
       console.info(`[finalize-shoot] Skipping Lexoffice steps for task ${input.taskId} (skipInvoice=true)`);
     }
 
-    const splitInvoiceEmail =
-      !input.skipInvoice &&
-      input.hasSeparateInvoiceEmail &&
-      Boolean(input.billingEmail) &&
-      Boolean(pdfBuffer);
+    const invoiceRecipient =
+      input.hasSeparateInvoiceEmail && input.billingEmail ? input.billingEmail : input.contactEmail;
+    const draftInvoiceSeparately = !input.skipInvoice && Boolean(pdfBuffer);
 
     currentStep = "gmail-create-draft";
     console.info(
       `[finalize-shoot] Creating Gmail draft(s) for task ${input.taskId}${
-        splitInvoiceEmail
-          ? ` (gallery→${input.contactEmail}; invoice→${input.billingEmail})`
+        draftInvoiceSeparately
+          ? ` (gallery→${input.contactEmail}; invoice→${invoiceRecipient} via billing mailbox)`
           : ` (gallery→${input.contactEmail})`
       }`
     );
@@ -412,33 +410,30 @@ export async function POST(request: Request) {
     });
     const htmlBody = buildFinalizeShootEmailHtml({
       googleDriveLink,
-      // When invoice goes to a separate address, strip invoice wording/attachment from gallery mail.
-      includeInvoiceNote: !input.skipInvoice && !splitInvoiceEmail,
+      // The invoice PDF is its own billing-mailbox draft, never attached to the gallery mail.
+      includeInvoiceNote: false,
       photoshootType: input.photoshootType,
     });
     const plainTextFallback = buildFinalizeShootEmailPlainText({
       googleDriveLink,
-      includeInvoiceNote: !input.skipInvoice && !splitInvoiceEmail,
+      includeInvoiceNote: false,
     });
-    // Gallery / deliverables → contact person (+ CC). Never the billing inbox.
+    // Gallery / deliverables stay in the studio mailbox, to the contact person (+ CC).
     const gmailDraft = await createGmailDraft(
       input.contactEmail,
       subject,
       htmlBody,
-      splitInvoiceEmail ? undefined : pdfBuffer,
-      splitInvoiceEmail
-        ? undefined
-        : pdfBuffer
-          ? `Invoice-${sanitizeFileName(input.shootName)}.pdf`
-          : undefined,
+      undefined,
+      undefined,
       {
         plainTextFallback,
         ...(input.ccEmails ? { cc: input.ccEmails } : {}),
+        mailbox: "workspace",
       }
     );
 
     let invoiceGmailDraftId: string | null = null;
-    if (splitInvoiceEmail && pdfBuffer && input.billingEmail) {
+    if (draftInvoiceSeparately && pdfBuffer) {
       currentStep = "gmail-create-invoice-draft";
       const invoiceNumber = invoice?.voucherNumber?.trim() || invoice?.id || "Rechnung";
       const billingEntityName = input.billingEntityName || input.invoiceName || "Kunde";
@@ -463,14 +458,14 @@ export async function POST(request: Request) {
         photoshootDate: input.photoshootDate,
         invoiceViewUrl: invoice?.invoiceViewUrl,
       });
-      // Invoice → billing entity email; greeting uses billing entity name (not contact person).
+      // Invoice → billing inbox when split, otherwise the contact email. Always from Monie.
       const invoiceDraft = await createGmailDraft(
-        input.billingEmail,
+        invoiceRecipient,
         invoiceSubject,
         invoiceHtml,
         pdfBuffer,
         `Invoice-${sanitizeFileName(invoiceNumber)}.pdf`,
-        { plainTextFallback: invoicePlain }
+        { plainTextFallback: invoicePlain, mailbox: "billing" }
       );
       invoiceGmailDraftId = invoiceDraft.id;
     }
@@ -518,7 +513,7 @@ export async function POST(request: Request) {
       lexofficeInvoiceViewUrl: invoice?.invoiceViewUrl ?? null,
       gmailDraftId: gmailDraft.id,
       invoiceGmailDraftId,
-      separateInvoiceEmail: splitInvoiceEmail,
+      separateInvoiceEmail: Boolean(invoiceGmailDraftId),
     });
   } catch (error) {
     const message = toErrorMessage(error);

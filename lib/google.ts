@@ -6,6 +6,10 @@ import { domainToASCII } from "node:url";
 import { google } from "googleapis";
 import type { JWT } from "google-auth-library";
 
+import {
+  draftEnvelopeForMailbox,
+  type GmailDraftMailbox,
+} from "@/lib/billingMailbox";
 import { guessDeliverableMimeType, isDeliverableFileName } from "@/lib/deliverableFiles";
 
 const GOOGLE_SCOPES = [
@@ -34,7 +38,7 @@ const GOOGLE_DRIVE_UPLOAD_DELAY_MS = 300;
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-let jwtClient: JWT | null = null;
+const jwtClients = new Map<string, JWT>();
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -68,17 +72,21 @@ function getPrivateKey(): string {
   return key;
 }
 
-function getJwtClient(): JWT {
-  if (!jwtClient) {
-    const privateKey = getPrivateKey();
-    jwtClient = new google.auth.JWT({
-      email: requiredEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL"),
-      key: privateKey,
-      scopes: [...GOOGLE_SCOPES],
-      subject: requiredEnv("GOOGLE_WORKSPACE_USER_EMAIL"),
-    });
+function getJwtClient(subject?: string): JWT {
+  const impersonatedUser = subject?.trim() || requiredEnv("GOOGLE_WORKSPACE_USER_EMAIL");
+  const cached = jwtClients.get(impersonatedUser);
+  if (cached) {
+    return cached;
   }
-  return jwtClient;
+
+  const client = new google.auth.JWT({
+    email: requiredEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL"),
+    key: getPrivateKey(),
+    scopes: [...GOOGLE_SCOPES],
+    subject: impersonatedUser,
+  });
+  jwtClients.set(impersonatedUser, client);
+  return client;
 }
 
 async function getGoogleClients() {
@@ -179,7 +187,23 @@ function sanitizeAttachmentFileName(fileName: string): string {
   return trimmed.replace(/[^\w.\-() ]+/g, "_");
 }
 
-function buildRawEmail(options: {
+function addressHeaders(options: {
+  from: string;
+  to: string;
+  subject: string;
+  cc: string;
+  replyTo: string;
+}): string[] {
+  return [
+    `From: ${options.from}`,
+    `To: ${options.to}`,
+    ...(options.cc ? [`Cc: ${options.cc}`] : []),
+    ...(options.replyTo ? [`Reply-To: ${options.replyTo}`] : []),
+    `Subject: ${options.subject}`,
+  ];
+}
+
+export function buildRawEmail(options: {
   from: string;
   to: string;
   subject: string;
@@ -188,25 +212,24 @@ function buildRawEmail(options: {
   attachmentBuffer?: Buffer;
   attachmentFileName?: string;
   cc?: string;
+  replyTo?: string;
 }): string {
   const from = sanitizeHeaderValue(options.from);
   const to = sanitizeHeaderValue(options.to);
   const cc = options.cc?.trim() ? sanitizeHeaderValue(options.cc.trim()) : "";
+  const replyTo = options.replyTo?.trim() ? sanitizeHeaderValue(options.replyTo.trim()) : "";
   const subject = encodeSubject(options.subject);
   const htmlBody = options.htmlBody.replace(/\r?\n/g, "\r\n");
   const plainText = (options.plainTextFallback ?? "").replace(/\r?\n/g, "\r\n");
   const htmlBase64 = foldBase64(Buffer.from(htmlBody, "utf8").toString("base64"));
-  const ccHeader = cc ? [`Cc: ${cc}`] : [];
+  const headers = addressHeaders({ from, to, subject, cc, replyTo });
 
   if (!options.attachmentBuffer) {
     if (plainText) {
       const alternativeBoundary = `alt_${Date.now()}_${Math.random().toString(36).slice(2)}`;
       const plainBase64 = foldBase64(Buffer.from(plainText, "utf8").toString("base64"));
       return [
-        `From: ${from}`,
-        `To: ${to}`,
-        ...ccHeader,
-        `Subject: ${subject}`,
+        ...headers,
         "MIME-Version: 1.0",
         `Content-Type: multipart/alternative; boundary="${alternativeBoundary}"`,
         "",
@@ -226,10 +249,7 @@ function buildRawEmail(options: {
     }
 
     return [
-      `From: ${from}`,
-      `To: ${to}`,
-      ...ccHeader,
-      `Subject: ${subject}`,
+      ...headers,
       "MIME-Version: 1.0",
       'Content-Type: text/html; charset="UTF-8"',
       "Content-Transfer-Encoding: base64",
@@ -244,10 +264,7 @@ function buildRawEmail(options: {
   const attachmentBase64 = foldBase64(options.attachmentBuffer.toString("base64"));
 
   const parts = [
-    `From: ${from}`,
-    `To: ${to}`,
-    ...ccHeader,
-    `Subject: ${subject}`,
+    ...headers,
     "MIME-Version: 1.0",
     `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
     "",
@@ -410,7 +427,7 @@ export async function createGmailDraft(
   htmlBody: string,
   attachmentBuffer?: Buffer,
   attachmentFileName?: string,
-  options?: { plainTextFallback?: string; cc?: string }
+  options?: { plainTextFallback?: string; cc?: string; mailbox?: GmailDraftMailbox }
 ): Promise<CreateGmailDraftResult> {
   // Bare addr-spec only — never `"Name" <undefined>` / empty angle brackets.
   const recipient = normalizeGmailRecipient(to);
@@ -429,9 +446,13 @@ export async function createGmailDraft(
     throw new Error("attachmentBuffer cannot be empty when provided.");
   }
 
-  const { gmail, senderEmail } = await getGoogleClients();
+  const mailbox = options?.mailbox ?? "workspace";
+  const envelope = draftEnvelopeForMailbox(mailbox, requiredEnv("GOOGLE_WORKSPACE_USER_EMAIL"));
+  const auth = getJwtClient(envelope.subjectUser);
+  await auth.authorize();
+  const gmail = google.gmail({ version: "v1", auth });
   const rawEmail = buildRawEmail({
-    from: senderEmail,
+    from: envelope.from,
     to: recipient,
     subject,
     htmlBody,
@@ -439,6 +460,7 @@ export async function createGmailDraft(
     attachmentBuffer,
     attachmentFileName,
     cc: options?.cc,
+    replyTo: envelope.replyTo,
   });
 
   try {

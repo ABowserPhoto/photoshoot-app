@@ -368,6 +368,7 @@ export async function runGmailInvoiceScanner(
   timeframe: string = DEFAULT_INVOICE_SCAN_TIMEFRAME
 ): Promise<InvoiceScannerRunResult> {
   const normalizedTimeframe = normalizeInvoiceScanTimeframe(timeframe);
+  // Incoming supplier invoices stay in the studio mailbox. Client invoice drafts use the billing mailbox.
   const gmail = await getGmailReadonlyClient();
   const processedLabelId = await ensureLexofficeProcessedLabel(gmail);
   const query = buildGmailQuery(normalizedTimeframe);
